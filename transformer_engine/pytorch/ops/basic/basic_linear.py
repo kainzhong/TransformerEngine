@@ -995,7 +995,8 @@ class BasicLinear(BasicOperation):
         if ctx.requires_grad:
             if is_cpu_offload_enabled():
                 mark_activation_offload(x_local)
-            ctx.save_for_backward(x_local, w)
+            # Only save w if it's allocated somewhere else
+            ctx.save_for_backward(x_local, w if w is not self.weight else None)
             ctx.with_quantized_compute = with_quantized_compute
             ctx.input_quantizer = input_quantizer
             ctx.weight_quantizer = weight_quantizer
@@ -1015,6 +1016,8 @@ class BasicLinear(BasicOperation):
 
         # Saved tensors from forward pass
         (x_local, w) = ctx.saved_tensors
+        if w is None:
+            w = self.weight
 
         # Megatron-LM wgrad fusion
         # Note: Get grad tensor from param so we can accumulate
@@ -1058,6 +1061,9 @@ class BasicLinear(BasicOperation):
 
         # Clear input tensor if possible
         clear_tensor_data(x_local)
+        if w is not self.weight:
+            # w is allocated somewhere else
+            clear_tensor_data(w)
 
         # Megatron-LM wgrad fusion
         # Note: Return dummy tensor for grad weight if needed.

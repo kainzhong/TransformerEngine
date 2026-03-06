@@ -181,7 +181,7 @@ class Float8TensorStorage(QuantizedTensorStorage):
 
     def view(self, shape: torch.Size):
         # pylint: disable=missing-function-docstring
-        out_data = self._data.view(shape)
+        out_data = self._data.view(shape).detach() # Otherwise pytorch's autograd may give us surprises
         out_transpose = None if self._transpose_invalid else self._transpose
         if out_transpose is not None:
             out_transpose_shape = out_transpose.size()
