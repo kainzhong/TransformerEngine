@@ -214,9 +214,6 @@ def test_mhc_projection(cfg: MHCConfig, dtype):
     N = 2*n + n*n
 
     tols = get_tols(dtype)
-    # TF32 matmul error grows as sqrt(K) due to rounding in partial products.
-    # Two TF32 implementations (triton vs cuBLAS) with different tile sizes diverge
-    # by ~sqrt(nC) * eps_tf32. Scale atol accordingly relative to the baseline K=4096.
     if dtype == torch.float32 and torch.backends.cuda.matmul.allow_tf32:
         # TF32 error in a K-dim dot product grows as sqrt(K)*eps_tf32 (random walk over K roundings).
         # Two TF32 implementations with different tile orderings diverge by this amount.
