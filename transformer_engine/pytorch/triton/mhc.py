@@ -270,6 +270,10 @@ class mHCSinkhornOp(torch.autograd.Function):
         """
         B, T, _ = H.shape
 
+        # TODO: I'm not sure how we are supposed to handle amp...
+        ctx.h_dtype = H.dtype
+        H = H.to(torch.float32)
+
         H_res = H[:, :, 2*n:2*n+n*n] # Extract the (B, T, n*n) part
         H_res = H_res.contiguous().clone().view(B*T, n*n) # (B*T, n*n)
         assert n == 4, "This implementation only supports n=4 for now due to BLOCK_SIZE constraints"
@@ -330,6 +334,7 @@ class mHCSinkhornOp(torch.autograd.Function):
 
         grad_H  = grad_out.clone()
         grad_H[:, :, 2*n:2*n+n*n] = grad_res.view(B, T, n*n)
+        grad_H = grad_H.to(ctx.h_dtype) # Cast back to the original dtype of H
 
         return grad_H, None, None
 
