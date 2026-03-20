@@ -31,29 +31,30 @@ def projection_config():
 @triton.jit
 def _mhc_projection_fwd_fused(
     x_ptr, # (M, K)
-    w_ptr, # (K, N)
-    y_ptr, # (M, 32)
+    phi_ptr, # (N, K)
+    h_ptr, # (M, 32)
     r_ptr, # (M,)
     M, N, K,
     stride_xm, stride_xk: tl.constexpr,
-    stride_wk: tl.constexpr, stride_wn,
-    stride_ym: tl.constexpr, stride_yn: tl.constexpr,
+    stride_phin, stride_phik: tl.constexpr,
+    stride_hm: tl.constexpr, stride_hn: tl.constexpr,
     stride_r: tl.constexpr,
     # Meta-parameters
     BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_K: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     out_dtype: tl.constexpr,
+    precision: tl.constexpr,
 ):
     """
     Kernel for computing the matmul Y = X x W and r = (X * X).sum(dim=1) / sqrt(K) in a fused manner.
-    X has shape (M, K), W has shape (K, N) and Y has shape (M, N)
+    X has shape (M, K), W has shape (N, K) which represent a col-major (K, N) and Y has shape (M, N)
     r has shape (M,)
     Note: W is column-major so we can have coalesced memory access when loading W.
 
     Each block computes a row of X and the full W, since N is very small here (2*n + n^2, where n is the width of Hyper-Connection and is at most 4)
     We don't need to use grouped ordering because the output MxN has small width which is the same as one block's width
     """
-    eps = 1e-8
+    eps = 1e-5
     K_sqrt = tl.sqrt(tl.cast(K, tl.float32))
 
     pid_m = tl.program_id(axis=0)
@@ -61,10 +62,10 @@ def _mhc_projection_fwd_fused(
     tl.assume(pid_m >= 0)
     tl.assume(stride_xm > 0)
     tl.assume(stride_xk == 1)
-    tl.assume(stride_wn > 0)
-    tl.assume(stride_wk == 1)
-    tl.assume(stride_ym == 32)
-    tl.assume(stride_yn == 1)
+    tl.assume(stride_phin == K)
+    tl.assume(stride_phik == 1)
+    tl.assume(stride_hm == 32)
+    tl.assume(stride_hn == 1)
     tl.assume(stride_r == 1)
 
     tl.assume(BLOCK_SIZE_M % 32 == 0)
@@ -75,25 +76,25 @@ def _mhc_projection_fwd_fused(
     offs_n_full = tl.arange(0, BLOCK_SIZE_N)
     mask_m = offs_m < M
 
-    y_acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+    h_acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
     r_acc = tl.zeros((BLOCK_SIZE_M,), dtype=tl.float32) + eps
 
     for k_start in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
         k_offs = k_start * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
         mask_k = k_offs < K
         x_ptrs = x_ptr + offs_m[:, None] * stride_xm + k_offs[None, :] * stride_xk
-        x = tl.load(x_ptrs, mask=mask_m[:, None] & mask_k[None, :], other=0.0)
-        w_ptrs = w_ptr + k_offs[:, None] * stride_wk + offs_n_full[None, :] * stride_wn
-        w = tl.load(w_ptrs, mask=mask_k[:, None] & (offs_n_full[None, :] < N), other=0.0)
+        x = tl.load(x_ptrs, mask=mask_m[:, None] & mask_k[None, :], other=0.0) # (BLOCK_SIZE_M, BLOCK_SIZE_K)
+        phi_ptrs = phi_ptr + offs_n_full[:, None] * stride_phin + k_offs[None, :] * stride_phik
+        phi = tl.load(phi_ptrs, mask=(offs_n_full[:, None] < N) & mask_k[None, :], other=0.0) # (BLOCK_SIZE_N, BLOCK_SIZE_K), loaded as column-major
+        phi = tl.trans(phi, (1, 0)) # ( BLOCK_SIZE_K, BLOCK_SIZE_N)
         # RMSNorm denominator computation
         r_acc += tl.sum((x * x).to(tl.float32), axis=1).to(r_acc.dtype)
         # Matrix multiplication
-        y_acc = tl.dot(x, w, y_acc, input_precision="tf32", out_dtype=tl.float32)
-    y = y_acc.to(out_dtype)
+        h_acc = tl.dot(x, phi, h_acc, input_precision=precision, out_dtype=tl.float32)
+    h = h_acc.to(out_dtype)
 
-    y_ptrs = y_ptr + offs_m[:, None] * stride_ym + offs_n_full[None, :] * stride_yn
-    tl.store(y_ptrs, y, mask=mask_m[:, None])
-
+    h_ptrs = h_ptr + offs_m[:, None] * stride_hm + offs_n_full[None, :] * stride_hn
+    tl.store(h_ptrs, h, mask=mask_m[:, None])
     offs_rm = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M))
     masks_rm = offs_rm < M
     offs_rm %= M
@@ -108,16 +109,16 @@ def _mhc_projection_fwd_fused(
 @triton.jit
 def _mhc_projection_bwd_fused(
     x_ptr, dx_ptr, # (M, K)
-    wT_ptr, # (N, K)
-    dy_ptr, # (M, N)
+    phi_ptr, # (N, K)
+    dh_ptr, # (M, N)
     dr_ptr, # (M,)
     factor, # scalar
     M, N, K,
     stride_xm, stride_xk: tl.constexpr,
     stride_dxm, stride_dxk: tl.constexpr,
-    stride_wTn, stride_wTk: tl.constexpr,
-    stride_dwTn, stride_dwTk: tl.constexpr,
-    stride_dym: tl.constexpr, stride_dyn: tl.constexpr,
+    stride_phin, stride_phik: tl.constexpr,
+    stride_dphin, stride_dphik: tl.constexpr,
+    stride_dhm: tl.constexpr, stride_dhn: tl.constexpr,
     stride_dr: tl.constexpr,
     # Meta-parameters
     BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_K: tl.constexpr,
@@ -136,10 +137,12 @@ def _mhc_projection_bwd_fused(
     tl.assume(pid_k >= 0)
     tl.assume(stride_xm > 0)
     tl.assume(stride_xk == 1)
-    tl.assume(stride_dym == 32)
-    tl.assume(stride_dyn == 1)
-    tl.assume(stride_dwTn == K)
-    tl.assume(stride_dwTk == 1)
+    tl.assume(stride_dhm == 32)
+    tl.assume(stride_dhn == 1)
+    tl.assume(stride_phin == K)
+    tl.assume(stride_phik == 1)
+    tl.assume(stride_dphin == K)
+    tl.assume(stride_dphik == 1)
 
     tl.assume(BLOCK_SIZE_M % 32 == 0)
     tl.assume(BLOCK_SIZE_K % 32 == 0)
@@ -154,15 +157,15 @@ def _mhc_projection_bwd_fused(
     x_ptrs = x_ptr + offs_m[:, None] * stride_xm + offs_k[None, :] * stride_xk
     x = tl.load(x_ptrs, mask=mask_m[:, None] & mask_k[None, :], other=0.0) # (BLOCK_SIZE_M, BLOCK_SIZE_K)
 
-    dy_ptrs = dy_ptr + offs_m[:, None] * stride_dym + offs_n_full[None, :] * stride_dyn
-    dy = tl.load(dy_ptrs, mask=mask_m[:, None] & (offs_n_full[None, :] < N), other=0.0) # (BLOCK_SIZE_M, BLOCK_SIZE_N)
+    dh_ptrs = dh_ptr + offs_m[:, None] * stride_dhm + offs_n_full[None, :] * stride_dhn
+    dh = tl.load(dh_ptrs, mask=mask_m[:, None] & (offs_n_full[None, :] < N), other=0.0) # (BLOCK_SIZE_M, BLOCK_SIZE_N)
 
-    wT_ptrs = wT_ptr + offs_n_full[:, None] * stride_wTn + offs_k[None, :] * stride_wTk
+    phi_ptrs = phi_ptr + offs_n_full[:, None] * stride_phin + offs_k[None, :] * stride_phik
     offs_dr = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
     dr_ptrs = dr_ptr + offs_dr * stride_dr
 
-    wT = tl.load(wT_ptrs, mask=(offs_n_full[:, None] < N) & mask_k[None, :], other=0.0) # (BLOCK_SIZE_N, BLOCK_SIZE_K)
-    dx = tl.dot(dy, wT, input_precision="tf32", out_dtype=tl.float32) # (BLOCK_SIZE_M, BLOCK_SIZE_K)
+    phi = tl.load(phi_ptrs, mask=(offs_n_full[:, None] < N) & mask_k[None, :], other=0.0) # (BLOCK_SIZE_N, BLOCK_SIZE_K)
+    dx = tl.dot(dh, phi, input_precision="tf32", out_dtype=tl.float32) # (BLOCK_SIZE_M, BLOCK_SIZE_K)
     dr = tl.load(dr_ptrs, mask=offs_dr < M, other=0.0) # (BLOCK_SIZE_M,)
     dx += x * dr[:, None] * factor
 

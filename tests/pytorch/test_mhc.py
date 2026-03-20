@@ -20,7 +20,7 @@ seed = 1234
 reset_rng_states()
 
 # Enable TF32 for matmul to ensure consistency between the fused and reference implementations
-torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cuda.matmul.allow_tf32 = False
 
 @torch.compile
 def mHCElementwiseRef(H, alpha, beta, r, n):
@@ -116,17 +116,17 @@ def mHCProjectionRef(x, phi):
     Reference operator for mHC's projection building operation.
 
     x: (B, T, nC)
-    phi: (nC, 2n + n^2), which consists of the following matrices
-        - phi_pre: (nC, n)
-        - phi_post: (nC, n)
-        - phi_res: (nC, n^2)
+    phi: (2n + n^2, nC), which consists of the following matrices
+        - phi_pre: (n, nC)
+        - phi_post: (n, nC)
+        - phi_res: (n^2, nC)
     n: number of Hyper Connection streams
     C: hidden dimension per stream
     """
-    eps = 1e-8
+    eps = 1e-5
 
     B, T, nC = x.shape
-    Hs = x @ phi  # (B, T, 2n + n^2)
+    Hs = x @ phi.T  # (B, T, 2n + n^2)
     norm = torch.sum(x * x, dim=2)
     r = norm / (nC ** 0.5)  # (B, T)
 
@@ -201,10 +201,11 @@ mhc_configs = [
 ]
 
 def get_tols(dtype):
-    if dtype == torch.float32 and not torch.backends.cuda.matmul.allow_tf32:
-        return dict(atol=1e-4, rtol=1e-4)
-    # Allow higher tolerance for tf32 & bf16 due to their higher numerical error, especially in larger matrix multiplications.
-    return dict(atol=1e-1, rtol=1e-1)
+    if dtype == torch.bfloat16:
+        tols = dict(atol=2.5e-2, rtol=2.5e-2)
+    else:
+        tols = dict(atol=5e-3, rtol=5e-3)
+    return tols
 
 @pytest.mark.parametrize("cfg", mhc_configs, ids=MHCConfig.desc)
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
@@ -214,23 +215,17 @@ def test_mhc_projection(cfg: MHCConfig, dtype):
     N = 2*n + n*n
 
     tols = get_tols(dtype)
-    if dtype == torch.float32 and torch.backends.cuda.matmul.allow_tf32:
-        # TF32 error in a K-dim dot product grows as sqrt(K)*eps_tf32 (random walk over K roundings).
-        # Two TF32 implementations with different tile orderings diverge by this amount.
-        # eps_tf32 = 2^-10 ≈ 1e-3, safety factor ~2 for tail coverage.
-        atol = 2e-3 * (nC ** 0.5)
-        tols = dict(atol=atol, rtol=tols['rtol'])
+    use_tf32 = (dtype == torch.bfloat16) # For fp32 we use ieee precision
 
     x = torch.randn(B, T, nC, device='cuda', requires_grad=True, dtype=dtype)
-    phi_padded_T = torch.randn(32, nC, dtype=dtype, requires_grad=True, device='cuda')
-    phi_padded = phi_padded_T.T # Column-major for the fused op
-    phi = phi_padded[:, :N]
+    phi = torch.randn(N, nC, dtype=dtype, requires_grad=True, device='cuda')
 
     x_ref = x.detach().clone().requires_grad_(True)
     phi_ref = phi.detach().clone().requires_grad_(True)
 
     ref_out_Hs, ref_out_r = mHCProjectionRef(x_ref, phi_ref)
-    fused_out_Hs_padded, fused_out_r = mHCProjectionOp.apply(x, phi_padded)
+    fused_out_Hs_padded, fused_out_r = mHCProjectionOp.apply(x, phi, use_tf32)
+    print(f"fused_out_Hs_padded shape: {fused_out_Hs_padded.shape}, fused_out_r shape: {fused_out_r.shape}")
     fused_out_Hs = fused_out_Hs_padded[:, :, :N]
 
     torch.testing.assert_close(fused_out_Hs, ref_out_Hs, **tols)
@@ -240,7 +235,7 @@ def test_mhc_projection(cfg: MHCConfig, dtype):
     (fused_out_Hs.sum() + fused_out_r.sum()).backward()
 
     torch.testing.assert_close(x.grad, x_ref.grad, **tols)
-    torch.testing.assert_close(phi_padded_T.grad.T[:, :N], phi_ref.grad, **tols)
+    torch.testing.assert_close(phi.grad, phi_ref.grad, **tols)
 
 @pytest.mark.parametrize("cfg", mhc_configs, ids=MHCConfig.desc)
 @pytest.mark.parametrize("dtype", [torch.float32], ids=["fp32"])
