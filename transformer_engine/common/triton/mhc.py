@@ -44,9 +44,10 @@ def _mhc_projection_fwd_fused(
     BLOCK_SIZE_N: tl.constexpr,
     out_dtype: tl.constexpr,
     precision: tl.constexpr,
+    eps: tl.constexpr,
 ):
     """
-    Kernel for computing the matmul Y = X x W and r = (X * X).sum(dim=1) / sqrt(K) in a fused manner.
+    Kernel for computing the matmul Y = X x W and r = sqrt(((X * X).mean(dim=1) + eps) / K) in a fused manner.
     X has shape (M, K), W has shape (N, K) which represent a col-major (K, N) and Y has shape (M, N)
     r has shape (M,)
     Note: W is column-major so we can have coalesced memory access when loading W.
@@ -54,8 +55,6 @@ def _mhc_projection_fwd_fused(
     Each block computes a row of X and the full W, since N is very small here (2*n + n^2, where n is the width of Hyper-Connection and is at most 4)
     We don't need to use grouped ordering because the output MxN has small width which is the same as one block's width
     """
-    eps = 1e-5
-    K_sqrt = tl.sqrt(tl.cast(K, tl.float32))
 
     pid_m = tl.program_id(axis=0)
 
@@ -77,7 +76,7 @@ def _mhc_projection_fwd_fused(
     mask_m = offs_m < M
 
     h_acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
-    r_acc = tl.zeros((BLOCK_SIZE_M,), dtype=tl.float32) + eps
+    r_acc = tl.zeros((BLOCK_SIZE_M,), dtype=tl.float32)
 
     for k_start in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
         k_offs = k_start * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
@@ -88,7 +87,9 @@ def _mhc_projection_fwd_fused(
         phi = tl.load(phi_ptrs, mask=(offs_n_full[:, None] < N) & mask_k[None, :], other=0.0) # (BLOCK_SIZE_N, BLOCK_SIZE_K), loaded as column-major
         phi = tl.trans(phi, (1, 0)) # ( BLOCK_SIZE_K, BLOCK_SIZE_N)
         # RMSNorm denominator computation
-        r_acc += tl.sum((x * x).to(tl.float32), axis=1).to(r_acc.dtype)
+        # r_acc += tl.sum((x * x).to(tl.float32), axis=1).to(r_acc.dtype)
+        x_fp32 = x.to(tl.float32)
+        r_acc += tl.sum(x_fp32 * x_fp32, axis=1)
         # Matrix multiplication
         h_acc = tl.dot(x, phi, h_acc, input_precision=precision, out_dtype=tl.float32)
     h = h_acc.to(out_dtype)
@@ -99,7 +100,7 @@ def _mhc_projection_fwd_fused(
     masks_rm = offs_rm < M
     offs_rm %= M
     r_ptrs = r_ptr + offs_rm * stride_r
-    r = (r_acc / K_sqrt).to(out_dtype)
+    r = tl.sqrt(r_acc / tl.cast(K, tl.float32) + eps).to(out_dtype)
     tl.store(r_ptrs, r, mask=masks_rm)
 
 @triton.autotune(
@@ -111,8 +112,7 @@ def _mhc_projection_bwd_fused(
     x_ptr, dx_ptr, # (M, K)
     phi_ptr, # (N, K)
     dh_ptr, # (M, N)
-    dr_ptr, # (M,)
-    factor, # scalar
+    r_ptr, dr_ptr, # (M,)
     M, N, K,
     stride_xm, stride_xk: tl.constexpr,
     stride_dxm, stride_dxk: tl.constexpr,
@@ -126,7 +126,6 @@ def _mhc_projection_bwd_fused(
 ):
     """
     This computes 
-    - dX = dY @ W^T + X * dr * factor: (M, K) = (M, N) @ (N, K) + (M, K) * (M,) * (1,)
     Each block handles (BLOCK_SIZE_M, N) of dY and (N, BLOCK_SIZE_K) of W^T, where N is covered by BLOCK_SIZE_N
     and also handles the element-wise multiplication part, and writes back (BLOCK_SIZE_M, BLOCK_SIZE_K) of dX each time
     """
@@ -161,13 +160,16 @@ def _mhc_projection_bwd_fused(
     dh = tl.load(dh_ptrs, mask=mask_m[:, None] & (offs_n_full[None, :] < N), other=0.0) # (BLOCK_SIZE_M, BLOCK_SIZE_N)
 
     phi_ptrs = phi_ptr + offs_n_full[:, None] * stride_phin + offs_k[None, :] * stride_phik
-    offs_dr = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
-    dr_ptrs = dr_ptr + offs_dr * stride_dr
-
+    offs_r = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+    r_ptrs = r_ptr + offs_r * stride_dr
+    dr_ptrs = dr_ptr + offs_r * stride_dr
+    
     phi = tl.load(phi_ptrs, mask=(offs_n_full[:, None] < N) & mask_k[None, :], other=0.0) # (BLOCK_SIZE_N, BLOCK_SIZE_K)
     dx = tl.dot(dh, phi, input_precision="tf32", out_dtype=tl.float32) # (BLOCK_SIZE_M, BLOCK_SIZE_K)
-    dr = tl.load(dr_ptrs, mask=offs_dr < M, other=0.0) # (BLOCK_SIZE_M,)
-    dx += x * dr[:, None] * factor
+    dr = tl.load(dr_ptrs, mask=offs_r < M, other=0.0) # (BLOCK_SIZE_M,)
+    r = tl.load(r_ptrs, mask=offs_r < M, other=1.0) # (BLOCK_SIZE_M,)
+    r_scaled = dr / (tl.cast(K, tl.float32) * r) # (BLOCK_SIZE_M,)
+    dx += x * r_scaled[:, None]
 
     dx_ptrs = dx_ptr + offs_m[:, None] * stride_dxm + offs_k[None, :] * stride_dxk
     dx = dx.to(x.dtype)

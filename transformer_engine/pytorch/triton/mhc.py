@@ -73,7 +73,8 @@ class mHCProjectionOp(torch.autograd.Function):
                 stride_r=1, # strides for r, which is a 1D tensor
                 BLOCK_SIZE_N=32,
                 out_dtype=tl.float32 if x.dtype == torch.float32 else tl.bfloat16,
-                precision="tf32"
+                precision="tf32",
+                eps=torch.finfo(torch.float32).eps,
             )
         else:
             _mhc_projection_fwd_fused[grid](
@@ -88,10 +89,11 @@ class mHCProjectionOp(torch.autograd.Function):
                 stride_r=1, # strides for r, which is a 1D tensor
                 BLOCK_SIZE_N=32,
                 out_dtype=tl.float32 if x.dtype == torch.float32 else tl.bfloat16,
-                precision="ieee"
+                precision="ieee",
+                eps=torch.finfo(torch.float32).eps,
             )
 
-        ctx.save_for_backward(x, phi)
+        ctx.save_for_backward(x, phi, r)
         ctx.phi_dtype = phi.dtype
 
         return H, r
@@ -120,7 +122,7 @@ class mHCProjectionOp(torch.autograd.Function):
             - x * (grad_r * 2  / sqrt(nC)): (B*T, nC) * (B*T, 1) = (B*T, nC)
         """
 
-        x, phi = ctx.saved_tensors # Note phi here is still column-major
+        x, phi, r = ctx.saved_tensors # Note phi here is still column-major
         B, T, nC = x.shape
         device = x.device
 
@@ -131,13 +133,10 @@ class mHCProjectionOp(torch.autograd.Function):
         x = x.view(M, K)
         grad_H = grad_H.contiguous().view(M, -1)
         grad_r = grad_r.contiguous().view(M,)
+        r = r.contiguous().view(M,)
 
         grad_x = torch.zeros((M, K), device=device, dtype=x.dtype)
-
         grad_phi = (grad_H[:, :N].T @ x).to(ctx.phi_dtype) # (2n + n^2, M) @ (M, nC) = (2n + n^2, nC), note that the last dimension of grad_H is already padded to 32
-
-        # Precompute this multiplier
-        grad_r_multiplier = 2 / (nC ** 0.5)
 
         grid = lambda META: (triton.cdiv(M, META['BLOCK_SIZE_M']), triton.cdiv(K, META['BLOCK_SIZE_K']))
 
@@ -146,7 +145,7 @@ class mHCProjectionOp(torch.autograd.Function):
             x_ptr=x, dx_ptr=grad_x, # (M, K)
             phi_ptr=phi, # (N, K)
             dh_ptr=grad_H, # (M, 32)
-            dr_ptr=grad_r, factor=grad_r_multiplier, # (M,), scalar
+            r_ptr=r, dr_ptr=grad_r, # (M,),
             M=M, N=N, K=K,
             stride_xm=K, stride_xk=1,
             stride_dxm=K, stride_dxk=1,
