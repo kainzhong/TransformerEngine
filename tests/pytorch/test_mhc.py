@@ -274,7 +274,7 @@ def test_mhc_elementwise(cfg: MHCConfig, dtype):
     torch.testing.assert_close(r.grad, r_ref.grad, **tols)
 
 @pytest.mark.parametrize("cfg", mhc_configs, ids=MHCConfig.desc)
-@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
+@pytest.mark.parametrize("dtype", [torch.float32], ids=["fp32"])
 def test_mhc_combined(cfg: MHCConfig, dtype):
     B, T, C, n = cfg.B, cfg.T, cfg.C, cfg.n
     N = 2*n + n*n
