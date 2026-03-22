@@ -45,6 +45,11 @@ class mHCProjectionOp(torch.autograd.Function):
         """
         x = x.contiguous()
 
+        ctx.use_tf32 = use_tf32
+        ctx.dtype = x.dtype
+        x = x.to(torch.float32)
+        phi = phi.to(torch.float32)
+
         B, T, nC = x.shape
         device = x.device
 
@@ -96,7 +101,7 @@ class mHCProjectionOp(torch.autograd.Function):
         ctx.save_for_backward(x, phi, r)
         ctx.phi_dtype = phi.dtype
 
-        return H, r
+        return H.to(ctx.dtype), r.to(ctx.dtype)
 
     @staticmethod
     def backward(ctx, grad_H, grad_r):
@@ -130,6 +135,9 @@ class mHCProjectionOp(torch.autograd.Function):
         N = phi.shape[0]
         K = nC
 
+        grad_H = grad_H.to(torch.float32)
+        grad_r = grad_r.to(torch.float32)
+
         x = x.view(M, K)
         grad_H = grad_H.contiguous().view(M, -1)
         grad_r = grad_r.contiguous().view(M,)
@@ -141,24 +149,42 @@ class mHCProjectionOp(torch.autograd.Function):
         grid = lambda META: (triton.cdiv(M, META['BLOCK_SIZE_M']), triton.cdiv(K, META['BLOCK_SIZE_K']))
 
         # Compute grad_x =  (grad_H @ phi^T) + (x * (grad_r * 2  / sqrt(nC))), we can fuse the GeMM and the element-wise add
-        _mhc_projection_bwd_fused[grid](
-            x_ptr=x, dx_ptr=grad_x, # (M, K)
-            phi_ptr=phi, # (N, K)
-            dh_ptr=grad_H, # (M, 32)
-            r_ptr=r, dr_ptr=grad_r, # (M,),
-            M=M, N=N, K=K,
-            stride_xm=K, stride_xk=1,
-            stride_dxm=K, stride_dxk=1,
-            stride_phin=K, stride_phik=1,
-            stride_dphin=K, stride_dphik=1,
-            stride_dhm=32, stride_dhn=1, # strides for grad_H, remember it's padded to 32!
-            stride_dr=1,
-            BLOCK_SIZE_N=32,
-        )
+        if ctx.use_tf32:
+            _mhc_projection_bwd_fused[grid](
+                x_ptr=x, dx_ptr=grad_x, # (M, K)
+                phi_ptr=phi, # (N, K)
+                dh_ptr=grad_H, # (M, 32)
+                r_ptr=r, dr_ptr=grad_r, # (M,),
+                M=M, N=N, K=K,
+                stride_xm=K, stride_xk=1,
+                stride_dxm=K, stride_dxk=1,
+                stride_phin=K, stride_phik=1,
+                stride_dphin=K, stride_dphik=1,
+                stride_dhm=32, stride_dhn=1, # strides for grad_H, remember it's padded to 32!
+                stride_dr=1,
+                BLOCK_SIZE_N=32,
+                precision="tf32"
+            )
+        else:
+            _mhc_projection_bwd_fused[grid](
+                x_ptr=x, dx_ptr=grad_x, # (M, K)
+                phi_ptr=phi, # (N, K)
+                dh_ptr=grad_H, # (M, 32)
+                r_ptr=r, dr_ptr=grad_r, # (M,),
+                M=M, N=N, K=K,
+                stride_xm=K, stride_xk=1,
+                stride_dxm=K, stride_dxk=1,
+                stride_phin=K, stride_phik=1,
+                stride_dphin=K, stride_dphik=1,
+                stride_dhm=32, stride_dhn=1, # strides for grad_H, remember it's padded to 32!
+                stride_dr=1,
+                BLOCK_SIZE_N=32,
+                precision="ieee"
+            )
 
         grad_x = grad_x.view(B, T, nC)
 
-        return grad_x, grad_phi, None
+        return grad_x.to(ctx.dtype), grad_phi.to(ctx.dtype), None
 
 class mHCElementwiseOp(torch.autograd.Function):
 
@@ -175,6 +201,12 @@ class mHCElementwiseOp(torch.autograd.Function):
 
         :return out: (B, T, 2n + n^2), the processed H matrices, , which is padded to 32 with zeroes in the last dimension
         """
+
+        ctx.dtype = H.dtype
+        H = H.to(torch.float32)
+        alpha = alpha.to(torch.float32)
+        beta = beta.to(torch.float32)
+        r = r.to(torch.float32)
 
         B, T, _ = H.shape
 
@@ -206,7 +238,7 @@ class mHCElementwiseOp(torch.autograd.Function):
         ctx.save_for_backward(H, alpha, r, out)
         ctx.n = n
 
-        return out
+        return out.to(ctx.dtype) # Cast back to the original dtype of H
 
     @staticmethod
     def backward(ctx, grad_out):
@@ -225,6 +257,7 @@ class mHCElementwiseOp(torch.autograd.Function):
         n = ctx.n
 
         grad_out = grad_out.contiguous()
+        grad_out = grad_out.to(torch.float32)
 
         B, T, _ = grad_out.shape
 
@@ -256,7 +289,7 @@ class mHCElementwiseOp(torch.autograd.Function):
             BLOCK_SIZE_N=32,
         )
 
-        return grad_h, grad_alpha, grad_beta, grad_r, None
+        return grad_h.to(ctx.dtype), grad_alpha.to(ctx.dtype), grad_beta.to(ctx.dtype), grad_r.to(ctx.dtype), None
 
 class mHCSinkhornOp(torch.autograd.Function):
 
@@ -267,8 +300,7 @@ class mHCSinkhornOp(torch.autograd.Function):
         """
         B, T, _ = H.shape
 
-        # TODO: I'm not sure how we are supposed to handle amp...
-        ctx.h_dtype = H.dtype
+        ctx.dtype = H.dtype
         H = H.to(torch.float32)
 
         H_res = H[:, :, 2*n:2*n+n*n] # Extract the (B, T, n*n) part
@@ -296,7 +328,7 @@ class mHCSinkhornOp(torch.autograd.Function):
 
         out = H.clone()
         out[:, :, 2*n:2*n+n*n] = H_res_out.view(B, T, n*n)
-        return out
+        return out.to(ctx.dtype) # Cast back to the original dtype of H
 
     @staticmethod
     def backward(ctx, grad_out):
@@ -330,9 +362,8 @@ class mHCSinkhornOp(torch.autograd.Function):
 
         grad_H  = grad_out.clone()
         grad_H[:, :, 2*n:2*n+n*n] = grad_res.view(B, T, n*n)
-        grad_H = grad_H.to(ctx.h_dtype) # Cast back to the original dtype of H
 
-        return grad_H, None, None
+        return grad_H.to(ctx.dtype), None, None
 
 class mHCPreOp(torch.autograd.Function):
     @staticmethod

@@ -36,15 +36,18 @@ def mHCProjectionRef(x, phi):
     C: hidden dimension per stream
     """
     eps = torch.finfo(torch.float32).eps
+    x_dtype = x.dtype
+    x = x.to(torch.float32)
+    phi = phi.to(torch.float32)
 
     B, T, nC = x.shape
     Hs = x @ phi.T  # (B, T, 2n + n^2)
 
     x_fp32 = x.to(torch.float32) # Use fp32 for better numerical stability in variance calculation
     var = (x_fp32 * x_fp32).mean(dim=2)
-    r = torch.sqrt(var + eps).to(x.dtype) # (B, T)
+    r = torch.sqrt(var + eps) # (B, T)
 
-    return Hs, r
+    return Hs.to(x_dtype), r.to(x_dtype)
 
 @torch.compile
 def mHCElementwiseRef(H, alpha, beta, r, n):
@@ -61,6 +64,11 @@ def mHCElementwiseRef(H, alpha, beta, r, n):
     """
     
     B, T, _ = H.shape
+    H_dtype = H.dtype
+    H = H.to(torch.float32)
+    alpha = alpha.to(torch.float32)
+    beta = beta.to(torch.float32)
+    r = r.to(torch.float32)
 
     H_pre = H[:, :, :n]  # (B, T, n)
     H_post = H[:, :, n:2*n]  # (B, T, n)
@@ -89,26 +97,28 @@ def mHCElementwiseRef(H, alpha, beta, r, n):
 
     out = torch.cat([H_pre, H_post, H_res], dim=-1) # (B, T, 2n + n^2)
 
-    return out
+    return out.to(H_dtype)
 
 @torch.compile
-def mHCSinkhornRef(x, n=4, iterations=20):
+def mHCSinkhornRef(H, n=4, iterations=20):
     """
     Sinkhorn-Knopp algorithm to convert a matrix into a doubly stochastic matrix.
     Calculated in log space for numerical stability.
     
-    :param x: a tensor of shape (B, T, n, n)
+    :param H: a tensor of shape (B, T, 2n + n^2)
     """
-    B, T, _ = x.shape
-    device = x.device
+    B, T, _ = H.shape
+    device = H.device
+    dtype = H.dtype
 
-    H_res = x[:, :, 2*n:2*n + n*n].clone().view(B, T, n, n) # (B, T, n*n)
+    H_res = H[:, :, 2*n:2*n + n*n].clone().view(B, T, n, n) # (B, T, n*n)
+    H_res = H_res.to(torch.float32) # Use float32 for better numerical stability during Sinkhorn iterations
     
-    log_mu = torch.zeros(B, T, n, device=device)
-    log_nu = torch.zeros(B, T, n, device=device)
+    log_mu = torch.zeros(B, T, n, device=device, dtype=torch.float32)
+    log_nu = torch.zeros(B, T, n, device=device, dtype=torch.float32)
     
-    f = torch.zeros(B, T, n, device=device)
-    g = torch.zeros(B, T, n, device=device)
+    f = torch.zeros(B, T, n, device=device, dtype=torch.float32)
+    g = torch.zeros(B, T, n, device=device, dtype=torch.float32)
     
     for _ in range(iterations):
         # Update f: logsumexp over the column dimension (3)
@@ -117,9 +127,9 @@ def mHCSinkhornRef(x, n=4, iterations=20):
         g = log_nu - torch.logsumexp(H_res + f.unsqueeze(3), dim=2)
         
     log_P = f.unsqueeze(3) + H_res + g.unsqueeze(2)
-    H_res = torch.exp(log_P)
+    H_res = torch.exp(log_P).to(dtype) # Convert back to original dtype
 
-    out = torch.cat([x[:, :, :2*n], H_res.view(B, T, n*n)], dim=2) # Concatenate the unchanged part with the result
+    out = torch.cat([H[:, :, :2*n], H_res.view(B, T, n*n)], dim=2) # Concatenate the unchanged part with the result
 
     return out
 
@@ -218,7 +228,7 @@ def test_mhc_projection(cfg: MHCConfig, dtype):
     N = 2*n + n*n
 
     tols = get_tols(dtype)
-    use_tf32 = (dtype == torch.bfloat16) # For fp32 we use ieee precision
+    use_tf32 = False
 
     x = torch.randn(B, T, nC, device='cuda', requires_grad=True, dtype=dtype)
     phi = torch.randn(N, nC, dtype=dtype, requires_grad=True, device='cuda')
@@ -274,7 +284,7 @@ def test_mhc_elementwise(cfg: MHCConfig, dtype):
     torch.testing.assert_close(r.grad, r_ref.grad, **tols)
 
 @pytest.mark.parametrize("cfg", mhc_configs, ids=MHCConfig.desc)
-@pytest.mark.parametrize("dtype", [torch.float32], ids=["fp32"])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
 def test_mhc_combined(cfg: MHCConfig, dtype):
     B, T, C, n = cfg.B, cfg.T, cfg.C, cfg.n
     N = 2*n + n*n
@@ -283,7 +293,7 @@ def test_mhc_combined(cfg: MHCConfig, dtype):
     tols = get_tols(dtype)
 
     tols = get_tols(dtype)
-    use_tf32 = (dtype == torch.bfloat16) # For fp32 we use ieee precision
+    use_tf32 = False
 
     x = torch.randn(B, T, nC, device='cuda', requires_grad=True, dtype=dtype)
     phi = torch.randn(N, nC, dtype=dtype, requires_grad=True, device='cuda')
@@ -304,31 +314,40 @@ def test_mhc_combined(cfg: MHCConfig, dtype):
     fused_out_padded = mHCElementwiseOp.apply(fused_out_H_padded, alpha, beta, fused_out_r, n)
     fused_out = fused_out_padded[:, :, :N]
 
-    x_rmsnorm = F.rms_norm(x_ref, normalized_shape=(nC,))
-    H = x_rmsnorm @ phi_ref.T
-    H_pre = H[:, :, :n]
-    H_post = H[:, :, n:2*n]
-    H_res = H[:, :, 2*n:]
+    def mhc_combined(x_ref, phi_ref, alpha_ref, beta_ref):
+        dtype = x_ref.dtype
+        x_ref = x_ref.to(torch.float32)
+        phi_ref = phi_ref.to(torch.float32)
+        alpha_ref = alpha_ref.to(torch.float32)
+        beta_ref = beta_ref.to(torch.float32)
 
-    out_pre = H_pre * alpha_ref[0] + beta_ref[:, :n]
-    out_post = H_post * alpha_ref[1] + beta_ref[:, n:2*n]
-    out_res = H_res * alpha_ref[2] + beta_ref[:, 2*n:]
+        x_rmsnorm = F.rms_norm(x_ref, normalized_shape=(nC,))
+        H = x_rmsnorm @ phi_ref.T
+        H_pre = H[:, :, :n]
+        H_post = H[:, :, n:2*n]
+        H_res = H[:, :, 2*n:]
 
-    out_pre = out_pre.sigmoid()
-    out_post = 2 * out_post.sigmoid()
-    out_res = out_res
+        out_pre = H_pre * alpha_ref[0] + beta_ref[:, :n]
+        out_post = H_post * alpha_ref[1] + beta_ref[:, n:2*n]
+        out_res = H_res * alpha_ref[2] + beta_ref[:, 2*n:]
 
-    torch.testing.assert_close(out_pre, ref_out[:, :, :n], **tols)
-    torch.testing.assert_close(out_post, ref_out[:, :, n:2*n], **tols)
-    torch.testing.assert_close(out_res, ref_out[:, :, 2*n:N], **tols)
+        out_pre = out_pre.sigmoid()
+        out_post = 2 * out_post.sigmoid()
+        out_res = out_res
 
-    torch.testing.assert_close(out_pre, fused_out[:, :, :n], **tols)
-    torch.testing.assert_close(out_post, fused_out[:, :, n:2*n], **tols)
-    torch.testing.assert_close(out_res, fused_out[:, :, 2*n:N], **tols)
+        return out_pre.to(dtype), out_post.to(dtype), out_res.to(dtype)
+    
+    H_pre_combined, H_post_combined, _ = mhc_combined(x_ref, phi_ref, alpha_ref, beta_ref)
+
+    torch.testing.assert_close(H_pre_combined, ref_out[:, :, :n], **tols)
+    torch.testing.assert_close(H_post_combined, ref_out[:, :, n:2*n], **tols)
+
+    torch.testing.assert_close(H_pre_combined, fused_out[:, :, :n], **tols)
+    torch.testing.assert_close(H_post_combined, fused_out[:, :, n:2*n], **tols)
 
 
 @pytest.mark.parametrize("cfg", mhc_configs, ids=MHCConfig.desc)
-@pytest.mark.parametrize("dtype", [torch.float32], ids=["fp32"])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
 def test_mhc_sinkhorn_knopp(cfg: MHCConfig, dtype):
     B, T, C, n = cfg.B, cfg.T, cfg.C, cfg.n
 
@@ -340,6 +359,8 @@ def test_mhc_sinkhorn_knopp(cfg: MHCConfig, dtype):
 
     ref_out = mHCSinkhornRef(x_ref, n)
     fused_out = mHCSinkhornOp.apply(x, n)
+
+    print(f"ref_out.dtype: {ref_out.dtype}, fused_out.dtype: {fused_out.dtype}") # --- IGNORE ---
 
     torch.testing.assert_close(fused_out, ref_out, **tols)
 

@@ -123,6 +123,7 @@ def _mhc_projection_bwd_fused(
     # Meta-parameters
     BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_K: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
+    precision: tl.constexpr,
 ):
     """
     This computes 
@@ -165,7 +166,7 @@ def _mhc_projection_bwd_fused(
     dr_ptrs = dr_ptr + offs_r * stride_dr
     
     phi = tl.load(phi_ptrs, mask=(offs_n_full[:, None] < N) & mask_k[None, :], other=0.0) # (BLOCK_SIZE_N, BLOCK_SIZE_K)
-    dx = tl.dot(dh, phi, input_precision="tf32", out_dtype=tl.float32) # (BLOCK_SIZE_M, BLOCK_SIZE_K)
+    dx = tl.dot(dh, phi, input_precision=precision, out_dtype=tl.float32) # (BLOCK_SIZE_M, BLOCK_SIZE_K)
     dr = tl.load(dr_ptrs, mask=offs_r < M, other=0.0) # (BLOCK_SIZE_M,)
     r = tl.load(r_ptrs, mask=offs_r < M, other=1.0) # (BLOCK_SIZE_M,)
     r_scaled = dr / (tl.cast(K, tl.float32) * r) # (BLOCK_SIZE_M,)
