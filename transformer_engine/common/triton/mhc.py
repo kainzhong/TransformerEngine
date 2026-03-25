@@ -13,7 +13,7 @@ def projection_config():
     block_m = [32, 64, 128]
     block_k = [32, 64, 128]
     warps = [2, 4]
-    stages = [1, 2, 3, 4]
+    stages = [2, 3, 4]
 
     configs = []
     for m, k, w, s in itertools.product(block_m, block_k, warps, stages):
