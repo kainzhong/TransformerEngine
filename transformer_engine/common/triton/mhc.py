@@ -33,7 +33,7 @@ def projection_config():
 def _mhc_projection_fwd_fused(
     x_ptr,  # (M, K)
     phi_ptr,  # (N, K)
-    h_ptr,  # (M, 32)
+    h_ptr,  # (M, N_padded), h will be padded to N_aligned in the last dimension
     r_ptr,  # (M,)
     M,
     N,
@@ -54,13 +54,10 @@ def _mhc_projection_fwd_fused(
     eps: tl.constexpr,
 ):
     """
-    Kernel for computing the matmul Y = X x W and r = sqrt(((X * X).mean(dim=1) + eps) / K) in a fused manner.
-    X has shape (M, K), W has shape (N, K) which represent a col-major (K, N) and Y has shape (M, N)
-    r has shape (M,)
-    Note: W is column-major so we can have coalesced memory access when loading W.
-
-    Each block computes a row of X and the full W, since N is very small here (2*n + n^2, where n is the width of Hyper-Connection and is at most 4)
-    We don't need to use grouped ordering because the output MxN has small width which is the same as one block's width
+    Kernel for computing the matmul h = x @ phi.T and r = sqrt(((x * x).mean(dim=1) + eps) / K) in a fused manner.
+    x has shape (M, K), phi has shape (N, K) which represent a col-major (K, N) and h has shape (M, BLOCK_SIZE_N),
+    where BLOCK_SIZE_N is the padded size for N. Since for mHC n is small (e.g., 4), so one block can cover the entire N dimension.
+    r has shape (M,), which is the RMSNorm denominator of x. The actual division will be delayed to the next kernel to improve performance.
     """
 
     pid_m = tl.program_id(axis=0)
@@ -70,13 +67,11 @@ def _mhc_projection_fwd_fused(
     tl.assume(stride_xk == 1)
     tl.assume(stride_phin == K)
     tl.assume(stride_phik == 1)
-    tl.assume(stride_hm == 32)
     tl.assume(stride_hn == 1)
     tl.assume(stride_r == 1)
 
     tl.assume(BLOCK_SIZE_M % 32 == 0)
     tl.assume(BLOCK_SIZE_K % 32 == 0)
-    tl.assume(BLOCK_SIZE_N == 32)
 
     offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
     offs_n_full = tl.arange(0, BLOCK_SIZE_N)
@@ -98,7 +93,6 @@ def _mhc_projection_fwd_fused(
         )  # (BLOCK_SIZE_N, BLOCK_SIZE_K), loaded as column-major
         phi = tl.trans(phi, (1, 0))  # ( BLOCK_SIZE_K, BLOCK_SIZE_N)
         # RMSNorm denominator computation
-        # r_acc += tl.sum((x * x).to(tl.float32), axis=1).to(r_acc.dtype)
         x_fp32 = x.to(tl.float32)
         r_acc += tl.sum(x_fp32 * x_fp32, axis=1)
         # Matrix multiplication
@@ -159,7 +153,6 @@ def _mhc_projection_bwd_fused(
     tl.assume(pid_k >= 0)
     tl.assume(stride_xm > 0)
     tl.assume(stride_xk == 1)
-    tl.assume(stride_dhm == 32)
     tl.assume(stride_dhn == 1)
     tl.assume(stride_phin == K)
     tl.assume(stride_phik == 1)
@@ -168,7 +161,6 @@ def _mhc_projection_bwd_fused(
 
     tl.assume(BLOCK_SIZE_M % 32 == 0)
     tl.assume(BLOCK_SIZE_K % 32 == 0)
-    tl.assume(BLOCK_SIZE_N == 32)
 
     offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
     offs_k = pid_k * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
@@ -227,11 +219,11 @@ def elementwise_config():
 )
 @triton.jit
 def _mhc_elementwise_fwd_fused(
-    h_ptr,  # (M, 2n + n^2), which is padded to (M, 32) in the last dimension
+    h_ptr,  # (M, 2n + n^2), which is padded to (M, BLOCK_SIZE_N) in the last dimension
     a_ptr,  # (3,)
     b_ptr,  # (2n + n^2)
     r_ptr,  # (M,)
-    out_ptr,  # (M, 2n + n^2), which is padded to (M, 32) in the last dimension
+    out_ptr,  # (M, 2n + n^2), which is padded to (M, BLOCK_SIZE_N) in the last dimension
     M,
     n,
     stride_hm,
@@ -248,15 +240,11 @@ def _mhc_elementwise_fwd_fused(
     pid = tl.program_id(0)  # 1D grid
 
     tl.assume(M > 0)
-    tl.assume(n == 4)
-    tl.assume(stride_hm == 32)
     tl.assume(stride_hn == 1)
-    tl.assume(stride_out_m == 32)
     tl.assume(stride_out_n == 1)
     tl.assume(stride_a == 1)
     tl.assume(stride_b == 1)
     tl.assume(stride_r == 1)
-    tl.assume(BLOCK_SIZE_N == 32)
 
     N = 2 * n + n * n
 
@@ -268,7 +256,7 @@ def _mhc_elementwise_fwd_fused(
     offs_a = tl.zeros_like(cols)
     offs_a = tl.where((cols >= n) & (cols < 2 * n), 1, offs_a)
     offs_a = tl.where((cols >= 2 * n) & (cols < 2 * n + n * n), 2, offs_a)
-    # Pick a[0] from a for the first 4 columns, a[1] for the next 4 columns, and a[2] for the rest of the columns
+    # Pick a[0] from a for the first n columns, a[1] for the next n columns, and a[2] for the rest of the columns
     a = tl.load(
         a_ptr + offs_a * stride_a, mask=offs_a < N, other=0.0
     )  # a[2*n + n*n:] is filled with garbage
@@ -309,9 +297,9 @@ def _mhc_elementwise_fwd_fused(
 @triton.jit
 def _mhc_elementwise_bwd_fused(
     grad_out_ptr,
-    out_ptr,  # (M, 2n + n^2), which is padded to (M, 32) in the last dimension
+    out_ptr,  # (M, 2n + n^2), which is padded to (M, BLOCK_SIZE_N) in the last dimension
     grad_h_ptr,
-    h_ptr,  # (M, 2n + n^2), which is padded to (M, 32) in the last dimension
+    h_ptr,  # (M, 2n + n^2), which is padded to (M, BLOCK_SIZE_N) in the last dimension
     grad_a_ptr,
     a_ptr,  # (3,)
     grad_b_ptr,  # (2n + n^2,)
@@ -338,21 +326,15 @@ def _mhc_elementwise_bwd_fused(
     pid = tl.program_id(0)
 
     tl.assume(M > 0)
-    tl.assume(n == 4)
-    tl.assume(stride_grad_out_m == 32)
     tl.assume(stride_grad_out_n == 1)
-    tl.assume(stride_out_m == 32)
     tl.assume(stride_out_n == 1)
-    tl.assume(stride_grad_hm == 32)
     tl.assume(stride_grad_hn == 1)
-    tl.assume(stride_hm == 32)
     tl.assume(stride_hn == 1)
     tl.assume(stride_grad_a == 1)
     tl.assume(stride_a == 1)
     tl.assume(stride_grad_b == 1)
     tl.assume(stride_grad_r == 1)
     tl.assume(stride_r == 1)
-    tl.assume(BLOCK_SIZE_N == 32)
 
     N = 2 * n + n * n
 
@@ -365,7 +347,7 @@ def _mhc_elementwise_bwd_fused(
     offs_a = tl.zeros_like(cols)
     offs_a = tl.where((cols >= n) & (cols < 2 * n), 1, offs_a)
     offs_a = tl.where((cols >= 2 * n) & (cols < 2 * n + n * n), 2, offs_a)
-    # Pick a[0] from a for the first 4 columns, a[1] for the next 4 columns, and a[2] for the rest of the columns
+    # Pick a[0] from a for the first n columns, a[1] for the next n columns, and a[2] for the rest of the columns
     a = tl.load(
         a_ptr + offs_a * stride_a, mask=offs_a < 3, other=0.0
     )  # a[2*n + n*n:] is filled with garbage
@@ -400,7 +382,7 @@ def _mhc_elementwise_bwd_fused(
     grad_h = tl.where((cols[None, :] >= n) & (cols[None, :] < 2 * n), grad_h_post, grad_h)
 
     grad_a = tl.sum(h * grad_h / r[:, None], axis=0).to(a.dtype)
-    # Write grad_a[0:4].sum to grad_a_ptr[0], grad_a[4:8].sum to grad_a_ptr[1], and grad_a[8:24].sum to grad_a_ptr[2]
+    # Write grad_a[0:n].sum to grad_a_ptr[0], grad_a[n:2*n].sum to grad_a_ptr[1], and grad_a[2*n:2*n+n*n].sum to grad_a_ptr[2]
     tl.atomic_add(grad_a_ptr, tl.where(cols[None, :] < n, grad_a, 0.0).sum())
     tl.atomic_add(
         grad_a_ptr + stride_grad_a,
@@ -471,7 +453,6 @@ def _mhc_sinkhorn_knopp_fwd_fused_recompute(
 
     tl.static_assert(BLOCK_SIZE % (n * n) == 0, "BLOCK_SIZE must be divisible by n*n")
     tl.assume(M > 0 and iters > 0)
-    tl.assume(n == 4)
 
     BATCH_SIZE: tl.constexpr = BLOCK_SIZE // (n * n)  # Assume there's no remainder for simplicity
 
@@ -559,7 +540,6 @@ def _mhc_sinkhorn_knopp_bwd_fused_recompute(
 
     tl.static_assert(BLOCK_SIZE % (n * n) == 0, "BLOCK_SIZE must be divisible by n*n")
     tl.assume(M > 0 and iters > 0)
-    tl.assume(n == 4)
 
     BATCH_SIZE: tl.constexpr = BLOCK_SIZE // (n * n)  # Assume there's no remainder for simplicity
 
@@ -707,7 +687,6 @@ def _mhc_sinkhorn_knopp_fwd_fused(
 
     tl.static_assert(BLOCK_SIZE % (n * n) == 0, "BLOCK_SIZE must be divisible by n*n")
     tl.assume(M > 0 and iters > 0)
-    tl.assume(n == 4)
 
     BATCH_SIZE: tl.constexpr = BLOCK_SIZE // (n * n)  # Assume there's no remainder for simplicity
 
@@ -814,7 +793,6 @@ def _mhc_sinkhorn_knopp_bwd_fused(
 
     tl.static_assert(BLOCK_SIZE % (n * n) == 0, "BLOCK_SIZE must be divisible by n*n")
     tl.assume(M > 0 and iters > 0)
-    tl.assume(n == 4)
 
     BATCH_SIZE: tl.constexpr = BLOCK_SIZE // (n * n)  # Assume there's no remainder for simplicity
 
