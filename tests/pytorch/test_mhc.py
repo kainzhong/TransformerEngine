@@ -180,15 +180,22 @@ class MHCConfig:
     B: int = 32  # Batch size
     T: int = 2048  # Sequence length
     C: int = 1024  # Hidden dimension
+    n: int = 4  # Number of Hyper Connection streams
 
-    def __init__(self, B, T, C):
+    allow_n = [
+        4,
+    ]
+
+    def __init__(self, B, T, C, n=4):
+        assert n in self.allow_n, f"n must be one of {self.allow_n}"
         self.B = B
         self.T = T
         self.C = C
+        self.n = n
 
     @staticmethod
     def desc(cfg):
-        return f"B{cfg.B}_T{cfg.T}_C{cfg.C}"
+        return f"B{cfg.B}_T{cfg.T}_C{cfg.C}_n{cfg.n}"
 
 
 mhc_configs = [
@@ -255,15 +262,11 @@ def get_tols(dtype):
         tols = dict(atol=5e-3, rtol=5e-3)
     return tols
 
-def next_power_of_2(x):
-    """Return the smallest power of 2 greater than or equal to x"""
-    return 1 << (x - 1).bit_length()
 
 @pytest.mark.parametrize("cfg", mhc_configs, ids=MHCConfig.desc)
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
-@pytest.mark.parametrize("n", [2, 4], ids=["n2", "n4"])
-def test_mhc_projection(cfg: MHCConfig, dtype, n):
-    B, T, C = cfg.B, cfg.T, cfg.C
+def test_mhc_projection(cfg: MHCConfig, dtype):
+    B, T, C, n = cfg.B, cfg.T, cfg.C, cfg.n
     nC = n * C
     N = 2 * n + n * n
 
@@ -277,7 +280,7 @@ def test_mhc_projection(cfg: MHCConfig, dtype, n):
     phi_ref = phi.detach().clone().requires_grad_(True)
 
     ref_out_Hs, ref_out_r = mHCProjectionRef(x_ref, phi_ref)
-    fused_out_Hs_padded, fused_out_r = mHCProjectionOp.apply(x, phi, n, use_tf32)
+    fused_out_Hs_padded, fused_out_r = mHCProjectionOp.apply(x, phi, use_tf32)
     fused_out_Hs = fused_out_Hs_padded[:, :N]
 
     torch.testing.assert_close(fused_out_Hs, ref_out_Hs, **tols)
@@ -292,15 +295,13 @@ def test_mhc_projection(cfg: MHCConfig, dtype, n):
 
 @pytest.mark.parametrize("cfg", mhc_configs, ids=MHCConfig.desc)
 @pytest.mark.parametrize("dtype", [torch.float32], ids=["fp32"])
-@pytest.mark.parametrize("n", [2, 4], ids=["n2", "n4"])
-def test_mhc_elementwise(cfg: MHCConfig, dtype, n):
-    B, T, C = cfg.B, cfg.T, cfg.C
+def test_mhc_elementwise(cfg: MHCConfig, dtype):
+    B, T, C, n = cfg.B, cfg.T, cfg.C, cfg.n
     N = 2 * n + n * n
 
     tols = get_tols(dtype)
 
-    BLOCK_SIZE_N = 16 if n == 2 else 32
-    H_padded = torch.randn(B * T, BLOCK_SIZE_N, device="cuda", requires_grad=True, dtype=dtype)
+    H_padded = torch.randn(B * T, 32, device="cuda", requires_grad=True, dtype=dtype)
     H = H_padded[:, :N]
     alpha = torch.randn(3, device="cuda", requires_grad=True, dtype=dtype)
     beta = torch.randn(1, 2 * n + n * n, device="cuda", requires_grad=True, dtype=dtype)
@@ -329,9 +330,8 @@ def test_mhc_elementwise(cfg: MHCConfig, dtype, n):
 
 @pytest.mark.parametrize("cfg", mhc_configs, ids=MHCConfig.desc)
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
-@pytest.mark.parametrize("n", [4], ids=["n4"])
-def test_mhc_combined(cfg: MHCConfig, dtype, n):
-    B, T, C = cfg.B, cfg.T, cfg.C
+def test_mhc_combined(cfg: MHCConfig, dtype):
+    B, T, C, n = cfg.B, cfg.T, cfg.C, cfg.n
     N = 2 * n + n * n
     nC = n * C
 
@@ -353,7 +353,7 @@ def test_mhc_combined(cfg: MHCConfig, dtype, n):
     beta_ref = beta.detach().clone().requires_grad_(True)
 
     ref_out_H, ref_out_r = mHCProjectionRef(x_ref, phi_ref)
-    fused_out_H_padded, fused_out_r = mHCProjectionOp.apply(x, phi, n, use_tf32)
+    fused_out_H_padded, fused_out_r = mHCProjectionOp.apply(x, phi, use_tf32)
 
     ref_out = mHCElementwiseRef(ref_out_H[:, :N], alpha_ref, beta_ref, ref_out_r, n)
     fused_out_padded = mHCElementwiseOp.apply(fused_out_H_padded, alpha, beta, fused_out_r, n)
@@ -393,9 +393,8 @@ def test_mhc_combined(cfg: MHCConfig, dtype, n):
 
 @pytest.mark.parametrize("cfg", mhc_configs, ids=MHCConfig.desc)
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
-@pytest.mark.parametrize("n", [2, 4], ids=["n2", "n4"])
-def test_mhc_sinkhorn_knopp(cfg: MHCConfig, dtype, n):
-    B, T, C = cfg.B, cfg.T, cfg.C
+def test_mhc_sinkhorn_knopp(cfg: MHCConfig, dtype):
+    B, T, C, n = cfg.B, cfg.T, cfg.C, cfg.n
 
     tols = get_tols(dtype)
 
@@ -416,9 +415,8 @@ def test_mhc_sinkhorn_knopp(cfg: MHCConfig, dtype, n):
 
 @pytest.mark.parametrize("cfg", mhc_configs, ids=MHCConfig.desc)
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
-@pytest.mark.parametrize("n", [2, 4], ids=["n2", "n4"])
-def test_mhc_sinkhorn_knopp_recompute(cfg: MHCConfig, dtype, n):
-    B, T, C = cfg.B, cfg.T, cfg.C
+def test_mhc_sinkhorn_knopp_recompute(cfg: MHCConfig, dtype):
+    B, T, C, n = cfg.B, cfg.T, cfg.C, cfg.n
 
     tols = get_tols(dtype)
 
@@ -439,9 +437,8 @@ def test_mhc_sinkhorn_knopp_recompute(cfg: MHCConfig, dtype, n):
 
 @pytest.mark.parametrize("cfg", mhc_configs, ids=MHCConfig.desc)
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
-@pytest.mark.parametrize("n", [4], ids=["n4"])
-def test_mhc_pre(cfg: MHCConfig, dtype, n):
-    B, T, C = cfg.B, cfg.T, cfg.C
+def test_mhc_pre(cfg: MHCConfig, dtype):
+    B, T, C, n = cfg.B, cfg.T, cfg.C, cfg.n
     nC = n * C
 
     tols = get_tols(dtype)
@@ -466,9 +463,8 @@ def test_mhc_pre(cfg: MHCConfig, dtype, n):
 
 @pytest.mark.parametrize("cfg", mhc_configs, ids=MHCConfig.desc)
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
-@pytest.mark.parametrize("n", [4], ids=["n4"])
-def test_mhc_post_res(cfg: MHCConfig, dtype, n):
-    B, T, C = cfg.B, cfg.T, cfg.C
+def test_mhc_post_res(cfg: MHCConfig, dtype):
+    B, T, C, n = cfg.B, cfg.T, cfg.C, cfg.n
     nC = n * C
 
     tols = get_tols(dtype)

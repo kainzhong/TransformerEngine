@@ -21,10 +21,11 @@ from transformer_engine.common.triton.mhc import (
     _mhc_sinkhorn_knopp_bwd_fused_recompute,
 )
 
+
 class mHCProjectionOp(torch.autograd.Function):
 
     @staticmethod
-    def forward(ctx, x, phi, n, use_tf32=True):
+    def forward(ctx, x, phi, use_tf32=True):
         """
         Fused mHC projection matrices building operation.
         This kernel performs a fused matrix multiplication and a reduction to compute the projection matrices H:
@@ -39,7 +40,7 @@ class mHCProjectionOp(torch.autograd.Function):
         H = x @ phi.T: (B*T, nC) @ (nC, 2n + n^2) = (B*T, 2n + n^2)
         r = sum(x^2) / sqrt(nC): (B*T,)
 
-        :return H: projection matrices of shape (B*T, 2n + n^2), which is padded to the next power of 2 with zeroes in the last dimension
+        :return H: projection matrices of shape (B*T, 2n + n^2), which is padded to 32 with zeroes in the last dimension
         :return r: normalization factor of shape (B*T,)
         """
         x = x.contiguous()
@@ -52,109 +53,58 @@ class mHCProjectionOp(torch.autograd.Function):
 
         N = phi.shape[0]
 
+        # Pad H to (B, T, 32) for better memory access pattern in the kernel, but only the first N elements in the last dimension are valid
+        H = torch.zeros((M, 32), device=device, dtype=x.dtype)
+        r = torch.zeros((M), device=device, dtype=x.dtype)
+
         # Launch triton kernel
         grid = lambda META: (triton.cdiv(M, META["BLOCK_SIZE_M"]),)
 
-        assert n in [2, 4], "Only n=2, 4 are supported in this implementation"
-
-        BLOCK_SIZE_N = 16 if n == 2 else 32 # For n=2 we need to pad to 16 since tl.dot doesn't allow inner dimension < 16
-        print(f"BLOCK_SIZE_N={BLOCK_SIZE_N}, N={N}")
-        # Pad H to (B, T, BLOCK_SIZE_N) for better memory access pattern in the kernel, but only the first N elements in the last dimension are valid
-        H = torch.zeros((M, BLOCK_SIZE_N), device=device, dtype=x.dtype)
-        r = torch.zeros((M), device=device, dtype=x.dtype)
-        eps = torch.finfo(x.dtype).eps # rms norm denominator is computed in fp32 so we use fp32's eps
-
-
         if use_tf32:
-            if n == 2:
-                _mhc_projection_fwd_fused[grid](
-                    x_ptr=x,  # (M, K)
-                    phi_ptr=phi,  # (N, K)
-                    h_ptr=H,  # (M, 32)
-                    r_ptr=r,  # (M,)
-                    M=M,
-                    N=N,
-                    K=K,
-                    stride_xm=K,
-                    stride_xk=1,  # strides for x
-                    stride_phin=K,
-                    stride_phik=1,  # strides for phi
-                    stride_hm=16,
-                    stride_hn=1,
-                    stride_r=1,
-                    BLOCK_SIZE_N=16,
-                    out_dtype=tl.float32 if x.dtype == torch.float32 else tl.bfloat16,
-                    precision="tf32",
-                    eps=eps,
-                )
-            elif n == 4:
-                _mhc_projection_fwd_fused[grid](
-                    x_ptr=x,  # (M, K)
-                    phi_ptr=phi,  # (N, K)
-                    h_ptr=H,  # (M, 32)
-                    r_ptr=r,  # (M,)
-                    M=M,
-                    N=N,
-                    K=K,
-                    stride_xm=K,
-                    stride_xk=1,  # strides for x
-                    stride_phin=K,
-                    stride_phik=1,  # strides for phi
-                    stride_hm=32,
-                    stride_hn=1,
-                    stride_r=1,
-                    BLOCK_SIZE_N=32,
-                    out_dtype=tl.float32 if x.dtype == torch.float32 else tl.bfloat16,
-                    precision="tf32",
-                    eps=eps,
-                )
+            _mhc_projection_fwd_fused[grid](
+                x_ptr=x,  # (M, K)
+                phi_ptr=phi,  # (N, K)
+                h_ptr=H,  # (M, 32)
+                r_ptr=r,  # (M,)
+                M=M,
+                N=N,
+                K=K,
+                stride_xm=K,
+                stride_xk=1,  # strides for x
+                stride_phin=K,
+                stride_phik=1,  # strides for phi
+                stride_hm=32,
+                stride_hn=1,  # strides for H, remember it's padded to 32!
+                stride_r=1,  # strides for r, which is a 1D tensor
+                BLOCK_SIZE_N=32,
+                out_dtype=tl.float32 if x.dtype == torch.float32 else tl.bfloat16,
+                precision="tf32",
+                eps=torch.finfo(torch.float32).eps,
+            )
         else:
-            if n == 2:
-                _mhc_projection_fwd_fused[grid](
-                    x_ptr=x,  # (M, K)
-                    phi_ptr=phi,  # (N, K)
-                    h_ptr=H,  # (M, 32)
-                    r_ptr=r,  # (M,)
-                    M=M,
-                    N=N,
-                    K=K,
-                    stride_xm=K,
-                    stride_xk=1,  # strides for x
-                    stride_phin=K,
-                    stride_phik=1,  # strides for phi
-                    stride_hm=16,
-                    stride_hn=1,
-                    stride_r=1,
-                    BLOCK_SIZE_N=16,
-                    out_dtype=tl.float32 if x.dtype == torch.float32 else tl.bfloat16,
-                    precision="ieee",
-                    eps=eps,
-                )
-            elif n == 4:
-                _mhc_projection_fwd_fused[grid](
-                    x_ptr=x,  # (M, K)
-                    phi_ptr=phi,  # (N, K)
-                    h_ptr=H,  # (M, 32)
-                    r_ptr=r,  # (M,)
-                    M=M,
-                    N=N,
-                    K=K,
-                    stride_xm=K,
-                    stride_xk=1,  # strides for x
-                    stride_phin=K,
-                    stride_phik=1,  # strides for phi
-                    stride_hm=32,
-                    stride_hn=1,
-                    stride_r=1,
-                    BLOCK_SIZE_N=32,
-                    out_dtype=tl.float32 if x.dtype == torch.float32 else tl.bfloat16,
-                    precision="ieee",
-                    eps=eps,
-                )
+            _mhc_projection_fwd_fused[grid](
+                x_ptr=x,  # (M, K)
+                phi_ptr=phi,  # (N, K)
+                h_ptr=H,  # (M, 32)
+                r_ptr=r,  # (M,)
+                M=M,
+                N=N,
+                K=K,
+                stride_xm=K,
+                stride_xk=1,  # strides for x
+                stride_phin=K,
+                stride_phik=1,  # strides for phi
+                stride_hm=32,
+                stride_hn=1,  # strides for H, remember it's padded to 32!
+                stride_r=1,  # strides for r, which is a 1D tensor
+                BLOCK_SIZE_N=32,
+                out_dtype=tl.float32 if x.dtype == torch.float32 else tl.bfloat16,
+                precision="ieee",
+                eps=torch.finfo(torch.float32).eps,
+            )
 
         ctx.save_for_backward(x, phi, r)
         ctx.phi_dtype = phi.dtype
-        ctx.n = n
 
         return H.to(ctx.dtype), r.to(ctx.dtype)
 
@@ -188,8 +138,6 @@ class mHCProjectionOp(torch.autograd.Function):
 
         N = phi.shape[0]
 
-        BLOCK_SIZE_N = triton.next_power_of_2(N)
-
         grad_H = grad_H.contiguous().view(M, -1)
         grad_r = grad_r.contiguous().view(M,)
         r = r.contiguous().view(M,)
@@ -206,109 +154,57 @@ class mHCProjectionOp(torch.autograd.Function):
 
         # Compute grad_x =  (grad_H @ phi^T) + (x * (grad_r * 2  / sqrt(nC))), we can fuse the GeMM and the element-wise add
         if ctx.use_tf32:
-            if ctx.n == 2:
-                _mhc_projection_bwd_fused[grid](
-                    x_ptr=x,
-                    dx_ptr=grad_x,  # (M, K)
-                    phi_ptr=phi,  # (N, K)
-                    dh_ptr=grad_H,  # (M, 32)
-                    r_ptr=r,
-                    dr_ptr=grad_r,  # (M,),
-                    M=M,
-                    N=N,
-                    K=K,
-                    stride_xm=K,
-                    stride_xk=1,
-                    stride_dxm=K,
-                    stride_dxk=1,
-                    stride_phin=K,
-                    stride_phik=1,
-                    stride_dphin=K,
-                    stride_dphik=1,
-                    stride_dhm=16,
-                    stride_dhn=1,
-                    stride_dr=1,
-                    BLOCK_SIZE_N=16,
-                    precision="tf32",
-                )
-            elif ctx.n == 4:
-                _mhc_projection_bwd_fused[grid](
-                    x_ptr=x,
-                    dx_ptr=grad_x,  # (M, K)
-                    phi_ptr=phi,  # (N, K)
-                    dh_ptr=grad_H,  # (M, 32)
-                    r_ptr=r,
-                    dr_ptr=grad_r,  # (M,),
-                    M=M,
-                    N=N,
-                    K=K,
-                    stride_xm=K,
-                    stride_xk=1,
-                    stride_dxm=K,
-                    stride_dxk=1,
-                    stride_phin=K,
-                    stride_phik=1,
-                    stride_dphin=K,
-                    stride_dphik=1,
-                    stride_dhm=32,
-                    stride_dhn=1,
-                    stride_dr=1,
-                    BLOCK_SIZE_N=32,
-                    precision="tf32",
-                )
+            _mhc_projection_bwd_fused[grid](
+                x_ptr=x,
+                dx_ptr=grad_x,  # (M, K)
+                phi_ptr=phi,  # (N, K)
+                dh_ptr=grad_H,  # (M, 32)
+                r_ptr=r,
+                dr_ptr=grad_r,  # (M,),
+                M=M,
+                N=N,
+                K=K,
+                stride_xm=K,
+                stride_xk=1,
+                stride_dxm=K,
+                stride_dxk=1,
+                stride_phin=K,
+                stride_phik=1,
+                stride_dphin=K,
+                stride_dphik=1,
+                stride_dhm=32,
+                stride_dhn=1,  # strides for grad_H, remember it's padded to 32!
+                stride_dr=1,
+                BLOCK_SIZE_N=32,
+                precision="tf32",
+            )
         else:
-            if ctx.n == 2:
-                _mhc_projection_bwd_fused[grid](
-                    x_ptr=x,
-                    dx_ptr=grad_x,  # (M, K)
-                    phi_ptr=phi,  # (N, K)
-                    dh_ptr=grad_H,  # (M, 32)
-                    r_ptr=r,
-                    dr_ptr=grad_r,  # (M,),
-                    M=M,
-                    N=N,
-                    K=K,
-                    stride_xm=K,
-                    stride_xk=1,
-                    stride_dxm=K,
-                    stride_dxk=1,
-                    stride_phin=K,
-                    stride_phik=1,
-                    stride_dphin=K,
-                    stride_dphik=1,
-                    stride_dhm=16,
-                    stride_dhn=1,
-                    stride_dr=1,
-                    BLOCK_SIZE_N=16,
-                    precision="ieee",
-                )
-            elif ctx.n == 4:
-                _mhc_projection_bwd_fused[grid](
-                    x_ptr=x,
-                    dx_ptr=grad_x,  # (M, K)
-                    phi_ptr=phi,  # (N, K)
-                    dh_ptr=grad_H,  # (M, 32)
-                    r_ptr=r,
-                    dr_ptr=grad_r,  # (M,),
-                    M=M,
-                    N=N,
-                    K=K,
-                    stride_xm=K,
-                    stride_xk=1,
-                    stride_dxm=K,
-                    stride_dxk=1,
-                    stride_phin=K,
-                    stride_phik=1,
-                    stride_dphin=K,
-                    stride_dphik=1,
-                    stride_dhm=32,
-                    stride_dhn=1,
-                    stride_dr=1,
-                    BLOCK_SIZE_N=32,
-                    precision="ieee",
-                )
+            _mhc_projection_bwd_fused[grid](
+                x_ptr=x,
+                dx_ptr=grad_x,  # (M, K)
+                phi_ptr=phi,  # (N, K)
+                dh_ptr=grad_H,  # (M, 32)
+                r_ptr=r,
+                dr_ptr=grad_r,  # (M,),
+                M=M,
+                N=N,
+                K=K,
+                stride_xm=K,
+                stride_xk=1,
+                stride_dxm=K,
+                stride_dxk=1,
+                stride_phin=K,
+                stride_phik=1,
+                stride_dphin=K,
+                stride_dphik=1,
+                stride_dhm=32,
+                stride_dhn=1,  # strides for grad_H, remember it's padded to 32!
+                stride_dr=1,
+                BLOCK_SIZE_N=32,
+                precision="ieee",
+            )
 
-        return grad_x.to(ctx.dtype), grad_phi.to(ctx.dtype), None, None
+        return grad_x.to(ctx.dtype), grad_phi.to(ctx.dtype), None
 
 
 class mHCElementwiseOp(torch.autograd.Function):
@@ -318,16 +214,14 @@ class mHCElementwiseOp(torch.autograd.Function):
         """
         Reference operator for mHC's pre and post calculations
 
-        :param: H: (B * T, 2n + n^2), the unprocessed H matrices, which is padded to 16 or 32 with zeroes in the last dimension
+        :param: H: (B * T, 2n + n^2), the unprocessed H matrices, which is padded to 32 with zeroes in the last dimension
         :param: alpha: (3,), three scalar parameters
         :param: beta: (1, 2n + n^2), bias term
         :param: r: (B * T), the denominator for RMSNorm
         :param: n: int, the width of Hyper-Connection
 
-        :return out: (B * T, 2n + n^2), the processed H matrices, , which is padded to 16 or 32 with zeroes in the last dimension
+        :return out: (B * T, 2n + n^2), the processed H matrices, , which is padded to 32 with zeroes in the last dimension
         """
-
-        assert n in [2, 4], "Only n=2, 4 are supported in this implementation"
 
         ctx.dtype = H.dtype
         H = H.to(torch.float32)
@@ -341,49 +235,29 @@ class mHCElementwiseOp(torch.autograd.Function):
         beta = beta.contiguous()
         r = r.contiguous()
 
-        BLOCK_SIZE_N = 16 if n == 2 else 32
         out = torch.zeros(
-            (M, BLOCK_SIZE_N), device=H.device, dtype=H.dtype
-        )  # Pad the output to BLOCK_SIZE_N in the last dimension
+            (M, 32), device=H.device, dtype=H.dtype
+        )  # Pad the output to 32 in the last dimension
 
         grid = lambda META: (triton.cdiv(M, META["BLOCK_SIZE_M"]),)
 
-        if n == 2:
-            _mhc_elementwise_fwd_fused[grid](
-                h_ptr=H,  # (M, N), which is padded to (M, 16)
-                b_ptr=beta,  # (N,)
-                a_ptr=alpha,  # (N,)
-                r_ptr=r,  # (M,)
-                out_ptr=out,  # (M, N), which is padded to (M, 16)
-                M=M,
-                n=2,
-                stride_hm=16,
-                stride_hn=1,
-                stride_a=1,
-                stride_b=1,
-                stride_r=1,
-                stride_out_m=16,
-                stride_out_n=1,  # strides for out, which is padded to 32 in the last dimension
-                BLOCK_SIZE_N=16,
-            )
-        elif n == 4:
-            _mhc_elementwise_fwd_fused[grid](
-                h_ptr=H,  # (M, N), which is padded to (M, 32)
-                b_ptr=beta,  # (N,)
-                a_ptr=alpha,  # (N,)
-                r_ptr=r,  # (M,)
-                out_ptr=out,  # (M, N), which is padded to (M, 32)
-                M=M,
-                n=4,
-                stride_hm=32,
-                stride_hn=1,
-                stride_a=1,
-                stride_b=1,
-                stride_r=1,
-                stride_out_m=32,
-                stride_out_n=1,  # strides for out, which is padded to 32 in the last dimension
-                BLOCK_SIZE_N=32,
-            )
+        _mhc_elementwise_fwd_fused[grid](
+            h_ptr=H,  # (M, N), which is padded to (M, 32)
+            b_ptr=beta,  # (N,)
+            a_ptr=alpha,  # (N,)
+            r_ptr=r,  # (M,)
+            out_ptr=out,  # (M, N), which is padded to (M, 32)
+            M=M,
+            n=n,
+            stride_hm=32,
+            stride_hn=1,
+            stride_a=1,
+            stride_b=1,
+            stride_r=1,
+            stride_out_m=32,
+            stride_out_n=1,  # strides for out, which is padded to 32 in the last dimension
+            BLOCK_SIZE_N=32,
+        )
 
         ctx.save_for_backward(H, alpha, r, out)
         ctx.n = n
@@ -412,73 +286,45 @@ class mHCElementwiseOp(torch.autograd.Function):
         M, _ = grad_out.shape
         N = 2 * n + n * n
 
-        BLOCK_SIZE_N = 16 if n == 2 else 32
         grad_h = torch.zeros(
-            (M, BLOCK_SIZE_N), device=grad_out.device, dtype=grad_out.dtype
-        )  # Pad the grad_h to BLOCK_SIZE_N in the last dimension
+            (M, 32), device=grad_out.device, dtype=grad_out.dtype
+        )  # Pad the grad_h to 32 in the last dimension
         grad_alpha = torch.zeros((3,), device=grad_out.device, dtype=grad_out.dtype)
-        grad_beta_padded = torch.zeros((1, BLOCK_SIZE_N), device=grad_out.device, dtype=grad_out.dtype)
-        grad_beta = grad_beta_padded[:, :N]
+        grad_beta_padded = torch.zeros((1, 32), device=grad_out.device, dtype=grad_out.dtype)
+        grad_beta = grad_beta_padded[
+            :, :N
+        ]  # Use only the first N elements for grad_beta, the rest are just padding
         grad_r = torch.zeros((M,), device=grad_out.device, dtype=grad_out.dtype)
 
         grid = lambda META: (triton.cdiv(M, META["BLOCK_SIZE_M"]),)
-        
-        if n == 2:
-            _mhc_elementwise_bwd_fused[grid](
-                grad_out_ptr=grad_out,
-                out_ptr=out,
-                grad_h_ptr=grad_h,
-                h_ptr=H,
-                grad_a_ptr=grad_alpha,
-                a_ptr=alpha,
-                grad_b_ptr=grad_beta,
-                grad_r_ptr=grad_r,
-                r_ptr=r,
-                M=M,
-                n=2,
-                stride_grad_out_m=16,
-                stride_grad_out_n=1,
-                stride_out_m=16,
-                stride_out_n=1,
-                stride_grad_hm=16,
-                stride_grad_hn=1,
-                stride_hm=16,
-                stride_hn=1,
-                stride_grad_a=1,
-                stride_a=1,
-                stride_grad_b=1,
-                stride_grad_r=1,
-                stride_r=1,
-                BLOCK_SIZE_N=16,
-            )
-        elif n == 4:
-            _mhc_elementwise_bwd_fused[grid](
-                grad_out_ptr=grad_out,
-                out_ptr=out,
-                grad_h_ptr=grad_h,
-                h_ptr=H,
-                grad_a_ptr=grad_alpha,
-                a_ptr=alpha,
-                grad_b_ptr=grad_beta,
-                grad_r_ptr=grad_r,
-                r_ptr=r,
-                M=M,
-                n=4,
-                stride_grad_out_m=32,
-                stride_grad_out_n=1,
-                stride_out_m=32,
-                stride_out_n=1,
-                stride_grad_hm=32,
-                stride_grad_hn=1,
-                stride_hm=32,
-                stride_hn=1,
-                stride_grad_a=1,
-                stride_a=1,
-                stride_grad_b=1,
-                stride_grad_r=1,
-                stride_r=1,
-                BLOCK_SIZE_N=32,
-            )
+
+        _mhc_elementwise_bwd_fused[grid](
+            grad_out_ptr=grad_out,
+            out_ptr=out,
+            grad_h_ptr=grad_h,
+            h_ptr=H,
+            grad_a_ptr=grad_alpha,
+            a_ptr=alpha,
+            grad_b_ptr=grad_beta,
+            grad_r_ptr=grad_r,
+            r_ptr=r,
+            M=M,
+            n=n,
+            stride_grad_out_m=32,
+            stride_grad_out_n=1,
+            stride_out_m=32,
+            stride_out_n=1,
+            stride_grad_hm=32,
+            stride_grad_hn=1,
+            stride_hm=32,
+            stride_hn=1,
+            stride_grad_a=1,
+            stride_a=1,
+            stride_grad_b=1,
+            stride_grad_r=1,
+            stride_r=1,
+            BLOCK_SIZE_N=32,
+        )
 
         return (
             grad_h.to(ctx.dtype),
@@ -496,15 +342,13 @@ class mHCSinkhornOp(torch.autograd.Function):
         """
         H_res: (B, T, n, n)
         """
-
-        assert n in [2, 4], "Only n=2, 4 are supported in this implementation"
-
         B, T, _, _ = H_res.shape
 
         ctx.dtype = H_res.dtype
         H_res = H_res.to(torch.float32)
 
         H_res = H_res.contiguous().clone().view(B * T, n * n)  # (B*T, n*n)
+        assert n == 4, "This implementation only supports n=4 for now due to BLOCK_SIZE constraints"
 
         hist_f, hist_g = None, None
         if not recompute_hist:
