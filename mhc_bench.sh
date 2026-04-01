@@ -28,30 +28,65 @@ CONFIGS=(
 
 TMPBASE=$(mktemp -u /tmp/nsys_mhc_XXXXXX)
 
+# Run a command, stream+append output to OUTFILE, retry on ldconfig SIGSEGV.
+# Usage: run_with_retry <outfile> <cmd> [args...]
+run_with_retry() {
+    local outfile="$1"; shift
+    local max_attempts=5
+    local attempt=1
+    local tmpout exit_code
+    tmpout=$(mktemp)
+
+    while [ $attempt -le $max_attempts ]; do
+        set +e
+        "$@" >"$tmpout" 2>&1
+        exit_code=$?
+        set -e
+        tee -a "$outfile" <"$tmpout"
+
+        if [ $exit_code -eq 0 ]; then
+            rm -f "$tmpout"
+            return 0
+        fi
+
+        if grep -qF "SIGSEGV" "$tmpout" && grep -qF "ldconfig" "$tmpout"; then
+            echo ">>> ldconfig SIGSEGV detected, retrying (attempt $attempt/$max_attempts)..." | tee -a "$outfile"
+            attempt=$((attempt + 1))
+            continue
+        fi
+
+        rm -f "$tmpout"
+        return $exit_code
+    done
+
+    rm -f "$tmpout"
+    return $exit_code
+}
+
 for config in "${CONFIGS[@]}"; do
     read -r B T C <<< "$config"
-    OUTFILE="$SCRIPT_DIR/nsys_mhc_B${B}_T${T}_C${C}.txt"
+    OUTFILE="$SCRIPT_DIR/profile/nsys_mhc_B${B}_T${T}_C${C}.txt"
 
     echo "=== B=$B T=$T C=$C ===" | tee "$OUTFILE"
-
-    nsys profile \
-        --trace=cuda \
+    run_with_retry "$OUTFILE" nsys profile \
+        --trace=cuda,nvtx \
         --cuda-memory-usage=false \
         --cpuctxsw=none \
         --capture-range=cudaProfilerApi \
         --capture-range-end=stop \
         --stats=true \
         --force-overwrite=true \
-        --output="$TMPBASE" \
         python "$BENCH" \
             --operation all \
             --B "$B" --T "$T" --C "$C" \
             --warmup 3 \
-            --iters 5 \
-        2>&1 | tee -a "$OUTFILE"
+            --iters 1
 
-    # Discard the nsys report files
-    rm -f "${TMPBASE}.nsys-rep" "${TMPBASE}.sqlite"
+    OUTFILE="$SCRIPT_DIR/profile/ncu_mhc_B${B}_T${T}_C${C}.txt"
+    run_with_retry "$OUTFILE" ncu \
+        --clock-control none --cache-control none --metrics gpu__time_duration.sum \
+        --kernel-name regex:"_mhc.*|_ct.*" --profile-from-start off \
+        python "$BENCH" --B "$B" --T "$T" --C "$C" --operation all --warmup 3 --iters 1
 
     echo "" >> "$OUTFILE"
     echo "Written: $OUTFILE"
