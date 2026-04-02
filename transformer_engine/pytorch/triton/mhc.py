@@ -110,7 +110,7 @@ class mHCProjectionOp(torch.autograd.Function):
         """
         Fused backward pass for the fused mHC projection operation.
 
-        grad_H: (B * T, 2n + n^2), which is padded to 32 with zeroes in the last dimension
+        grad_H: (B * T, 2n + n^2), which is padded to 32 in the last dimension
         grad_ms: (B * T)
 
         grad_x, x: (B * T, nC)
@@ -210,13 +210,13 @@ class mHCElementwiseOp(torch.autograd.Function):
         """
         Reference operator for mHC's pre and post calculations
 
-        :param: H: (B * T, 2n + n^2), the unprocessed H matrices, which is padded to 32 with zeroes in the last dimension
+        :param: H: (B * T, 2n + n^2), the unprocessed H matrices, which is padded to 32 in the last dimension
         :param: alpha: (3,), three scalar parameters
         :param: beta: (1, 2n + n^2), bias term
         :param: var: (B * T), the variance for X
         :param: n: int, the width of Hyper-Connection
 
-        :return out: (B * T, 2n + n^2), the processed H matrices, , which is padded to 32 with zeroes in the last dimension
+        :return out: (B * T, 2n + n^2), the processed H matrices, , which is padded to 32 in the last dimension
         """
 
         ctx.dtype = H.dtype
@@ -231,7 +231,7 @@ class mHCElementwiseOp(torch.autograd.Function):
         beta = beta.contiguous()
         ms = ms.contiguous()
 
-        out = torch.zeros(
+        out = torch.empty(
             (M, 32), device=H.device, dtype=H.dtype
         )  # Pad the output to 32 in the last dimension
 
@@ -266,9 +266,9 @@ class mHCElementwiseOp(torch.autograd.Function):
         """
         Backward pass for mHC's pre and post calculations
 
-        :param grad_out: (B * T, 2n + n^2), gradients of the output H matrices, which is padded to 32 with zeroes in the last dimension
+        :param grad_out: (B * T, 2n + n^2), gradients of the output H matrices, which is padded to 32 in the last dimension
 
-        :return grad_H: (B * T, 2n + n^2), gradients of the input H matrices, which is padded to 32 with zeroes in the last dimension
+        :return grad_H: (B * T, 2n + n^2), gradients of the input H matrices, which is padded to 32 in the last dimension
         :return grad_alpha: (3,), gradients of the alpha parameters
         :return grad_beta: (1, 2n + n^2), gradients of the beta parameters
         :return grad_r: (B * T), gradients of the r values
@@ -345,15 +345,15 @@ class mHCSinkhornOp(torch.autograd.Function):
         ctx.dtype = H_res.dtype
         H_res = H_res.to(torch.float32)
 
-        H_res = H_res.contiguous().clone().view(B * T, n * n)  # (B*T, n*n)
+        H_res = H_res.contiguous().view(B * T, n * n)  # (B*T, n*n)
         assert n == 4, "This implementation only supports n=4 for now due to BLOCK_SIZE constraints"
 
         hist_f, hist_g = None, None
         if not recompute_hist:
             # History buffers: (iters+1, B, T, n)
-            hist_f = torch.zeros((iters + 1, B, T, n), device=H_res.device, dtype=H_res.dtype)
-            hist_g = torch.zeros((iters + 1, B, T, n), device=H_res.device, dtype=H_res.dtype)
-        H_res_out = torch.zeros_like(H_res)  # (B*T, n*n)
+            hist_f = torch.empty((iters + 1, B, T, n), device=H_res.device, dtype=H_res.dtype)
+            hist_g = torch.empty((iters + 1, B, T, n), device=H_res.device, dtype=H_res.dtype)
+        H_res_out = torch.empty_like(H_res)  # (B*T, n*n)
 
         grid = lambda meta: (triton.cdiv(B * T * n * n, meta["BLOCK_SIZE"]),)
 
@@ -406,8 +406,8 @@ class mHCSinkhornOp(torch.autograd.Function):
         iters = ctx.iters
         if recompute_hist:
             H_res, H_res_out = ctx.saved_tensors
-            hist_f = torch.zeros((iters + 1, B, T, n), device=H_res.device, dtype=H_res.dtype)
-            hist_g = torch.zeros((iters + 1, B, T, n), device=H_res.device, dtype=H_res.dtype)
+            hist_f = torch.empty((iters + 1, B, T, n), device=H_res.device, dtype=H_res.dtype)
+            hist_g = torch.empty((iters + 1, B, T, n), device=H_res.device, dtype=H_res.dtype)
         else:
             H_res, H_res_out, hist_f, hist_g = ctx.saved_tensors
 
@@ -416,7 +416,7 @@ class mHCSinkhornOp(torch.autograd.Function):
 
         grad_res_out = grad_out.clone().contiguous().view(M, n * n)
 
-        grad_res = torch.zeros_like(H_res)
+        grad_res = torch.empty_like(H_res)
 
         grid = lambda meta: (triton.cdiv(M * n * n, meta["BLOCK_SIZE"]),)
 
@@ -492,8 +492,8 @@ class mHCPreOp(torch.autograd.Function):
         out = torch.empty((B, T, C), device=x.device, dtype=x.dtype)
 
         grid = lambda META: (
-            triton.cdiv(M, META["BLOCK_SIZE_M"]),
             triton.cdiv(C, META["BLOCK_SIZE_C"]),
+            triton.cdiv(M, META["BLOCK_SIZE_M"]),
         )
 
         _mhc_pre_fwd[grid](
@@ -539,7 +539,7 @@ class mHCPreOp(torch.autograd.Function):
         assert n == 4 and nC % n == 0, "Only n=4 is supported in this implementation"
         M = B * T
 
-        grad_x = torch.zeros_like(x)
+        grad_x = torch.empty_like(x)
         grad_H_pre = torch.zeros(
             (B, T, n), dtype=torch.float32, device=H_pre.device
         )  # We need to use atomic_add for this so we need higher precision
@@ -606,8 +606,8 @@ class mHCPostResOp(torch.autograd.Function):
         out = torch.empty((B, T, n, C), device=x.device, dtype=x.dtype)
 
         grid = lambda META: (
-            triton.cdiv(M, META["BLOCK_SIZE_M"]),
             triton.cdiv(C, META["BLOCK_SIZE_C"]),
+            triton.cdiv(M, META["BLOCK_SIZE_M"]),
         )
 
         _mhc_post_res_fwd[grid](
@@ -652,11 +652,11 @@ class mHCPostResOp(torch.autograd.Function):
         n = ctx.n
         M = B * T
 
-        grad_f = torch.zeros_like(f)
+        grad_f = torch.empty_like(f)
         grad_H_post = torch.zeros_like(
             H_post, dtype=torch.float32
         )  # We need to use atomic_add for this so we need higher precision
-        grad_x = torch.zeros_like(x)
+        grad_x = torch.empty_like(x)
         grad_H_res = torch.zeros_like(
             H_res, dtype=torch.float32
         )  # We need to use atomic_add for this so we need higher precision

@@ -953,8 +953,8 @@ def _mhc_pre_fwd(
     However instead of matmul, we will use the equivalent operation:
     ((BLOCK_SIZE_M, 1, n).T * (BLOCK_SIZE_M, n, BLOCK_SIZE_C)).sum(dim=-2) = (BLOCK_SIZE_M, 1, BLOCK_SIZE_C) -> (BLOCK_SIZE_M, BLOCK_SIZE_C)
     """
-    pid_m = tl.program_id(0)
-    pid_c = tl.program_id(1)
+    pid_m = tl.program_id(1)
+    pid_c = tl.program_id(0)
 
     tl.static_assert(n == 4)
     tl.assume(M > 0)
@@ -1187,8 +1187,8 @@ def _mhc_post_res_fwd(
     output = H_post.T @ f: (BLOCK_SIZE_M, n, 1) @ (BLOCK_SIZE_M, 1, BLOCK_SIZE_C)  = (BLOCK_SIZE_M, n, BLOCK_SIZE_C)
            + H_res @ x: (BLOCK_SIZE_M, n, n) @ (BLOCK_SIZE_M, n, BLOCK_SIZE_C) = (BLOCK_SIZE_M, n, BLOCK_SIZE_C)
     """
-    pid_m = tl.program_id(0)
-    pid_c = tl.program_id(1)
+    pid_m = tl.program_id(1)
+    pid_c = tl.program_id(0)
 
     tl.static_assert(n == 4)
     tl.assume(M > 0)
