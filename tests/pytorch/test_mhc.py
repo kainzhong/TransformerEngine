@@ -305,7 +305,7 @@ def test_mhc_elementwise(cfg: MHCConfig, dtype):
     H = H_padded[:, :N]
     alpha = torch.randn(3, device="cuda", requires_grad=True, dtype=dtype)
     beta = torch.randn(1, 2 * n + n * n, device="cuda", requires_grad=True, dtype=dtype)
-    r_raw = torch.randn(B * T, device="cuda", dtype=dtype) + 1.0
+    r_raw = torch.randn(B * T, device="cuda", dtype=dtype).abs() + 1.0
     r = r_raw.detach().clone().requires_grad_(True)
 
     H_ref = H.detach().clone().requires_grad_(True)
