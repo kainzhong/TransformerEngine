@@ -110,7 +110,7 @@ def _mhc_projection_fwd_fused(
         )  # (BLOCK_SIZE_M, BLOCK_SIZE_K), its cache will not be reused
         phi_ptrs = phi_ptr + offs_n_full[:, None] * stride_phin + k_offs[None, :] * stride_phik
         phi = tl.load(
-            phi_ptrs, mask=(offs_n_full[:, None] < N) & mask_k[None, :], other=0.0
+            phi_ptrs, mask=(offs_n_full[:, None] < N) & mask_k[None, :], other=0.0, cache_modifier=".ca"
         )  # (BLOCK_SIZE_N, BLOCK_SIZE_K), loaded as column-major, its cache will be reused by other blocks
         # RMSNorm denominator computation
         ms_acc += tl.sum(x * x, axis=1)
@@ -984,7 +984,7 @@ def _mhc_pre_fwd(
     )  # (BLOCK_SIZE_M, n, BLOCK_SIZE_C)
 
     H_pre_ptrs = H_pre_ptr + offs_m[:, None] * stride_H_pre_m + offs_n[None, :] * stride_H_pre_n
-    H_pre = tl.load(H_pre_ptrs, mask=mask_m[:, None], other=0.0)  # (BLOCK_SIZE_M, n)
+    H_pre = tl.load(H_pre_ptrs, mask=mask_m[:, None], other=0.0, cache_modifier=".ca")  # (BLOCK_SIZE_M, n)
 
     H_pre = tl.reshape(
         H_pre, (BLOCK_SIZE_M, n, 1)
@@ -1091,7 +1091,7 @@ def _mhc_pre_bwd(
 
     H_pre_offs = pid_m * BLOCK_SIZE_M * n + tl.arange(0, BLOCK_SIZE_M * n)
     H_pre = tl.load(
-        H_pre_ptr + H_pre_offs, mask=H_pre_offs < M * n, other=0.0
+        H_pre_ptr + H_pre_offs, mask=H_pre_offs < M * n, other=0.0, cache_modifier=".ca"
     )  # (BLOCK_SIZE_M * n)
     H_pre = tl.reshape(H_pre, (BLOCK_SIZE_M, n))  # (BLOCK_SIZE_M, n)
 
@@ -1213,11 +1213,18 @@ def _mhc_post_res_fwd(
     f = tl.load(f_ptrs, mask=mask_m[:, None] & mask_c[None, :], other=0.0)
 
     H_post_offs = pid_m * BLOCK_SIZE_M * n + tl.arange(0, BLOCK_SIZE_M * n)
-    H_post = tl.load(H_post_ptr + H_post_offs, mask=H_post_offs < M * n, other=0.0)
+    H_post = tl.load(H_post_ptr + H_post_offs, mask=H_post_offs < M * n, other=0.0, cache_modifier=".ca")
     H_post = tl.reshape(H_post, (BLOCK_SIZE_M, n))  # (BLOCK_SIZE_M, n)
 
+    # Residual connection path: res_out = H_post.T @ f
+    # (BLOCK_SIZE_M, n, 1) @ (BLOCK_SIZE_M, 1, BLOCK_SIZE_C)  = (BLOCK_SIZE_M, n, BLOCK_SIZE_C)
+    # Due to broadcasting, it's equivalent to a multiplicaiton
+    H_post = tl.reshape(H_post, (BLOCK_SIZE_M, n, 1))
+    f = tl.reshape(f, (BLOCK_SIZE_M, 1, BLOCK_SIZE_C))
+    res_out = H_post * f
+
     H_res_offs = pid_m * BLOCK_SIZE_M * n * n + tl.arange(0, BLOCK_SIZE_M * n * n)
-    H_res = tl.load(H_res_ptr + H_res_offs, mask=H_res_offs < M * n * n, other=0.0)
+    H_res = tl.load(H_res_ptr + H_res_offs, mask=H_res_offs < M * n * n, other=0.0, cache_modifier=".ca")
     H_res = tl.reshape(H_res, (BLOCK_SIZE_M, n, n))  # (BLOCK_SIZE_M, n, n)
 
     x_ptrs = (
@@ -1254,13 +1261,6 @@ def _mhc_post_res_fwd(
     manifold_out_acc = tl.fma(H_res3[:, :, None], x3[:, None, :], manifold_out_acc)
 
     manifold_out = manifold_out_acc.to(x.dtype)
-
-    # Residual connection path: res_out = H_post.T @ f
-    # (BLOCK_SIZE_M, n, 1) @ (BLOCK_SIZE_M, 1, BLOCK_SIZE_C)  = (BLOCK_SIZE_M, n, BLOCK_SIZE_C)
-    # Due to broadcasting, it's equivalent to a multiplicaiton
-    H_post = tl.reshape(H_post, (BLOCK_SIZE_M, n, 1))
-    f = tl.reshape(f, (BLOCK_SIZE_M, 1, BLOCK_SIZE_C))
-    res_out = H_post * f
 
     out = manifold_out + res_out
 
