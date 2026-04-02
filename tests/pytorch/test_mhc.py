@@ -213,12 +213,12 @@ mhc_configs = [
         24 * 128,
     ),
     MHCConfig(
-        8,
+        13,
         1,
         16 * 128,
     ),
     MHCConfig(
-        8,
+        7,
         1,
         16 * 256,
     ),
@@ -235,7 +235,7 @@ mhc_configs = [
     MHCConfig(
         8,
         1,
-        16 * 512,
+        16 * 500,
     ),
     MHCConfig(
         8,
@@ -245,7 +245,7 @@ mhc_configs = [
     MHCConfig(
         8,
         1,
-        16 * 1024,
+        16 * 376,
     ),
     MHCConfig(
         8,

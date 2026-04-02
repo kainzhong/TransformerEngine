@@ -57,7 +57,6 @@ class mHCProjectionOp(torch.autograd.Function):
         H = torch.zeros((M, 32), device=device, dtype=torch.float32)
         ms = torch.zeros((M), device=device, dtype=torch.float32) # Mean square for s, used to compute RMSNorm in the next kernel
 
-        # Launch triton kernel
         grid = lambda META: (triton.cdiv(M, META["BLOCK_SIZE_M"]), triton.cdiv(K, META["BLOCK_SIZE_K"]))
 
         if use_tf32:
@@ -142,7 +141,7 @@ class mHCProjectionOp(torch.autograd.Function):
         ms = ms.contiguous().view(M,)
 
         grad_x = torch.zeros((M, K), device=device, dtype=x.dtype)
-        grad_phi = (grad_H[:, :N].T @ x).to(
+        grad_phi = (grad_H.T @ x)[:N, :].to(
             ctx.phi_dtype
         )  # (2n + n^2, M) @ (M, nC) = (2n + n^2, nC), note that the last dimension of grad_H is already padded to 32
 
@@ -483,14 +482,14 @@ class mHCPreOp(torch.autograd.Function):
         x = x.contiguous()
         H_pre = (
             H_pre.contiguous()
-        )  # This likely will incur a copy but H_pre is fairly small (B*T*4), so it should be fine
+        )
 
         B, T, n, C = x.shape
         nC = n * C
         assert n == 4 and nC % n == 0, "Only n=4 is supported in this implementation"
         M = B * T
 
-        out = torch.zeros((B, T, C), device=x.device, dtype=x.dtype)
+        out = torch.empty((B, T, C), device=x.device, dtype=x.dtype)
 
         grid = lambda META: (
             triton.cdiv(M, META["BLOCK_SIZE_M"]),
@@ -604,7 +603,7 @@ class mHCPostResOp(torch.autograd.Function):
         assert n == 4 and nC % n == 0, "Only n=4 is supported in this implementation"
         M = B * T
 
-        out = torch.zeros((B, T, n, C), device=x.device, dtype=x.dtype)
+        out = torch.empty((B, T, n, C), device=x.device, dtype=x.dtype)
 
         grid = lambda META: (
             triton.cdiv(M, META["BLOCK_SIZE_M"]),

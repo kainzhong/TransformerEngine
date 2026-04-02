@@ -9,32 +9,42 @@ import triton
 import triton.language as tl
 
 
-def projection_config(fwd=True):
+def projection_config_fwd():
     block_m = [32, 64, 128]
-    block_k = [1024, 2048, 4096]
+    block_k = [512, 1024]
     step_k = [32, 64, 128]
+    warps = [2, 4]
+    stages = [3, 4]
+
+    configs = []
+    for m, bk, sk, w, s in itertools.product(block_m, block_k, step_k, warps, stages):
+        configs.append(
+            triton.Config({"BLOCK_SIZE_M": m, "BLOCK_SIZE_K": bk, "STEP_SIZE_K": sk}, num_warps=w, num_stages=s)
+        )
+    if os.environ.get("TRITON_SKIP_AUTOTUNING", "0") == "1":
+        configs = configs[:1]
+    return configs
+
+def projection_config_bwd():
+    block_m = [32, 64, 128]
+    block_k = [32, 64, 128]
     warps = [2, 4]
     stages = [2, 3, 4]
 
     configs = []
-    if fwd:
-        for m, bk, sk, w, s in itertools.product(block_m, block_k, step_k, warps, stages):
-            configs.append(
-                triton.Config({"BLOCK_SIZE_M": m, "BLOCK_SIZE_K": bk, "STEP_SIZE_K": sk}, num_warps=w, num_stages=s)
-            )
-    else: # bwd doesn't have step_k as a parameter
-        for m, k, w, s in itertools.product(block_m, block_k, warps, stages):
-            configs.append(
-                triton.Config({"BLOCK_SIZE_M": m, "BLOCK_SIZE_K": k}, num_warps=w, num_stages=s)
-            )
+    for m, bk, w, s in itertools.product(block_m, block_k, warps, stages):
+        configs.append(
+            triton.Config({"BLOCK_SIZE_M": m, "BLOCK_SIZE_K": bk}, num_warps=w, num_stages=s)
+        )
     if os.environ.get("TRITON_SKIP_AUTOTUNING", "0") == "1":
         configs = configs[:1]
     return configs
 
 
 @triton.autotune(
-    configs=projection_config(True),
+    configs=projection_config_fwd(),
     key=["M", "K"],
+    reset_to_zero=["h_ptr", "ms_ptr"]
 )
 @triton.jit
 def _mhc_projection_fwd_fused(
@@ -70,6 +80,7 @@ def _mhc_projection_fwd_fused(
     pid_k = tl.program_id(axis=1)
 
     tl.assume(pid_m >= 0)
+    tl.assume(pid_k >= 0)
     tl.assume(stride_xm > 0)
     tl.assume(stride_xk == 1)
     tl.assume(stride_phin == K)
@@ -96,30 +107,29 @@ def _mhc_projection_fwd_fused(
         x_ptrs = x_ptr + offs_m[:, None] * stride_xm + k_offs[None, :] * stride_xk
         x = tl.load(
             x_ptrs, mask=mask_m[:, None] & mask_k[None, :], other=0.0
-        )  # (BLOCK_SIZE_M, BLOCK_SIZE_K)
+        )  # (BLOCK_SIZE_M, BLOCK_SIZE_K), its cache will not be reused
         phi_ptrs = phi_ptr + offs_n_full[:, None] * stride_phin + k_offs[None, :] * stride_phik
         phi = tl.load(
             phi_ptrs, mask=(offs_n_full[:, None] < N) & mask_k[None, :], other=0.0
-        )  # (BLOCK_SIZE_N, BLOCK_SIZE_K), loaded as column-major
-        phi = tl.trans(phi, (1, 0))  # ( BLOCK_SIZE_K, BLOCK_SIZE_N)
+        )  # (BLOCK_SIZE_N, BLOCK_SIZE_K), loaded as column-major, its cache will be reused by other blocks
         # RMSNorm denominator computation
         ms_acc += tl.sum(x * x, axis=1)
         # Matrix multiplication
-        h_acc = tl.dot(x, phi, h_acc, input_precision=precision, out_dtype=tl.float32)
+        h_acc = tl.dot(x, tl.trans(phi, (1, 0)), h_acc, input_precision=precision, out_dtype=tl.float32)
 
     h_ptrs = h_ptr + offs_m[:, None] * stride_hm + offs_n_full[None, :] * stride_hn
-    tl.atomic_add(h_ptrs, h_acc, mask=mask_m[:, None])
+    tl.atomic_add(h_ptrs, h_acc, mask=mask_m[:, None], sem="relaxed")
 
     offs_rm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
     masks_rm = offs_rm < M
     offs_rm %= M
     ms_ptrs = ms_ptr + offs_rm * stride_ms
     ms = ms_acc / tl.cast(K, tl.float32)
-    tl.atomic_add(ms_ptrs, ms, mask=masks_rm)
+    tl.atomic_add(ms_ptrs, ms, mask=masks_rm, sem="relaxed")
 
 
 @triton.autotune(
-    configs=projection_config(False),
+    configs=projection_config_bwd(),
     key=["M", "K"],
 )
 @triton.jit
