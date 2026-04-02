@@ -38,10 +38,10 @@ class mHCProjectionOp(torch.autograd.Function):
             - phi_res: (n^2, nC)
 
         H = x @ phi.T: (B*T, nC) @ (nC, 2n + n^2) = (B*T, 2n + n^2)
-        r = sum(x^2) / sqrt(nC): (B*T,)
+        ms = mean(x^2): (B*T,)
 
         :return H: projection matrices of shape (B*T, 2n + n^2), which is padded to 32 with zeroes in the last dimension
-        :return r: normalization factor of shape (B*T,)
+        :return ms: mean square for s, used to compute RMSNorm in the next kernel
         """
         x = x.contiguous()
 
@@ -54,18 +54,18 @@ class mHCProjectionOp(torch.autograd.Function):
         N = phi.shape[0]
 
         # Pad H to (B, T, 32) for better memory access pattern in the kernel, but only the first N elements in the last dimension are valid
-        H = torch.zeros((M, 32), device=device, dtype=x.dtype)
-        r = torch.zeros((M), device=device, dtype=x.dtype)
+        H = torch.zeros((M, 32), device=device, dtype=torch.float32)
+        ms = torch.zeros((M), device=device, dtype=torch.float32) # Mean square for s, used to compute RMSNorm in the next kernel
 
         # Launch triton kernel
-        grid = lambda META: (triton.cdiv(M, META["BLOCK_SIZE_M"]),)
+        grid = lambda META: (triton.cdiv(M, META["BLOCK_SIZE_M"]), triton.cdiv(K, META["BLOCK_SIZE_K"]))
 
         if use_tf32:
             _mhc_projection_fwd_fused[grid](
                 x_ptr=x,  # (M, K)
                 phi_ptr=phi,  # (N, K)
                 h_ptr=H,  # (M, 32)
-                r_ptr=r,  # (M,)
+                ms_ptr=ms,  # (M,)
                 M=M,
                 N=N,
                 K=K,
@@ -75,18 +75,17 @@ class mHCProjectionOp(torch.autograd.Function):
                 stride_phik=1,  # strides for phi
                 stride_hm=32,
                 stride_hn=1,  # strides for H, remember it's padded to 32!
-                stride_r=1,  # strides for r, which is a 1D tensor
+                stride_ms=1,  # strides for ms, which is a 1D tensor
                 BLOCK_SIZE_N=32,
                 out_dtype=tl.float32 if x.dtype == torch.float32 else tl.bfloat16,
                 precision="tf32",
-                eps=torch.finfo(torch.float32).eps,
             )
         else:
             _mhc_projection_fwd_fused[grid](
                 x_ptr=x,  # (M, K)
                 phi_ptr=phi,  # (N, K)
                 h_ptr=H,  # (M, 32)
-                r_ptr=r,  # (M,)
+                ms_ptr=ms,  # (M,)
                 M=M,
                 N=N,
                 K=K,
@@ -96,51 +95,51 @@ class mHCProjectionOp(torch.autograd.Function):
                 stride_phik=1,  # strides for phi
                 stride_hm=32,
                 stride_hn=1,  # strides for H, remember it's padded to 32!
-                stride_r=1,  # strides for r, which is a 1D tensor
+                stride_ms=1,  # strides for ms, which is a 1D tensor
                 BLOCK_SIZE_N=32,
                 out_dtype=tl.float32 if x.dtype == torch.float32 else tl.bfloat16,
                 precision="ieee",
-                eps=torch.finfo(torch.float32).eps,
             )
 
-        ctx.save_for_backward(x, phi, r)
+        ctx.save_for_backward(x, phi, ms)
         ctx.phi_dtype = phi.dtype
 
-        return H.to(ctx.dtype), r.to(ctx.dtype)
+        return H.to(ctx.dtype), ms # Keep ms in fp32
 
     @staticmethod
-    def backward(ctx, grad_H, grad_r):
+    def backward(ctx, grad_H, grad_ms):
         """
         Fused backward pass for the fused mHC projection operation.
 
         grad_H: (B * T, 2n + n^2), which is padded to 32 with zeroes in the last dimension
-        grad_r: (B * T)
+        grad_ms: (B * T)
 
         grad_x, x: (B * T, nC)
         grad_phi, phi: (2n + n^2, nC)
 
         Forward:
         - H = x @ phi,
-        - r = (x * x).sum(dim=1) / sqrt(nC)
+        - ms = (x * x).mean(dim=1)
 
         Backward:
         - grad_phi = x^T @ grad_H: (nC, B*T) @ (B*T, 2n + n^2) = (nC, 2n + n^2)
             -This is left for pytorch to handle
 
-        - grad_x = (grad_H @ phi) + (x * (grad_r * 2  / sqrt(nC))):
+        TODO: fix the desc here
+        - grad_x = (grad_H @ phi) + (x * (grad_ms * 2  / K)):
             - grad_H @ phi: (B*T, 2n + n^2) @ (2n + n^2, nC) = (B*T, nC)
-            - x * (grad_r * 2  / sqrt(nC)): (B*T, nC) * (B*T, 1) = (B*T, nC)
+            - x * (grad_ms * 2  / K): (B*T, nC) * (B*T, 1) = (B*T, nC)
         """
 
-        x, phi, r = ctx.saved_tensors  # Note phi here is still column-major
+        x, phi, ms = ctx.saved_tensors  # Note phi here is still column-major
         M, K = x.shape
         device = x.device
 
         N = phi.shape[0]
 
         grad_H = grad_H.contiguous().view(M, -1)
-        grad_r = grad_r.contiguous().view(M,)
-        r = r.contiguous().view(M,)
+        grad_ms = grad_ms.contiguous().view(M,)
+        ms = ms.contiguous().view(M,)
 
         grad_x = torch.zeros((M, K), device=device, dtype=x.dtype)
         grad_phi = (grad_H[:, :N].T @ x).to(
@@ -159,8 +158,7 @@ class mHCProjectionOp(torch.autograd.Function):
                 dx_ptr=grad_x,  # (M, K)
                 phi_ptr=phi,  # (N, K)
                 dh_ptr=grad_H,  # (M, 32)
-                r_ptr=r,
-                dr_ptr=grad_r,  # (M,),
+                dms_ptr=grad_ms,  # (M,),
                 M=M,
                 N=N,
                 K=K,
@@ -174,7 +172,7 @@ class mHCProjectionOp(torch.autograd.Function):
                 stride_dphik=1,
                 stride_dhm=32,
                 stride_dhn=1,  # strides for grad_H, remember it's padded to 32!
-                stride_dr=1,
+                stride_dms=1,
                 BLOCK_SIZE_N=32,
                 precision="tf32",
             )
@@ -184,8 +182,7 @@ class mHCProjectionOp(torch.autograd.Function):
                 dx_ptr=grad_x,  # (M, K)
                 phi_ptr=phi,  # (N, K)
                 dh_ptr=grad_H,  # (M, 32)
-                r_ptr=r,
-                dr_ptr=grad_r,  # (M,),
+                dms_ptr=grad_ms,  # (M,),
                 M=M,
                 N=N,
                 K=K,
@@ -199,7 +196,7 @@ class mHCProjectionOp(torch.autograd.Function):
                 stride_dphik=1,
                 stride_dhm=32,
                 stride_dhn=1,  # strides for grad_H, remember it's padded to 32!
-                stride_dr=1,
+                stride_dms=1,
                 BLOCK_SIZE_N=32,
                 precision="ieee",
             )
@@ -210,14 +207,14 @@ class mHCProjectionOp(torch.autograd.Function):
 class mHCElementwiseOp(torch.autograd.Function):
 
     @staticmethod
-    def forward(ctx, H, alpha, beta, r, n):
+    def forward(ctx, H, alpha, beta, ms, n):
         """
         Reference operator for mHC's pre and post calculations
 
         :param: H: (B * T, 2n + n^2), the unprocessed H matrices, which is padded to 32 with zeroes in the last dimension
         :param: alpha: (3,), three scalar parameters
         :param: beta: (1, 2n + n^2), bias term
-        :param: r: (B * T), the denominator for RMSNorm
+        :param: var: (B * T), the variance for X
         :param: n: int, the width of Hyper-Connection
 
         :return out: (B * T, 2n + n^2), the processed H matrices, , which is padded to 32 with zeroes in the last dimension
@@ -227,13 +224,13 @@ class mHCElementwiseOp(torch.autograd.Function):
         H = H.to(torch.float32)
         alpha = alpha.to(torch.float32)
         beta = beta.to(torch.float32)
-        r = r.to(torch.float32)
+        ms = ms.to(torch.float32)
 
         M, _ = H.shape
 
         H = H.contiguous()
         beta = beta.contiguous()
-        r = r.contiguous()
+        ms = ms.contiguous()
 
         out = torch.zeros(
             (M, 32), device=H.device, dtype=H.dtype
@@ -245,7 +242,7 @@ class mHCElementwiseOp(torch.autograd.Function):
             h_ptr=H,  # (M, N), which is padded to (M, 32)
             b_ptr=beta,  # (N,)
             a_ptr=alpha,  # (N,)
-            r_ptr=r,  # (M,)
+            ms_ptr=ms,  # (M,)
             out_ptr=out,  # (M, N), which is padded to (M, 32)
             M=M,
             n=n,
@@ -253,13 +250,14 @@ class mHCElementwiseOp(torch.autograd.Function):
             stride_hn=1,
             stride_a=1,
             stride_b=1,
-            stride_r=1,
+            stride_ms=1,
             stride_out_m=32,
             stride_out_n=1,  # strides for out, which is padded to 32 in the last dimension
             BLOCK_SIZE_N=32,
+            eps=torch.finfo(ms.dtype).eps,
         )
 
-        ctx.save_for_backward(H, alpha, r, out)
+        ctx.save_for_backward(H, alpha, ms, out)
         ctx.n = n
 
         return out.to(ctx.dtype)  # Cast back to the original dtype of H
@@ -277,7 +275,7 @@ class mHCElementwiseOp(torch.autograd.Function):
         :return grad_r: (B * T), gradients of the r values
         :return None: placeholder for the non-tensor n argument
         """
-        H, alpha, r, out = ctx.saved_tensors
+        H, alpha, ms, out = ctx.saved_tensors
         n = ctx.n
 
         grad_out = grad_out.contiguous()
@@ -294,7 +292,7 @@ class mHCElementwiseOp(torch.autograd.Function):
         grad_beta = grad_beta_padded[
             :, :N
         ]  # Use only the first N elements for grad_beta, the rest are just padding
-        grad_r = torch.zeros((M,), device=grad_out.device, dtype=grad_out.dtype)
+        grad_ms = torch.zeros((M,), device=grad_out.device, dtype=grad_out.dtype)
 
         grid = lambda META: (triton.cdiv(M, META["BLOCK_SIZE_M"]),)
 
@@ -306,8 +304,8 @@ class mHCElementwiseOp(torch.autograd.Function):
             grad_a_ptr=grad_alpha,
             a_ptr=alpha,
             grad_b_ptr=grad_beta,
-            grad_r_ptr=grad_r,
-            r_ptr=r,
+            grad_ms_ptr=grad_ms,
+            ms_ptr=ms,
             M=M,
             n=n,
             stride_grad_out_m=32,
@@ -321,16 +319,17 @@ class mHCElementwiseOp(torch.autograd.Function):
             stride_grad_a=1,
             stride_a=1,
             stride_grad_b=1,
-            stride_grad_r=1,
-            stride_r=1,
+            stride_grad_ms=1,
+            stride_ms=1,
             BLOCK_SIZE_N=32,
+            eps=torch.finfo(ms.dtype).eps,
         )
 
         return (
             grad_h.to(ctx.dtype),
             grad_alpha.to(ctx.dtype),
             grad_beta.to(ctx.dtype),
-            grad_r.to(ctx.dtype),
+            grad_ms.to(ctx.dtype),
             None,
         )
 

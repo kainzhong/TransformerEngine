@@ -9,24 +9,31 @@ import triton
 import triton.language as tl
 
 
-def projection_config():
+def projection_config(fwd=True):
     block_m = [32, 64, 128]
-    block_k = [32, 64, 128]
+    block_k = [1024, 2048, 4096]
+    step_k = [32, 64, 128]
     warps = [2, 4]
     stages = [2, 3, 4]
 
     configs = []
-    for m, k, w, s in itertools.product(block_m, block_k, warps, stages):
-        configs.append(
-            triton.Config({"BLOCK_SIZE_M": m, "BLOCK_SIZE_K": k}, num_warps=w, num_stages=s)
-        )
+    if fwd:
+        for m, bk, sk, w, s in itertools.product(block_m, block_k, step_k, warps, stages):
+            configs.append(
+                triton.Config({"BLOCK_SIZE_M": m, "BLOCK_SIZE_K": bk, "STEP_SIZE_K": sk}, num_warps=w, num_stages=s)
+            )
+    else: # bwd doesn't have step_k as a parameter
+        for m, k, w, s in itertools.product(block_m, block_k, warps, stages):
+            configs.append(
+                triton.Config({"BLOCK_SIZE_M": m, "BLOCK_SIZE_K": k}, num_warps=w, num_stages=s)
+            )
     if os.environ.get("TRITON_SKIP_AUTOTUNING", "0") == "1":
         configs = configs[:1]
     return configs
 
 
 @triton.autotune(
-    configs=projection_config(),
+    configs=projection_config(True),
     key=["M", "K"],
 )
 @triton.jit
@@ -34,7 +41,7 @@ def _mhc_projection_fwd_fused(
     x_ptr,  # (M, K)
     phi_ptr,  # (N, K)
     h_ptr,  # (M, 32)
-    r_ptr,  # (M,)
+    ms_ptr,  # (M,)
     M,
     N,
     K,
@@ -44,26 +51,23 @@ def _mhc_projection_fwd_fused(
     stride_phik: tl.constexpr,
     stride_hm: tl.constexpr,
     stride_hn: tl.constexpr,
-    stride_r: tl.constexpr,
+    stride_ms: tl.constexpr,
     # Meta-parameters
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
+    STEP_SIZE_K: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     out_dtype: tl.constexpr,
     precision: tl.constexpr,
-    eps: tl.constexpr,
 ):
     """
-    Kernel for computing the matmul Y = X x W and r = sqrt(((X * X).mean(dim=1) + eps) / K) in a fused manner.
+    Kernel for computing the matmul Y = X @ W.T and ms = (X * X).mean(dim=1) in a fused manner.
     X has shape (M, K), W has shape (N, K) which represent a col-major (K, N) and Y has shape (M, N)
-    r has shape (M,)
-    Note: W is column-major so we can have coalesced memory access when loading W.
-
-    Each block computes a row of X and the full W, since N is very small here (2*n + n^2, where n is the width of Hyper-Connection and is at most 4)
-    We don't need to use grouped ordering because the output MxN has small width which is the same as one block's width
+    ms has shape (M,)
     """
 
     pid_m = tl.program_id(axis=0)
+    pid_k = tl.program_id(axis=1)
 
     tl.assume(pid_m >= 0)
     tl.assume(stride_xm > 0)
@@ -72,7 +76,7 @@ def _mhc_projection_fwd_fused(
     tl.assume(stride_phik == 1)
     tl.assume(stride_hm == 32)
     tl.assume(stride_hn == 1)
-    tl.assume(stride_r == 1)
+    tl.assume(stride_ms == 1)
 
     tl.assume(BLOCK_SIZE_M % 32 == 0)
     tl.assume(BLOCK_SIZE_K % 32 == 0)
@@ -83,10 +87,11 @@ def _mhc_projection_fwd_fused(
     mask_m = offs_m < M
 
     h_acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
-    r_acc = tl.zeros((BLOCK_SIZE_M,), dtype=tl.float32)
+    ms_acc = tl.zeros((BLOCK_SIZE_M,), dtype=tl.float32)
 
-    for k_start in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
-        k_offs = k_start * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
+    k_base = pid_k * BLOCK_SIZE_K
+    for k_start in range(0, tl.cdiv(BLOCK_SIZE_K, STEP_SIZE_K)):
+        k_offs = k_base + k_start * STEP_SIZE_K + tl.arange(0, STEP_SIZE_K)
         mask_k = k_offs < K
         x_ptrs = x_ptr + offs_m[:, None] * stride_xm + k_offs[None, :] * stride_xk
         x = tl.load(
@@ -98,25 +103,23 @@ def _mhc_projection_fwd_fused(
         )  # (BLOCK_SIZE_N, BLOCK_SIZE_K), loaded as column-major
         phi = tl.trans(phi, (1, 0))  # ( BLOCK_SIZE_K, BLOCK_SIZE_N)
         # RMSNorm denominator computation
-        # r_acc += tl.sum((x * x).to(tl.float32), axis=1).to(r_acc.dtype)
-        x_fp32 = x.to(tl.float32)
-        r_acc += tl.sum(x_fp32 * x_fp32, axis=1)
+        ms_acc += tl.sum(x * x, axis=1)
         # Matrix multiplication
         h_acc = tl.dot(x, phi, h_acc, input_precision=precision, out_dtype=tl.float32)
-    h = h_acc.to(out_dtype)
 
     h_ptrs = h_ptr + offs_m[:, None] * stride_hm + offs_n_full[None, :] * stride_hn
-    tl.store(h_ptrs, h, mask=mask_m[:, None])
+    tl.atomic_add(h_ptrs, h_acc, mask=mask_m[:, None])
+
     offs_rm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
     masks_rm = offs_rm < M
     offs_rm %= M
-    r_ptrs = r_ptr + offs_rm * stride_r
-    r = tl.sqrt(r_acc / tl.cast(K, tl.float32) + eps).to(out_dtype)
-    tl.store(r_ptrs, r, mask=masks_rm)
+    ms_ptrs = ms_ptr + offs_rm * stride_ms
+    ms = ms_acc / tl.cast(K, tl.float32)
+    tl.atomic_add(ms_ptrs, ms, mask=masks_rm)
 
 
 @triton.autotune(
-    configs=projection_config(),
+    configs=projection_config(False),
     key=["M", "K"],
 )
 @triton.jit
@@ -125,8 +128,7 @@ def _mhc_projection_bwd_fused(
     dx_ptr,  # (M, K)
     phi_ptr,  # (N, K)
     dh_ptr,  # (M, N)
-    r_ptr,
-    dr_ptr,  # (M,)
+    dms_ptr,  # (M,)
     M,
     N,
     K,
@@ -140,7 +142,7 @@ def _mhc_projection_bwd_fused(
     stride_dphik: tl.constexpr,
     stride_dhm: tl.constexpr,
     stride_dhn: tl.constexpr,
-    stride_dr: tl.constexpr,
+    stride_dms: tl.constexpr,
     # Meta-parameters
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
@@ -165,6 +167,7 @@ def _mhc_projection_bwd_fused(
     tl.assume(stride_phik == 1)
     tl.assume(stride_dphin == K)
     tl.assume(stride_dphik == 1)
+    tl.assume(stride_dms == 1)
 
     tl.assume(BLOCK_SIZE_M % 32 == 0)
     tl.assume(BLOCK_SIZE_K % 32 == 0)
@@ -188,8 +191,7 @@ def _mhc_projection_bwd_fused(
 
     phi_ptrs = phi_ptr + offs_n_full[:, None] * stride_phin + offs_k[None, :] * stride_phik
     offs_r = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
-    r_ptrs = r_ptr + offs_r * stride_dr
-    dr_ptrs = dr_ptr + offs_r * stride_dr
+    dms_ptrs = dms_ptr + offs_r * stride_dms
 
     phi = tl.load(
         phi_ptrs, mask=(offs_n_full[:, None] < N) & mask_k[None, :], other=0.0
@@ -197,11 +199,8 @@ def _mhc_projection_bwd_fused(
     dx = tl.dot(
         dh, phi, input_precision=precision, out_dtype=tl.float32
     )  # (BLOCK_SIZE_M, BLOCK_SIZE_K)
-    dr = tl.load(dr_ptrs, mask=offs_r < M, other=0.0)  # (BLOCK_SIZE_M,)
-    r = tl.load(r_ptrs, mask=offs_r < M, other=1.0)  # (BLOCK_SIZE_M,)
-    r_scaled = dr / (tl.cast(K, tl.float32) * r)  # (BLOCK_SIZE_M,)
-    dx += x * r_scaled[:, None]
-
+    dms = tl.load(dms_ptrs, mask=offs_r < M, other=0.0)  # (BLOCK_SIZE_M,)
+    dx += x * (dms * 2 / tl.cast(K, tl.float32))[:, None]
     dx_ptrs = dx_ptr + offs_m[:, None] * stride_dxm + offs_k[None, :] * stride_dxk
     dx = dx.to(x.dtype)
     tl.store(dx_ptrs, dx, mask=mask_m[:, None] & mask_k[None, :])
@@ -230,7 +229,7 @@ def _mhc_elementwise_fwd_fused(
     h_ptr,  # (M, 2n + n^2), which is padded to (M, 32) in the last dimension
     a_ptr,  # (3,)
     b_ptr,  # (2n + n^2)
-    r_ptr,  # (M,)
+    ms_ptr,  # (M,)
     out_ptr,  # (M, 2n + n^2), which is padded to (M, 32) in the last dimension
     M,
     n,
@@ -238,12 +237,13 @@ def _mhc_elementwise_fwd_fused(
     stride_hn,
     stride_a,
     stride_b,
-    stride_r,
+    stride_ms,
     stride_out_m,
     stride_out_n,
     # Meta-parameters
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
+    eps: tl.constexpr,
 ):
     pid = tl.program_id(0)  # 1D grid
 
@@ -255,7 +255,7 @@ def _mhc_elementwise_fwd_fused(
     tl.assume(stride_out_n == 1)
     tl.assume(stride_a == 1)
     tl.assume(stride_b == 1)
-    tl.assume(stride_r == 1)
+    tl.assume(stride_ms == 1)
     tl.assume(BLOCK_SIZE_N == 32)
 
     N = 2 * n + n * n
@@ -275,7 +275,10 @@ def _mhc_elementwise_fwd_fused(
     a = tl.where(cols < N, a, 0.0)  # Mask out the garbage values in a
 
     b = tl.load(b_ptr + cols * stride_b, mask=cols < N, other=0.0)  # (BLOCK_SIZE_N,)
-    r = tl.load(r_ptr + offs_m * stride_r, mask=mask_m, other=0.0)  # (BLOCK_SIZE_M,)
+    ms = tl.load(ms_ptr + offs_m * stride_ms, mask=mask_m, other=0.0)  # (BLOCK_SIZE_M,)
+    # In projection kernel we use split-K so we only have the accumulated ms, 
+    # and now we need to take sqrt on the accumulated ms to obtain the RMSNorm denominator.
+    rms = tl.sqrt(ms + eps)
 
     h = tl.load(
         h_ptr + offs_m[:, None] * stride_hm + cols[None, :] * stride_hn,
@@ -285,7 +288,7 @@ def _mhc_elementwise_fwd_fused(
 
     h = a[None, :] * h
     h = tl.fma(
-        h, 1.0 / r[:, None], b[None, :]
+        h, 1.0 / rms[:, None], b[None, :]
     )  # (BLOCK_SIZE_M, BLOCK_SIZE_N), where the first 2n columns are H_pre and H_post, and the rest are H_res
     h_sigmoid_pre = tl.sigmoid(h)
     h_sigmold_post = 2 * h_sigmoid_pre
@@ -315,8 +318,8 @@ def _mhc_elementwise_bwd_fused(
     grad_a_ptr,
     a_ptr,  # (3,)
     grad_b_ptr,  # (2n + n^2,)
-    grad_r_ptr,
-    r_ptr,  # (M,)
+    grad_ms_ptr,
+    ms_ptr,  # (M,)
     M,
     n,
     stride_grad_out_m,
@@ -330,10 +333,11 @@ def _mhc_elementwise_bwd_fused(
     stride_grad_a,
     stride_a,
     stride_grad_b,
-    stride_grad_r,
-    stride_r,
+    stride_grad_ms,
+    stride_ms,
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
+    eps: tl.constexpr,
 ):
     pid = tl.program_id(0)
 
@@ -350,8 +354,8 @@ def _mhc_elementwise_bwd_fused(
     tl.assume(stride_grad_a == 1)
     tl.assume(stride_a == 1)
     tl.assume(stride_grad_b == 1)
-    tl.assume(stride_grad_r == 1)
-    tl.assume(stride_r == 1)
+    tl.assume(stride_grad_ms == 1)
+    tl.assume(stride_ms == 1)
     tl.assume(BLOCK_SIZE_N == 32)
 
     N = 2 * n + n * n
@@ -371,9 +375,10 @@ def _mhc_elementwise_bwd_fused(
     )  # a[2*n + n*n:] is filled with garbage
     a = tl.where(cols < N, a, 0.0)  # Mask out the garbage values in a
 
-    r_offsets = offs_m
-    r_mask = mask_m
-    r = tl.load(r_ptr + r_offsets * stride_r, mask=r_mask, other=1.0)  # (BLOCK_SIZE_M,)
+    ms_offsets = offs_m
+    ms_mask = mask_m
+    ms = tl.load(ms_ptr + ms_offsets * stride_ms, mask=ms_mask, other=1.0)  # (BLOCK_SIZE_M,)
+    rms = tl.sqrt(ms + eps)
 
     grad_out = tl.load(
         grad_out_ptr + offs_m[:, None] * stride_grad_out_m + cols[None, :] * stride_grad_out_n,
@@ -399,7 +404,7 @@ def _mhc_elementwise_bwd_fused(
     grad_h = tl.where(cols[None, :] < n, grad_h_pre, grad_h)
     grad_h = tl.where((cols[None, :] >= n) & (cols[None, :] < 2 * n), grad_h_post, grad_h)
 
-    grad_a = tl.sum(h * grad_h / r[:, None], axis=0).to(a.dtype)
+    grad_a = tl.sum(h * grad_h / rms[:, None], axis=0).to(a.dtype)
     # Write grad_a[0:4].sum to grad_a_ptr[0], grad_a[4:8].sum to grad_a_ptr[1], and grad_a[8:24].sum to grad_a_ptr[2]
     tl.atomic_add(grad_a_ptr, tl.where(cols[None, :] < n, grad_a, 0.0).sum())
     tl.atomic_add(
@@ -414,10 +419,11 @@ def _mhc_elementwise_bwd_fused(
     grad_b = tl.sum(grad_h, axis=0).to(a.dtype)
     tl.atomic_add(grad_b_ptr + cols * stride_grad_b, grad_b, mask=cols < N)
 
-    grad_r = (tl.sum((-grad_h * h * a[None, :]), axis=1) / (r * r)).to(r.dtype)
-    tl.store(grad_r_ptr + r_offsets * stride_grad_r, grad_r, mask=r_mask)
+    grad_rms = (tl.sum((-grad_h * h * a[None, :]), axis=1) / (rms * rms)).to(rms.dtype)
+    grad_ms = grad_rms / (2 * rms)
+    tl.store(grad_ms_ptr + ms_offsets * stride_grad_ms, grad_ms, mask=ms_mask)
 
-    grad_h = a[None, :] * grad_h / r[:, None]
+    grad_h = a[None, :] * grad_h / rms[:, None]
     tl.store(
         grad_h_ptr + offs_m[:, None] * stride_grad_hm + cols[None, :] * stride_grad_hn,
         grad_h,

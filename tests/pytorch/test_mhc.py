@@ -36,7 +36,6 @@ def mHCProjectionRef(x, phi):
     n: number of Hyper Connection streams
     C: hidden dimension per stream
     """
-    eps = torch.finfo(torch.float32).eps
     x_dtype = x.dtype
     x = x.to(torch.float32)
     phi = phi.to(torch.float32)
@@ -44,14 +43,13 @@ def mHCProjectionRef(x, phi):
     Hs = x @ phi.T  # (M, 2n + n^2)
 
     x_fp32 = x.to(torch.float32)  # Use fp32 for better numerical stability in variance calculation
-    var = (x_fp32 * x_fp32).mean(dim=1)
-    r = torch.sqrt(var + eps)  # (M,)
+    ms = (x_fp32 * x_fp32).mean(dim=1)
 
-    return Hs.to(x_dtype), r.to(x_dtype)
+    return Hs.to(x_dtype), ms
 
 
 @torch.compile
-def mHCElementwiseRef(H, alpha, beta, r, n):
+def mHCElementwiseRef(H, alpha, beta, ms, n):
     """
     Reference operator for mHC's pre and post calculations
 
@@ -69,7 +67,9 @@ def mHCElementwiseRef(H, alpha, beta, r, n):
     H = H.to(torch.float32)
     alpha = alpha.to(torch.float32)
     beta = beta.to(torch.float32)
-    r = r.to(torch.float32)
+    eps = torch.finfo(torch.float32).eps
+    rms = torch.sqrt(ms + eps)  # (M,)
+    rms = rms.to(torch.float32)
 
     H_pre = H[:, :n]  # (M, n)
     H_post = H[:, n : 2 * n]  # (M, n)
@@ -85,9 +85,9 @@ def mHCElementwiseRef(H, alpha, beta, r, n):
     H_post = H_post * alpha_post
     H_res = H_res * alpha_res
 
-    H_pre = H_pre / r[:, None]
-    H_post = H_post / r[:, None]
-    H_res = H_res / r[:, None]
+    H_pre = H_pre / rms[:, None]
+    H_post = H_post / rms[:, None]
+    H_res = H_res / rms[:, None]
 
     H_pre = H_pre + beta_pre
     H_post = H_post + beta_post
@@ -279,15 +279,14 @@ def test_mhc_projection(cfg: MHCConfig, dtype):
     x_ref = x.detach().clone().requires_grad_(True)
     phi_ref = phi.detach().clone().requires_grad_(True)
 
-    ref_out_Hs, ref_out_r = mHCProjectionRef(x_ref, phi_ref)
-    fused_out_Hs_padded, fused_out_r = mHCProjectionOp.apply(x, phi, use_tf32)
+    ref_out_Hs, ref_out_ms = mHCProjectionRef(x_ref, phi_ref)
+    fused_out_Hs_padded, fused_out_ms = mHCProjectionOp.apply(x, phi, use_tf32)
     fused_out_Hs = fused_out_Hs_padded[:, :N]
 
     torch.testing.assert_close(fused_out_Hs, ref_out_Hs, **tols)
-    torch.testing.assert_close(fused_out_r, ref_out_r, **tols)
-
-    (ref_out_Hs.sum() + ref_out_r.sum()).backward()
-    (fused_out_Hs.sum() + fused_out_r.sum()).backward()
+    torch.testing.assert_close(fused_out_ms, ref_out_ms, **tols)
+    (ref_out_Hs.sum() + ref_out_ms.sum()).backward()
+    (fused_out_Hs.sum() + fused_out_ms.sum()).backward()
 
     torch.testing.assert_close(x.grad, x_ref.grad, **tols)
     torch.testing.assert_close(phi.grad, phi_ref.grad, **tols)
@@ -305,16 +304,16 @@ def test_mhc_elementwise(cfg: MHCConfig, dtype):
     H = H_padded[:, :N]
     alpha = torch.randn(3, device="cuda", requires_grad=True, dtype=dtype)
     beta = torch.randn(1, 2 * n + n * n, device="cuda", requires_grad=True, dtype=dtype)
-    r_raw = torch.randn(B * T, device="cuda", dtype=dtype).abs() + 1.0
-    r = r_raw.detach().clone().requires_grad_(True)
+    ms_raw = torch.randn(B * T, device="cuda", dtype=dtype).abs() + 1.0
+    ms = ms_raw.detach().clone().requires_grad_(True)
 
     H_ref = H.detach().clone().requires_grad_(True)
     alpha_ref = alpha.detach().clone().requires_grad_(True)
     beta_ref = beta.detach().clone().requires_grad_(True)
-    r_ref = r.detach().clone().requires_grad_(True)
+    ms_ref = ms.detach().clone().requires_grad_(True)
 
-    ref_out = mHCElementwiseRef(H_ref[:, :N], alpha_ref, beta_ref, r_ref, n)
-    fused_out_padded = mHCElementwiseOp.apply(H_padded, alpha, beta, r, n)
+    ref_out = mHCElementwiseRef(H_ref[:, :N], alpha_ref, beta_ref, ms_ref, n)
+    fused_out_padded = mHCElementwiseOp.apply(H_padded, alpha, beta, ms, n)
     fused_out = fused_out_padded[:, :N]
 
     torch.testing.assert_close(fused_out, ref_out, **tols)
@@ -325,7 +324,7 @@ def test_mhc_elementwise(cfg: MHCConfig, dtype):
     torch.testing.assert_close(H_padded.grad[:, :N], H_ref.grad, **tols)
     torch.testing.assert_close(alpha.grad, alpha_ref.grad, **tols)
     torch.testing.assert_close(beta.grad, beta_ref.grad, **tols)
-    torch.testing.assert_close(r.grad, r_ref.grad, **tols)
+    torch.testing.assert_close(ms.grad, ms_ref.grad, **tols)
 
 
 @pytest.mark.parametrize("cfg", mhc_configs, ids=MHCConfig.desc)
