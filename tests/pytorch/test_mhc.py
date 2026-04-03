@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 from attr import dataclass
+from matplotlib import use
 import pytest
 import torch
 import torch.nn.functional as F
@@ -141,15 +142,15 @@ def mHCPreRef(x, H_pre, n):
     """
     Reference operator for applying mHC's pre matrix H to a vector x.
 
-    x: (B, T, n, C)
+    x: (B, T, C, n)
     H_pre: (B, T, n)
     """
     H_pre = H_pre.contiguous()
 
-    B, T, n, C = x.shape
-    H_pre = H_pre.view(B, T, 1, n)  # (B, T, 1, n)
+    B, T, C, n = x.shape
+    H_pre = H_pre.view(B, T, n, 1)
 
-    out = (H_pre @ x).view(B, T, C)  # (B, T, C)
+    out = (x @ H_pre).view(B, T, C)
 
     return out
 
@@ -442,14 +443,14 @@ def test_mhc_pre(cfg: MHCConfig, dtype):
 
     tols = get_tols(dtype)
 
-    x = torch.randn(B, T, n, C, device="cuda", requires_grad=True, dtype=dtype)
+    x = torch.randn(B, T, C, n, device="cuda", requires_grad=True, dtype=dtype)
     H_pre = torch.randn(B, T, n, device="cuda", requires_grad=True, dtype=dtype)
 
     x_ref = x.detach().clone().requires_grad_(True)
     H_pre_ref = H_pre.detach().clone().requires_grad_(True)
 
     ref_out = mHCPreRef(x_ref, H_pre_ref, n)
-    fused_out = mHCPreOp.apply(x, H_pre, n)
+    fused_out = mHCPreOp.apply(x, H_pre, n, False)
 
     torch.testing.assert_close(fused_out, ref_out, **tols)
 

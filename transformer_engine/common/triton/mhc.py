@@ -418,18 +418,20 @@ def _mhc_elementwise_bwd_fused(
 
     grad_a = tl.sum(h * grad_h / rms[:, None], axis=0).to(a.dtype)
     # Write grad_a[0:4].sum to grad_a_ptr[0], grad_a[4:8].sum to grad_a_ptr[1], and grad_a[8:24].sum to grad_a_ptr[2]
-    tl.atomic_add(grad_a_ptr, tl.where(cols[None, :] < n, grad_a, 0.0).sum())
+    tl.atomic_add(grad_a_ptr, tl.where(cols[None, :] < n, grad_a, 0.0).sum(), sem="relaxed")
     tl.atomic_add(
         grad_a_ptr + stride_grad_a,
         tl.where((cols[None, :] >= n) & (cols[None, :] < 2 * n), grad_a, 0.0).sum(),
+        sem="relaxed"
     )
     tl.atomic_add(
         grad_a_ptr + 2 * stride_grad_a,
         tl.where((cols[None, :] >= 2 * n) & (cols[None, :] < 2 * n + n * n), grad_a, 0.0).sum(),
+        sem="relaxed"
     )
 
     grad_b = tl.sum(grad_h, axis=0).to(a.dtype)
-    tl.atomic_add(grad_b_ptr + cols * stride_grad_b, grad_b, mask=cols < N)
+    tl.atomic_add(grad_b_ptr + cols * stride_grad_b, grad_b, mask=cols < N, sem="relaxed")
 
     grad_rms = (tl.sum((-grad_h * h * a[None, :]), axis=1) / (rms * rms)).to(rms.dtype)
     grad_ms = grad_rms / (2 * rms)
@@ -931,17 +933,14 @@ def pre_config():
 )
 @triton.jit
 def _mhc_pre_fwd(
-    x_ptr,  # # (M, n, C)
+    x_ptr,  # # (M, C, n)
     H_pre_ptr,  # (M, n)
     output_ptr,  # (M, C)
     M,
     C,
     n: tl.constexpr,
     stride_xm,
-    stride_xn,
-    stride_xc,
-    stride_H_pre_m,
-    stride_H_pre_n,
+    stride_xCn,
     stride_output_m,
     stride_output_c,
     # Meta-parameters
@@ -949,11 +948,7 @@ def _mhc_pre_fwd(
     BLOCK_SIZE_C: tl.constexpr,
 ):
     """
-    Each block handles BLOCK_SIZE_M rows and BLOCK_SIZE_C columns of the output
-    It reads (BLOCK_SIZE_M * n) rows, BLOCK_SIZE_C columns from x, and BLOCK_SIZE_M rows, full n columns from H_pre (which is the first n columns of H), and computes
-    (BLOCK_SIZE_M, 1, n) @ (BLOCK_SIZE_M, n, BLOCK_SIZE_C) = (BLOCK_SIZE_M, 1, BLOCK_SIZE_C) -> (BLOCK_SIZE_M, BLOCK_SIZE_C)
-    However instead of matmul, we will use the equivalent operation:
-    ((BLOCK_SIZE_M, 1, n).T * (BLOCK_SIZE_M, n, BLOCK_SIZE_C)).sum(dim=-2) = (BLOCK_SIZE_M, 1, BLOCK_SIZE_C) -> (BLOCK_SIZE_M, BLOCK_SIZE_C)
+    output = x @ H_pre: (M, C, n) @ (M, n, 1) = (M, C, 1)
     """
     pid_m = tl.program_id(1)
     pid_c = tl.program_id(0)
@@ -962,8 +957,7 @@ def _mhc_pre_fwd(
     tl.assume(M > 0)
     tl.assume(C > 0)
     tl.assume(n == 4)
-    tl.assume(stride_xm > 0 and stride_xn > 0 and stride_xc == 1)
-    tl.assume(stride_H_pre_m == n and stride_H_pre_n == 1)
+    tl.assume(stride_xm > 0 and stride_xCn == 1)
     tl.assume(stride_output_m > 0 and stride_output_c == 1)
 
     tl.assume(BLOCK_SIZE_M % 32 == 0)
@@ -971,43 +965,43 @@ def _mhc_pre_fwd(
 
     offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
     offs_c = pid_c * BLOCK_SIZE_C + tl.arange(0, BLOCK_SIZE_C)
-    offs_n = tl.arange(0, n)
+    offs_cn = pid_c * BLOCK_SIZE_C * n + tl.arange(0, BLOCK_SIZE_C * n)
     mask_m = offs_m < M
     mask_c = offs_c < C
+    mask_cn = offs_cn < C * n
 
-    x_ptrs = (
-        x_ptr
-        + offs_m[:, None, None] * stride_xm
-        + offs_n[None, :, None] * stride_xn
-        + offs_c[None, None, :] * stride_xc
-    )
-    x = tl.load(
-        x_ptrs, mask=mask_m[:, None, None] & mask_c[None, None, :], other=0.0
-    )  # (BLOCK_SIZE_M, n, BLOCK_SIZE_C)
-
-    H_pre_ptrs = H_pre_ptr + offs_m[:, None] * stride_H_pre_m + offs_n[None, :] * stride_H_pre_n
-    H_pre = tl.load(H_pre_ptrs, mask=mask_m[:, None], other=0.0, cache_modifier=".ca")  # (BLOCK_SIZE_M, n)
-
-    H_pre = tl.reshape(
-        H_pre, (BLOCK_SIZE_M, n, 1)
-    )  # (BLOCK_SIZE_M, n, 1), which is the same as (BLOCK_SIZE_M, 1, n) after transpose
-
-    out_acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_C), dtype=tl.float32)
-
+    offs_H_pre = pid_m * BLOCK_SIZE_M * n + tl.arange(0, BLOCK_SIZE_M * n)
+    H_pre = tl.load(H_pre_ptr + offs_H_pre, mask=offs_H_pre < M * n, other=0.0, cache_modifier=".ca") # (BLOCK_SIZE_M * n)
     H_pre = H_pre.reshape(BLOCK_SIZE_M, 2, 2)
     H_pre01, H_pre23 = tl.split(H_pre)
     H_pre0, H_pre1 = tl.split(H_pre01)
     H_pre2, H_pre3 = tl.split(H_pre23)  # (BLOCK_SIZE_M, 1)
-    xT = tl.trans(x, (0, 2, 1))
-    xT = tl.reshape(xT, (BLOCK_SIZE_M, BLOCK_SIZE_C, 2, 2))
-    xT01, xT23 = tl.split(xT)
-    xT0, xT1 = tl.split(xT01)
-    xT2, xT3 = tl.split(xT23)  # (BLOCK_SIZE_M, BLOCK_SIZE_C)
 
-    out_acc = tl.fma(H_pre0[:, None], xT0, out_acc)
-    out_acc = tl.fma(H_pre1[:, None], xT1, out_acc)
-    out_acc = tl.fma(H_pre2[:, None], xT2, out_acc)
-    out_acc = tl.fma(H_pre3[:, None], xT3, out_acc)
+    x_ptrs = (
+        x_ptr
+        + offs_m[:, None] * stride_xm
+        + offs_cn[None, :] * stride_xCn
+    )
+    x = tl.load(
+        x_ptrs, mask=mask_m[:, None] & mask_cn[None, :], other=0.0
+    )  # (BLOCK_SIZE_M, BLOCK_SIZE_C * n)
+
+    x = tl.reshape(x, (BLOCK_SIZE_M, BLOCK_SIZE_C, 2, 2))
+    x01, x23 = tl.split(x)
+    x0, x1 = tl.split(x01)
+    x2, x3 = tl.split(x23)  # (BLOCK_SIZE_M, BLOCK_SIZE_C)
+
+    # x @ H_pre: (BLOCK_SIZE_M, BLOCK_SIZE_C, n) @ (BLOCK_SIZE_M, n, 1)
+    # triton doesn't support dot prod with inner dimension < 16, so we need to manually unroll the computation for n=4:
+    # x @ H_pre = x[:, :, 0] * H_pre[:, 0] 
+    #           + x[:, :, 1] * H_pre[:, 1]
+    #           + x[:, :, 2] * H_pre[:, 2]
+    #           + x[:, :, 3] * H_pre[:, 3]
+    out_acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_C), dtype=tl.float32)
+    out_acc = tl.fma(x0,  H_pre0[:, None], out_acc)
+    out_acc = tl.fma(x1,  H_pre1[:, None], out_acc)
+    out_acc = tl.fma(x2,  H_pre2[:, None], out_acc)
+    out_acc = tl.fma(x3,  H_pre3[:, None], out_acc)
 
     out = out_acc.to(x.dtype)
 
@@ -1020,57 +1014,41 @@ def _mhc_pre_fwd(
 def _mhc_pre_bwd(
     grad_output_ptr,  # (M, C)
     H_pre_ptr,
-    grad_H_pre_ptr,  # H_pre_ptr points to a slice of the parent tensor H, and grad_H_pre_ptr points to a contiguous tensor (M, n)
+    grad_H_pre_ptr,
     x_ptr,
-    grad_x_ptr,  # # (M, n, C)
+    grad_x_ptr,  # # (M, C, n)
     M,
     C,
     n: tl.constexpr,
     stride_grad_output_m,
     stride_grad_output_c,
-    stride_H_pre_m,
-    stride_H_pre_n,
-    stride_grad_H_pre_m,
-    stride_grad_H_pre_n,
     stride_xm,
-    stride_xn,
-    stride_xc,
+    stride_xCn,
     stride_grad_xm,
-    stride_grad_xn,
-    stride_grad_xc,
+    stride_grad_xCn,
     # Meta-parameters
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_C: tl.constexpr,
+    precision: tl.constexpr
 ):
     """
-    Each block handles BLOCK_SIZE_M rows and BLOCK_SIZE_C columns of the output
-    It reads
-    - (BLOCK_SIZE_M, BLOCK_SIZE_C) from grad_output
-    - (BLOCK_SIZE_M, n) from H_pre
-    - (BLOCK_SIZE_M, n, BLOCK_SIZE_C) from x
-     and computes
-    - (BLOCK_SIZE_M, n) of grad_H_pre
-    - (BLOCK_SIZE_M, n, BLOCK_SIZE_C) of grad_x
-
     Forward:
-        out = H_pre @ x: (BLOCK_SIZE_M, 1, n) @ (BLOCK_SIZE_M, n, BLOCK_SIZE_C) = (BLOCK_SIZE_M, 1, BLOCK_SIZE_C) -> (BLOCK_SIZE_M, BLOCK_SIZE_C)
+        out = x @ H_pre: (BLOCK_SIZE_M, BLOCK_SIZE_C, n) @ (BLOCK_SIZE_M, n, 1) = (BLOCK_SIZE_M, BLOCK_SIZE_C, 1)
     Backward:
-        grad_H_pre = grad_output @ x.T: (BLOCK_SIZE_M, 1, BLOCK_SIZE_C) @ (BLOCK_SIZE_M, BLOCK_SIZE_C, n) = (BLOCK_SIZE_M, n)
-                   = (grad_output.T * x).sum(dim=2)
-        grad_x = H_pre.T @ grad_output: (BLOCK_SIZE_M, n, 1) @ (BLOCK_SIZE_M, 1, BLOCK_SIZE_C) = (BLOCK_SIZE_M, n, BLOCK_SIZE_C)
-               = H_pre.T * grad_output since the inner dimension is 1, they will be automatically broadcasted
+        grad_H_pre = x.T @ grad_output: (BLOCK_SIZE_M, n, BLOCK_SIZE_C) @ (BLOCK_SIZE_M, BLOCK_SIZE_C, 1) = (BLOCK_SIZE_M, n, 1)
+        grad_H_pre.T = grad_output.T @ x: (BLOCK_SIZE_M, 1, BLOCK_SIZE_C) @ (BLOCK_SIZE_M, BLOCK_SIZE_C, n) = (BLOCK_SIZE_M, 1, n)
+            which is easier to compute since transposing grad_H_pre and grad_output is just view change
+        grad_x = grad_output @ H_pre.T: (BLOCK_SIZE_M, BLOCK_SIZE_C, 1) @ (BLOCK_SIZE_M, 1, n) = (BLOCK_SIZE_M, BLOCK_SIZE_C, n)
     """
-    pid_m = tl.program_id(0)
-    pid_c = tl.program_id(1)
+    pid_m = tl.program_id(1)
+    pid_c = tl.program_id(0)
 
     tl.static_assert(n == 4)
     tl.assume(M > 0)
     tl.assume(C > 0)
     tl.assume(n == 4)
-    tl.assume(stride_xm > 0 and stride_xn > 0 and stride_xc == 1)
-    tl.assume(stride_grad_xm > 0 and stride_grad_xn > 0 and stride_grad_xc == 1)
-    tl.assume(stride_H_pre_m == n and stride_H_pre_n == 1)
-    tl.assume(stride_grad_H_pre_m == n and stride_grad_H_pre_n == 1)
+    tl.assume(stride_xm > 0 and stride_xCn == 1)
+    tl.assume(stride_grad_xm > 0 and stride_grad_xCn == 1)
     tl.assume(stride_grad_output_m > 0 and stride_grad_output_c == 1)
 
     tl.assume(BLOCK_SIZE_M % 32 == 0)
@@ -1078,9 +1056,10 @@ def _mhc_pre_bwd(
 
     offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
     offs_c = pid_c * BLOCK_SIZE_C + tl.arange(0, BLOCK_SIZE_C)
-    offs_n = tl.arange(0, n)
+    offs_cn = pid_c * BLOCK_SIZE_C * n + tl.arange(0, BLOCK_SIZE_C * n)
     mask_m = offs_m < M
     mask_c = offs_c < C
+    mask_cn = offs_cn < C * n
 
     grad_output_ptrs = (
         grad_output_ptr
@@ -1097,36 +1076,37 @@ def _mhc_pre_bwd(
     )  # (BLOCK_SIZE_M * n)
     H_pre = tl.reshape(H_pre, (BLOCK_SIZE_M, n))  # (BLOCK_SIZE_M, n)
 
-    x_ptrs = (
-        x_ptr
-        + offs_m[:, None, None] * stride_xm
-        + offs_n[None, :, None] * stride_xn
-        + offs_c[None, None, :] * stride_xc
-    )
-    x = tl.load(
-        x_ptrs, mask=mask_m[:, None, None] & mask_c[None, None, :], other=0.0
-    )  # (BLOCK_SIZE_M, n, BLOCK_SIZE_C)
-
-    H_pre = tl.reshape(
-        H_pre, (BLOCK_SIZE_M, n, 1)
-    )  # (BLOCK_SIZE_M, n, 1), which is the same as (BLOCK_SIZE_M, 1, n) after transpose
+    # grad_x = grad_output @ H_pre.T: (BLOCK_SIZE_M, BLOCK_SIZE_C, 1) @ (BLOCK_SIZE_M, 1, n) = (BLOCK_SIZE_M, BLOCK_SIZE_C, n)
+    grad_x = grad_output[:, :, None] * H_pre[:, None, :]  # (BLOCK_SIZE_M, BLOCK_SIZE_C, n)
+    grad_x = tl.reshape(grad_x, (BLOCK_SIZE_M, BLOCK_SIZE_C * n))
 
     grad_x_ptrs = (
         grad_x_ptr
-        + offs_m[:, None, None] * stride_grad_xm
-        + offs_n[None, :, None] * stride_grad_xn
-        + offs_c[None, None, :] * stride_grad_xc
+        + offs_m[:, None] * stride_grad_xm
+        + offs_cn[None, :] * stride_grad_xCn
     )
-    grad_x = H_pre * tl.reshape(grad_output, (BLOCK_SIZE_M, 1, BLOCK_SIZE_C))
-    tl.store(grad_x_ptrs, grad_x, mask=mask_m[:, None, None] & mask_c[None, None, :])
+    tl.store(grad_x_ptrs, grad_x, mask=mask_m[:, None] & mask_cn[None, :], )
 
-    grad_H_pre = tl.sum(
-        (tl.reshape(grad_output, (BLOCK_SIZE_M, 1, BLOCK_SIZE_C)) * x).to(tl.float32), axis=2
-    )  # (BLOCK_SIZE_M, n)
+
+    x_ptrs = (
+        x_ptr
+        + offs_m[:, None] * stride_xm
+        + offs_cn[None, :] * stride_xCn
+    )
+    x = tl.load(
+        x_ptrs, mask=mask_m[:, None] & mask_cn[None, :], other=0.0
+    )  # (BLOCK_SIZE_M, BLOCK_SIZE_C * n)
+
+    grad_H_pre = tl.dot(
+        tl.reshape(grad_output, (BLOCK_SIZE_M, 1, BLOCK_SIZE_C)),
+        tl.reshape(x, (BLOCK_SIZE_M, BLOCK_SIZE_C, n)),
+        input_precision=precision,
+        out_dtype=tl.float32,
+    )
     grad_H_pre = tl.reshape(grad_H_pre, (BLOCK_SIZE_M * n,))  # (BLOCK_SIZE_M * n)
     offs_grad_H_pre = pid_m * BLOCK_SIZE_M * n + tl.arange(0, BLOCK_SIZE_M * n)
-    grad_H_pre_ptrs = grad_H_pre_ptr + offs_grad_H_pre * stride_grad_H_pre_n
-    tl.atomic_add(grad_H_pre_ptrs, grad_H_pre.to(tl.float32), mask=offs_grad_H_pre < M * n)
+    grad_H_pre_ptrs = grad_H_pre_ptr + offs_grad_H_pre
+    tl.atomic_add(grad_H_pre_ptrs, grad_H_pre, mask=offs_grad_H_pre < M * n, sem="relaxed")
 
 
 def post_res_config():
@@ -1170,15 +1150,6 @@ def _mhc_post_res_fwd(
     BLOCK_SIZE_C: tl.constexpr,
 ):
     """
-    Each block handles BLOCK_SIZE_M, ln rows and BLOCK_SIZE_C columns of the output
-    It reads
-    - (BLOCK_SIZE_M, BLOCK_SIZE_C*n) of x, which is the skip connection's input
-    - (BLOCK_SIZE_M, n*n) of H_res, which is applied for the transformation of the skip connection
-    - (BLOCK_SIZE_M, BLOCK_SIZE_C) of f, which is the output of the attention / FFN module
-    - (BLOCK_SIZE_M, n) of H_post, which is applied for the transformation of the attention / FFN output
-    and writes
-    - (BLOCK_SIZE_M, BLOCK_SIZE_C, n) of the output, which is the post-residual output merged with the skip connection
-
     output = f @ H_post: (BLOCK_SIZE_M, BLOCK_SIZE_C, 1) @ (BLOCK_SIZE_M, 1, n)  = (BLOCK_SIZE_M, BLOCK_SIZE_C, n)
            + x @ H_res: (BLOCK_SIZE_M, BLOCK_SIZE_C, n) @ (BLOCK_SIZE_M, n, n) = (BLOCK_SIZE_M, BLOCK_SIZE_C, n)
     """
@@ -1206,8 +1177,8 @@ def _mhc_post_res_fwd(
     f_ptrs = f_ptr + offs_m[:, None] * stride_fm + offs_c[None, :] * stride_fc
     f = tl.load(f_ptrs, mask=mask_m[:, None] & mask_c[None, :], other=0.0)
 
-    H_post_offs = pid_m * BLOCK_SIZE_M * n + tl.arange(0, BLOCK_SIZE_M * n)
-    H_post = tl.load(H_post_ptr + H_post_offs, mask=H_post_offs < M * n, other=0.0, cache_modifier=".ca")
+    offs_H_post = pid_m * BLOCK_SIZE_M * n + tl.arange(0, BLOCK_SIZE_M * n)
+    H_post = tl.load(H_post_ptr + offs_H_post, mask=offs_H_post < M * n, other=0.0, cache_modifier=".ca")
     H_post = tl.reshape(H_post, (BLOCK_SIZE_M, n))  # (BLOCK_SIZE_M, n)
 
     # Residual connection path: res_out = f @ H_post:
@@ -1228,7 +1199,7 @@ def _mhc_post_res_fwd(
 
     # Manifold connection path: manifold_out = H_res @ x:
     # (BLOCK_SIZE_M, BLOCK_SIZE_C, n) @ (BLOCK_SIZE_M, n, n) = (BLOCK_SIZE_M, BLOCK_SIZE_C, n)
-    # Since n=4 it's more efficient to manually unroll the matmul instead of tl.dot
+    # triton doesn't support dot prod with inner dimension < 16, so we need to manually unroll the computation for n=4:
     # x @ H_res = x[:, :, 0] @ H_res[:, 0, :]
     #           + x[:, :, 1] @ H_res[:, 1, :]
     #           + x[:, :, 2] @ H_res[:, 2, :]
@@ -1317,8 +1288,8 @@ def _mhc_post_res_bwd(
         grad_x = grad_output @ H_res.T: (BLOCK_SIZE_M, BLOCK_SIZE_C, n) @ (BLOCK_SIZE_M, n, n) = (BLOCK_SIZE_M, BLOCK_SIZE_C, n)
     """
 
-    pid_m = tl.program_id(0)
-    pid_c = tl.program_id(1)
+    pid_m = tl.program_id(1)
+    pid_c = tl.program_id(0)
 
     tl.static_assert(n == 4)
     tl.assume(M > 0)
@@ -1408,7 +1379,7 @@ def _mhc_post_res_bwd(
     grad_H_post = tl.reshape(grad_H_post, (BLOCK_SIZE_M * n,))  # (BLOCK_SIZE_M * n)
     offs_grad_H_post = pid_m * BLOCK_SIZE_M * n + tl.arange(0, BLOCK_SIZE_M * n)
     grad_H_post_ptrs = grad_H_post_ptr + offs_grad_H_post
-    tl.atomic_add(grad_H_post_ptrs, grad_H_post, mask=offs_grad_H_post < M * n)
+    tl.atomic_add(grad_H_post_ptrs, grad_H_post, mask=offs_grad_H_post < M * n, sem="relaxed")
 
     x_ptrs = (
         x_ptr
@@ -1430,7 +1401,7 @@ def _mhc_post_res_bwd(
     grad_H_res = tl.reshape(grad_H_res, (BLOCK_SIZE_M * n * n,))  # (BLOCK_SIZE_M * n * n)
     offs_grad_H_res = pid_m * BLOCK_SIZE_M * n * n + tl.arange(0, BLOCK_SIZE_M * n * n)
     grad_H_res_ptrs = grad_H_res_ptr + offs_grad_H_res
-    tl.atomic_add(grad_H_res_ptrs, grad_H_res.to(tl.float32), mask=offs_grad_H_res < M * n * n)
+    tl.atomic_add(grad_H_res_ptrs, grad_H_res.to(tl.float32), mask=offs_grad_H_res < M * n * n, sem="relaxed")
 
     # grad_x = grad_output @ H_res.T: (BLOCK_SIZE_M, BLOCK_SIZE_C, n) @ (BLOCK_SIZE_M, n, n) = (BLOCK_SIZE_M, n, BLOCK_SIZE_C)
     # The inner dim is n=4 which is too small for triton, so we will manually unroll the matmul

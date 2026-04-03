@@ -468,11 +468,11 @@ class mHCSinkhornOp(torch.autograd.Function):
 
 class mHCPreOp(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, x, H_pre, n):
+    def forward(ctx, x, H_pre, n, use_tf32=True):
         """
         Perform the pre-mHC transformation using the pre matrix H_pre (which is the first n columns of H) on the input x.
 
-        :param x: (B, T, n, C) where nC = n * C
+        :param x: (B, T, C, n)
         :param H_pre: (B, T, n) pre-mHC transformation matrix, which is a slice: H[:, :, :4], and H is padded to have 32 columns
                       we will use contiguous() to create a copy here to simplify things for autograd since this tensor is not large
                       so making a copy should be fine
@@ -484,9 +484,9 @@ class mHCPreOp(torch.autograd.Function):
             H_pre.contiguous()
         )
 
-        B, T, n, C = x.shape
+        B, T, C, n = x.shape
         nC = n * C
-        assert n == 4 and nC % n == 0, "Only n=4 is supported in this implementation"
+        assert n == 4, "Only n=4 is supported in this implementation"
         M = B * T
 
         out = torch.empty((B, T, C), device=x.device, dtype=x.dtype)
@@ -504,16 +504,14 @@ class mHCPreOp(torch.autograd.Function):
             C=C,
             n=n,
             stride_xm=nC,
-            stride_xn=C,
-            stride_xc=1,
-            stride_H_pre_m=n,
-            stride_H_pre_n=1,  # A slice has the same strides as its parent tensor
+            stride_xCn=1,
             stride_output_m=C,
             stride_output_c=1,
         )
 
         ctx.save_for_backward(x, H_pre)
         ctx.n = n
+        ctx.use_tf32 = use_tf32
 
         return out
 
@@ -534,7 +532,7 @@ class mHCPreOp(torch.autograd.Function):
         x, H_pre = ctx.saved_tensors
         n = ctx.n
 
-        B, T, n, C = x.shape
+        B, T, C, n = x.shape
         nC = n * C
         assert n == 4 and nC % n == 0, "Only n=4 is supported in this implementation"
         M = B * T
@@ -545,36 +543,50 @@ class mHCPreOp(torch.autograd.Function):
         )  # We need to use atomic_add for this so we need higher precision
 
         grid = lambda META: (
-            triton.cdiv(M, META["BLOCK_SIZE_M"]),
             triton.cdiv(C, META["BLOCK_SIZE_C"]),
+            triton.cdiv(M, META["BLOCK_SIZE_M"]),
         )
 
-        _mhc_pre_bwd[grid](
-            grad_output_ptr=grad_output,
-            H_pre_ptr=H_pre,
-            grad_H_pre_ptr=grad_H_pre,
-            x_ptr=x,
-            grad_x_ptr=grad_x,
-            M=M,
-            C=C,
-            n=n,
-            stride_grad_output_m=C,
-            stride_grad_output_c=1,
-            stride_H_pre_m=n,
-            stride_H_pre_n=1,
-            stride_grad_H_pre_m=n,
-            stride_grad_H_pre_n=1,
-            stride_xm=nC,
-            stride_xn=C,
-            stride_xc=1,
-            stride_grad_xm=nC,
-            stride_grad_xn=C,
-            stride_grad_xc=1,
-        )
+        if ctx.use_tf32:
+            _mhc_pre_bwd[grid](
+                grad_output_ptr=grad_output,
+                H_pre_ptr=H_pre,
+                grad_H_pre_ptr=grad_H_pre,
+                x_ptr=x,
+                grad_x_ptr=grad_x,
+                M=M,
+                C=C,
+                n=n,
+                stride_grad_output_m=C,
+                stride_grad_output_c=1,
+                stride_xm=nC,
+                stride_xCn=1,
+                stride_grad_xm=nC,
+                stride_grad_xCn=1,
+                precision="tf32",
+            )
+        else:
+            _mhc_pre_bwd[grid](
+                grad_output_ptr=grad_output,
+                H_pre_ptr=H_pre,
+                grad_H_pre_ptr=grad_H_pre,
+                x_ptr=x,
+                grad_x_ptr=grad_x,
+                M=M,
+                C=C,
+                n=n,
+                stride_grad_output_m=C,
+                stride_grad_output_c=1,
+                stride_xm=nC,
+                stride_xCn=1,
+                stride_grad_xm=nC,
+                stride_grad_xCn=1,
+                precision="ieee",
+            )
 
         grad_H_pre = grad_H_pre.to(H_pre.dtype)  # Cast back to the original dtype of H_pre
 
-        return grad_x, grad_H_pre, None
+        return grad_x, grad_H_pre, None, None
 
 
 class mHCPostResOp(torch.autograd.Function):
@@ -655,8 +667,8 @@ class mHCPostResOp(torch.autograd.Function):
         )  # We need to use atomic_add for this so we need higher precision
 
         grid = lambda META: (
-            triton.cdiv(M, META["BLOCK_SIZE_M"]),
             triton.cdiv(C, META["BLOCK_SIZE_C"]),
+            triton.cdiv(M, META["BLOCK_SIZE_M"]),
         )
 
         if ctx.use_tf32:
