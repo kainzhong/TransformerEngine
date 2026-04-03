@@ -1068,23 +1068,6 @@ def _mhc_pre_bwd(
         grad_output_ptrs, mask=mask_m[:, None] & mask_c[None, :], other=0.0
     )  # (BLOCK_SIZE_M, BLOCK_SIZE_C)
 
-    H_pre_offs = pid_m * BLOCK_SIZE_M * n + tl.arange(0, BLOCK_SIZE_M * n)
-    H_pre = tl.load(
-        H_pre_ptr + H_pre_offs, mask=H_pre_offs < M * n, other=0.0, cache_modifier=".ca"
-    )  # (BLOCK_SIZE_M * n)
-    H_pre = tl.reshape(H_pre, (BLOCK_SIZE_M, n))  # (BLOCK_SIZE_M, n)
-
-    # grad_x = grad_output @ H_pre.T: (BLOCK_SIZE_M, BLOCK_SIZE_C, 1) @ (BLOCK_SIZE_M, 1, n) = (BLOCK_SIZE_M, BLOCK_SIZE_C, n)
-    grad_x = grad_output[:, :, None] * H_pre[:, None, :]  # (BLOCK_SIZE_M, BLOCK_SIZE_C, n)
-    grad_x = tl.reshape(grad_x, (BLOCK_SIZE_M, BLOCK_SIZE_C * n))
-
-    grad_x_ptrs = (
-        grad_x_ptr
-        + offs_m[:, None] * stride_grad_xm
-        + offs_cn[None, :] * stride_grad_xCn
-    )
-    tl.store(grad_x_ptrs, grad_x, mask=mask_m[:, None] & mask_cn[None, :], )
-
     x_ptrs = (
         x_ptr
         + offs_m[:, None] * stride_xm
@@ -1104,6 +1087,24 @@ def _mhc_pre_bwd(
     offs_grad_H_pre = pid_m * BLOCK_SIZE_M * n + tl.arange(0, BLOCK_SIZE_M * n)
     grad_H_pre_ptrs = grad_H_pre_ptr + offs_grad_H_pre
     tl.atomic_add(grad_H_pre_ptrs, grad_H_pre, mask=offs_grad_H_pre < M * n, sem="relaxed")
+
+
+    H_pre_offs = pid_m * BLOCK_SIZE_M * n + tl.arange(0, BLOCK_SIZE_M * n)
+    H_pre = tl.load(
+        H_pre_ptr + H_pre_offs, mask=H_pre_offs < M * n, other=0.0, cache_modifier=".ca"
+    )  # (BLOCK_SIZE_M * n)
+    H_pre = tl.reshape(H_pre, (BLOCK_SIZE_M, n))  # (BLOCK_SIZE_M, n)
+
+    # grad_x = grad_output @ H_pre.T: (BLOCK_SIZE_M, BLOCK_SIZE_C, 1) @ (BLOCK_SIZE_M, 1, n) = (BLOCK_SIZE_M, BLOCK_SIZE_C, n)
+    grad_x = grad_output[:, :, None] * H_pre[:, None, :]  # (BLOCK_SIZE_M, BLOCK_SIZE_C, n)
+    grad_x = tl.reshape(grad_x, (BLOCK_SIZE_M, BLOCK_SIZE_C * n))
+
+    grad_x_ptrs = (
+        grad_x_ptr
+        + offs_m[:, None] * stride_grad_xm
+        + offs_cn[None, :] * stride_grad_xCn
+    )
+    tl.store(grad_x_ptrs, grad_x, mask=mask_m[:, None] & mask_cn[None, :], )
 
 
 def post_res_config():
@@ -1332,6 +1333,41 @@ def _mhc_post_res_bwd(
         grad_out_ptrs, mask=mask_m[:, None] & mask_cn[None, :], other=0.0
     )  # (BLOCK_SIZE_M, BLOCK_SIZE_C * n)
     grad_out = tl.reshape(grad_out, (BLOCK_SIZE_M, BLOCK_SIZE_C, n))  # (BLOCK_SIZE_M, BLOCK_SIZE_C, n)
+
+    # grad_H_post =  f.T @ grad_output # (BLOCK_SIZE_M, 1, BLOCK_SIZE_C) @ (BLOCK_SIZE_M, BLOCK_SIZE_C, n) = (BLOCK_SIZE_M, 1, n)
+    grad_H_post = tl.dot(
+        tl.reshape(f, (BLOCK_SIZE_M, 1, BLOCK_SIZE_C)),
+        tl.reshape(grad_out, (BLOCK_SIZE_M, BLOCK_SIZE_C, n)),
+        input_precision=precision,
+        out_dtype=tl.float32,
+    ) # (BLOCK_SIZE_M, 1, n)
+    grad_H_post = tl.reshape(grad_H_post, (BLOCK_SIZE_M * n,))  # (BLOCK_SIZE_M * n)
+    offs_grad_H_post = pid_m * BLOCK_SIZE_M * n + tl.arange(0, BLOCK_SIZE_M * n)
+    grad_H_post_ptrs = grad_H_post_ptr + offs_grad_H_post
+    tl.atomic_add(grad_H_post_ptrs, grad_H_post, mask=offs_grad_H_post < M * n, sem="relaxed")
+
+    x_ptrs = (
+        x_ptr
+        + offs_m[:, None] * stride_xm
+        + offs_cn[None, :] * stride_xCn
+    )
+    x = tl.load(
+        x_ptrs, mask=mask_m[:, None] & mask_cn[None, :], other=0.0
+    )  # (BLOCK_SIZE_M, BLOCK_SIZE_C*n)
+    x = tl.reshape(x, (BLOCK_SIZE_M, BLOCK_SIZE_C, n))  # (BLOCK_SIZE_M, BLOCK_SIZE_C, n)
+
+    # grad_H_res = x.T @ grad_output: (BLOCK_SIZE_M, n, BLOCK_SIZE_C) @ (BLOCK_SIZE_M, BLOCK_SIZE_C, n) = (BLOCK_SIZE_M, n, n)
+    grad_H_res = tl.dot(
+        tl.trans(x, (0, 2, 1)), 
+        grad_out,
+        input_precision=precision,
+        out_dtype=tl.float32
+    )  # (BLOCK_SIZE_M, n, n)
+    grad_H_res = tl.reshape(grad_H_res, (BLOCK_SIZE_M * n * n,))  # (BLOCK_SIZE_M * n * n)
+    offs_grad_H_res = pid_m * BLOCK_SIZE_M * n * n + tl.arange(0, BLOCK_SIZE_M * n * n)
+    grad_H_res_ptrs = grad_H_res_ptr + offs_grad_H_res
+    tl.atomic_add(grad_H_res_ptrs, grad_H_res.to(tl.float32), mask=offs_grad_H_res < M * n * n, sem="relaxed")
+
     grad_out_reshape = tl.reshape(
         grad_out, (BLOCK_SIZE_M, BLOCK_SIZE_C, 2, 2)
     )  # (BLOCK_SIZE_M, BLOCK_SIZE_C, 2, 2)
@@ -1367,40 +1403,6 @@ def _mhc_post_res_bwd(
 
     grad_f_ptrs = grad_f_ptr + offs_m[:, None] * stride_grad_fm + offs_c[None, :] * stride_grad_fc
     tl.store(grad_f_ptrs, grad_f, mask=mask_m[:, None] & mask_c[None, :])
-
-    # grad_H_post =  f.T @ grad_output # (BLOCK_SIZE_M, 1, BLOCK_SIZE_C) @ (BLOCK_SIZE_M, BLOCK_SIZE_C, n) = (BLOCK_SIZE_M, 1, n)
-    grad_H_post = tl.dot(
-        tl.reshape(f, (BLOCK_SIZE_M, 1, BLOCK_SIZE_C)),
-        tl.reshape(grad_out, (BLOCK_SIZE_M, BLOCK_SIZE_C, n)),
-        input_precision=precision,
-        out_dtype=tl.float32,
-    ) # (BLOCK_SIZE_M, 1, n)
-    grad_H_post = tl.reshape(grad_H_post, (BLOCK_SIZE_M * n,))  # (BLOCK_SIZE_M * n)
-    offs_grad_H_post = pid_m * BLOCK_SIZE_M * n + tl.arange(0, BLOCK_SIZE_M * n)
-    grad_H_post_ptrs = grad_H_post_ptr + offs_grad_H_post
-    tl.atomic_add(grad_H_post_ptrs, grad_H_post, mask=offs_grad_H_post < M * n, sem="relaxed")
-
-    x_ptrs = (
-        x_ptr
-        + offs_m[:, None] * stride_xm
-        + offs_cn[None, :] * stride_xCn
-    )
-    x = tl.load(
-        x_ptrs, mask=mask_m[:, None] & mask_cn[None, :], other=0.0
-    )  # (BLOCK_SIZE_M, BLOCK_SIZE_C*n)
-    x = tl.reshape(x, (BLOCK_SIZE_M, BLOCK_SIZE_C, n))  # (BLOCK_SIZE_M, BLOCK_SIZE_C, n)
-
-    # grad_H_res = x.T @ grad_output: (BLOCK_SIZE_M, n, BLOCK_SIZE_C) @ (BLOCK_SIZE_M, BLOCK_SIZE_C, n) = (BLOCK_SIZE_M, n, n)
-    grad_H_res = tl.dot(
-        tl.trans(x, (0, 2, 1)), 
-        grad_out,
-        input_precision=precision,
-        out_dtype=tl.float32
-    )  # (BLOCK_SIZE_M, n, n)
-    grad_H_res = tl.reshape(grad_H_res, (BLOCK_SIZE_M * n * n,))  # (BLOCK_SIZE_M * n * n)
-    offs_grad_H_res = pid_m * BLOCK_SIZE_M * n * n + tl.arange(0, BLOCK_SIZE_M * n * n)
-    grad_H_res_ptrs = grad_H_res_ptr + offs_grad_H_res
-    tl.atomic_add(grad_H_res_ptrs, grad_H_res.to(tl.float32), mask=offs_grad_H_res < M * n * n, sem="relaxed")
 
     # grad_x = grad_output @ H_res.T: (BLOCK_SIZE_M, BLOCK_SIZE_C, n) @ (BLOCK_SIZE_M, n, n) = (BLOCK_SIZE_M, n, BLOCK_SIZE_C)
     # The inner dim is n=4 which is too small for triton, so we will manually unroll the matmul
