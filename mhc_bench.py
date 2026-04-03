@@ -145,7 +145,7 @@ def run_elementwise(B, T, n, dtype, device, do_backward):
 
 def run_pre_triton(B, T, n, C, dtype, device, do_backward):
     nvtx.range_push("mhc_pre_triton_fwd")
-    x = torch.randn(B, T, n, C, dtype=dtype, requires_grad=True, device=device)
+    x = torch.randn(B, T, C, n, dtype=dtype, requires_grad=True, device=device)
     H_pre = torch.randn(B, T, n, dtype=dtype, requires_grad=True, device=device)
     out = mHCPreOp.apply(x, H_pre, n)
     nvtx.range_pop()
@@ -184,7 +184,7 @@ def run_pre(B, T, n, C, dtype, device, do_backward):
 
 def run_post_res_triton(B, T, n, C, dtype, device, do_backward):
     nvtx.range_push("mhc_post_res_triton_fwd")
-    x = torch.randn(B, T, n, C, dtype=dtype, requires_grad=True, device=device)
+    x = torch.randn(B, T, C, n dtype=dtype, requires_grad=True, device=device)
     H_post = torch.randn(B, T, n, dtype=dtype, requires_grad=True, device=device)
     H_res = torch.randn(B, T, n, n, dtype=dtype, requires_grad=True, device=device)
     f = torch.randn(B, T, C, dtype=dtype, requires_grad=True, device=device)
