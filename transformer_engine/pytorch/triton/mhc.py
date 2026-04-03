@@ -580,7 +580,7 @@ class mHCPreOp(torch.autograd.Function):
 class mHCPostResOp(torch.autograd.Function):
 
     @staticmethod
-    def forward(ctx, f, H_post, x, H_res, n):
+    def forward(ctx, f, H_post, x, H_res, n, use_tf32=True):
         """
         Perform the fused post-mHC and residual transformation in the forward pass.
 
@@ -629,6 +629,7 @@ class mHCPostResOp(torch.autograd.Function):
 
         ctx.n = n
         ctx.save_for_backward(f, H_post, x, H_res)
+        ctx.use_tf32 = use_tf32
 
         return out
 
@@ -658,32 +659,60 @@ class mHCPostResOp(torch.autograd.Function):
             triton.cdiv(C, META["BLOCK_SIZE_C"]),
         )
 
-        _mhc_post_res_bwd[grid](
-            grad_output_ptr=grad_output,
-            f_ptr=f,
-            H_post_ptr=H_post,
-            x_ptr=x,
-            H_res_ptr=H_res,
-            grad_H_post_ptr=grad_H_post,
-            grad_f_ptr=grad_f,
-            grad_H_res_ptr=grad_H_res,
-            grad_x_ptr=grad_x,
-            M=M,
-            C=C,
-            n=n,
-            stride_grad_output_m=n * C,
-            stride_grad_output_Cn=1,
-            stride_fm=C,
-            stride_fc=1,
-            stride_xm=n * C,
-            stride_xCn=1,
-            stride_grad_fm=C,
-            stride_grad_fc=1,
-            stride_grad_xm=n * C,
-            stride_grad_xCn=1,
-        )
+        if ctx.use_tf32:
+            _mhc_post_res_bwd[grid](
+                grad_output_ptr=grad_output,
+                f_ptr=f,
+                H_post_ptr=H_post,
+                x_ptr=x,
+                H_res_ptr=H_res,
+                grad_H_post_ptr=grad_H_post,
+                grad_f_ptr=grad_f,
+                grad_H_res_ptr=grad_H_res,
+                grad_x_ptr=grad_x,
+                M=M,
+                C=C,
+                n=n,
+                stride_grad_output_m=n * C,
+                stride_grad_output_Cn=1,
+                stride_fm=C,
+                stride_fc=1,
+                stride_xm=n * C,
+                stride_xCn=1,
+                stride_grad_fm=C,
+                stride_grad_fc=1,
+                stride_grad_xm=n * C,
+                stride_grad_xCn=1,
+                precision="tf32",
+            )
+        else:
+            _mhc_post_res_bwd[grid](
+                grad_output_ptr=grad_output,
+                f_ptr=f,
+                H_post_ptr=H_post,
+                x_ptr=x,
+                H_res_ptr=H_res,
+                grad_H_post_ptr=grad_H_post,
+                grad_f_ptr=grad_f,
+                grad_H_res_ptr=grad_H_res,
+                grad_x_ptr=grad_x,
+                M=M,
+                C=C,
+                n=n,
+                stride_grad_output_m=n * C,
+                stride_grad_output_Cn=1,
+                stride_fm=C,
+                stride_fc=1,
+                stride_xm=n * C,
+                stride_xCn=1,
+                stride_grad_fm=C,
+                stride_grad_fc=1,
+                stride_grad_xm=n * C,
+                stride_grad_xCn=1,
+                precision="ieee",
+            )
 
         grad_H_post = grad_H_post.to(H_post.dtype)  # Cast back to the original dtype of H_post
         grad_H_res = grad_H_res.to(H_res.dtype)  # Cast back to the original dtype of H_res
 
-        return grad_f, grad_H_post, grad_x, grad_H_res, None
+        return grad_f, grad_H_post, grad_x, grad_H_res, None, None

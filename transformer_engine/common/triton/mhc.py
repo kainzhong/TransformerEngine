@@ -8,6 +8,8 @@ import os
 import triton
 import triton.language as tl
 
+from examples.pytorch.fsdp.fsdp import precision
+
 
 def projection_config_fwd():
     block_m = [32, 64, 128]
@@ -1291,6 +1293,7 @@ def _mhc_post_res_bwd(
     # Meta-parameters
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_C: tl.constexpr,
+    precision: tl.constexpr,
 ):
     """
     Each block
@@ -1396,11 +1399,16 @@ def _mhc_post_res_bwd(
     tl.store(grad_f_ptrs, grad_f, mask=mask_m[:, None] & mask_c[None, :])
 
     # grad_H_post =  f.T @ grad_output # (BLOCK_SIZE_M, 1, BLOCK_SIZE_C) @ (BLOCK_SIZE_M, BLOCK_SIZE_C, n) = (BLOCK_SIZE_M, 1, n)
-    grad_H_post = tl.dot(tl.reshape(f, (BLOCK_SIZE_M, 1, BLOCK_SIZE_C)), tl.reshape(grad_out, (BLOCK_SIZE_M, BLOCK_SIZE_C, n))) # (BLOCK_SIZE_M, 1, n)
+    grad_H_post = tl.dot(
+        tl.reshape(f, (BLOCK_SIZE_M, 1, BLOCK_SIZE_C)),
+        tl.reshape(grad_out, (BLOCK_SIZE_M, BLOCK_SIZE_C, n)),
+        input_precision="ieee",
+        out_dtype=tl.float32,
+    ) # (BLOCK_SIZE_M, 1, n)
     grad_H_post = tl.reshape(grad_H_post, (BLOCK_SIZE_M * n,))  # (BLOCK_SIZE_M * n)
     offs_grad_H_post = pid_m * BLOCK_SIZE_M * n + tl.arange(0, BLOCK_SIZE_M * n)
     grad_H_post_ptrs = grad_H_post_ptr + offs_grad_H_post
-    tl.atomic_add(grad_H_post_ptrs, grad_H_post.to(tl.float32), mask=offs_grad_H_post < M * n)
+    tl.atomic_add(grad_H_post_ptrs, grad_H_post, mask=offs_grad_H_post < M * n)
 
     x_ptrs = (
         x_ptr
@@ -1413,7 +1421,12 @@ def _mhc_post_res_bwd(
     x = tl.reshape(x, (BLOCK_SIZE_M, BLOCK_SIZE_C, n))  # (BLOCK_SIZE_M, BLOCK_SIZE_C, n)
 
     # grad_H_res = x.T @ grad_output: (BLOCK_SIZE_M, n, BLOCK_SIZE_C) @ (BLOCK_SIZE_M, BLOCK_SIZE_C, n) = (BLOCK_SIZE_M, n, n)
-    grad_H_res = tl.dot(tl.trans(x, (0, 2, 1)), grad_out)  # (BLOCK_SIZE_M, n, n)
+    grad_H_res = tl.dot(
+        tl.trans(x, (0, 2, 1)), 
+        grad_out,
+        input_precision="ieee",
+        out_dtype=tl.float32
+    )  # (BLOCK_SIZE_M, n, n)
     grad_H_res = tl.reshape(grad_H_res, (BLOCK_SIZE_M * n * n,))  # (BLOCK_SIZE_M * n * n)
     offs_grad_H_res = pid_m * BLOCK_SIZE_M * n * n + tl.arange(0, BLOCK_SIZE_M * n * n)
     grad_H_res_ptrs = grad_H_res_ptr + offs_grad_H_res

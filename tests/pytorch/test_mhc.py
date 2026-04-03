@@ -479,7 +479,7 @@ def test_mhc_post_res(cfg: MHCConfig, dtype):
     H_res_ref = H_res.detach().clone().requires_grad_(True)
 
     ref_out = mHCPostResRef(f_ref, H_post_ref, x_ref, H_res_ref, n)
-    fused_out = mHCPostResOp.apply(f, H_post, x, H_res, n)
+    fused_out = mHCPostResOp.apply(f, H_post, x, H_res, n, True)
 
     torch.testing.assert_close(fused_out, ref_out, **tols)
 
