@@ -1151,25 +1151,18 @@ def post_res_config():
 def _mhc_post_res_fwd(
     f_ptr,  # (M, C)
     H_post_ptr,  # (M, n)
-    x_ptr,  # (M, n, C)
+    x_ptr,  # (M, C, n)
     H_res_ptr,  # (M, n, n)
-    output_ptr,  # # (M, n, C)
+    output_ptr,  # # (M, C, n)
     M,
     C,
     n: tl.constexpr,
     stride_fm,
     stride_fc,
-    stride_H_post_m,
-    stride_H_post_n,
     stride_xm,
-    stride_xn,
-    stride_xc,
-    stride_H_res_m,
-    stride_H_res_n1,
-    stride_H_res_n2,
+    stride_xCn,
     stride_output_m,
-    stride_output_n,
-    stride_output_c,
+    stride_output_Cn,
     # Meta-parameters
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_C: tl.constexpr,
@@ -1177,15 +1170,15 @@ def _mhc_post_res_fwd(
     """
     Each block handles BLOCK_SIZE_M, ln rows and BLOCK_SIZE_C columns of the output
     It reads
-    - (BLOCK_SIZE_M, n, BLOCK_SIZE_C) of x, which is the skip connection's input
+    - (BLOCK_SIZE_M, BLOCK_SIZE_C*n) of x, which is the skip connection's input
     - (BLOCK_SIZE_M, n*n) of H_res, which is applied for the transformation of the skip connection
     - (BLOCK_SIZE_M, BLOCK_SIZE_C) of f, which is the output of the attention / FFN module
     - (BLOCK_SIZE_M, n) of H_post, which is applied for the transformation of the attention / FFN output
     and writes
-    - (BLOCK_SIZE_M, n, BLOCK_SIZE_C) of the output, which is the post-residual output merged with the skip connection
+    - (BLOCK_SIZE_M, BLOCK_SIZE_C, n) of the output, which is the post-residual output merged with the skip connection
 
-    output = H_post.T @ f: (BLOCK_SIZE_M, n, 1) @ (BLOCK_SIZE_M, 1, BLOCK_SIZE_C)  = (BLOCK_SIZE_M, n, BLOCK_SIZE_C)
-           + H_res @ x: (BLOCK_SIZE_M, n, n) @ (BLOCK_SIZE_M, n, BLOCK_SIZE_C) = (BLOCK_SIZE_M, n, BLOCK_SIZE_C)
+    output = f @ H_post: (BLOCK_SIZE_M, BLOCK_SIZE_C, 1) @ (BLOCK_SIZE_M, 1, n)  = (BLOCK_SIZE_M, BLOCK_SIZE_C, n)
+           + x @ H_res: (BLOCK_SIZE_M, BLOCK_SIZE_C, n) @ (BLOCK_SIZE_M, n, n) = (BLOCK_SIZE_M, BLOCK_SIZE_C, n)
     """
     pid_m = tl.program_id(1)
     pid_c = tl.program_id(0)
@@ -1195,19 +1188,18 @@ def _mhc_post_res_fwd(
     tl.assume(C > 0)
     tl.assume(n == 4)
     tl.assume(stride_fm > 0 and stride_fc == 1)
-    tl.assume(stride_xm > 0 and stride_xn > 0 and stride_xc == 1)
-    tl.assume(stride_H_post_m == n and stride_H_post_n == 1)
-    tl.assume(stride_H_res_m == n * n and stride_H_res_n1 == n and stride_H_res_n2 == 1)
-    tl.assume(stride_output_m > 0 and stride_output_n > 0 and stride_output_c == 1)
+    tl.assume(stride_xm > 0 and stride_xCn == 1)
+    tl.assume(stride_output_m > 0 and stride_output_Cn == 1)
 
     tl.assume(BLOCK_SIZE_M % 32 == 0)
     tl.assume(BLOCK_SIZE_C % 32 == 0)
 
     offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
     offs_c = pid_c * BLOCK_SIZE_C + tl.arange(0, BLOCK_SIZE_C)
-    offs_n = tl.arange(0, n)
+    offs_cn = pid_c * BLOCK_SIZE_C * n + tl.arange(0, BLOCK_SIZE_C * n)
     mask_m = offs_m < M
     mask_c = offs_c < C
+    mask_cn = offs_cn < C * n
 
     f_ptrs = f_ptr + offs_m[:, None] * stride_fm + offs_c[None, :] * stride_fc
     f = tl.load(f_ptrs, mask=mask_m[:, None] & mask_c[None, :], other=0.0)
@@ -1216,12 +1208,10 @@ def _mhc_post_res_fwd(
     H_post = tl.load(H_post_ptr + H_post_offs, mask=H_post_offs < M * n, other=0.0, cache_modifier=".ca")
     H_post = tl.reshape(H_post, (BLOCK_SIZE_M, n))  # (BLOCK_SIZE_M, n)
 
-    # Residual connection path: res_out = H_post.T @ f
-    # (BLOCK_SIZE_M, n, 1) @ (BLOCK_SIZE_M, 1, BLOCK_SIZE_C)  = (BLOCK_SIZE_M, n, BLOCK_SIZE_C)
+    # Residual connection path: res_out = f @ H_post:
+    # (BLOCK_SIZE_M, BLOCK_SIZE_C, 1) @ (BLOCK_SIZE_M, 1, n)  = (BLOCK_SIZE_M, n, BLOCK_SIZE_C)
     # Due to broadcasting, it's equivalent to a multiplicaiton
-    H_post = tl.reshape(H_post, (BLOCK_SIZE_M, n, 1))
-    f = tl.reshape(f, (BLOCK_SIZE_M, 1, BLOCK_SIZE_C))
-    res_out = H_post * f
+    res_out = f[:, :, None ] * H_post[:, None, :]  # (BLOCK_SIZE_M, BLOCK_SIZE_C, n)
 
     H_res_offs = pid_m * BLOCK_SIZE_M * n * n + tl.arange(0, BLOCK_SIZE_M * n * n)
     H_res = tl.load(H_res_ptr + H_res_offs, mask=H_res_offs < M * n * n, other=0.0, cache_modifier=".ca")
@@ -1229,48 +1219,46 @@ def _mhc_post_res_fwd(
 
     x_ptrs = (
         x_ptr
-        + offs_m[:, None, None] * stride_xm
-        + offs_n[None, :, None] * stride_xn
-        + offs_c[None, None, :] * stride_xc
+        + offs_m[:, None] * stride_xm
+        + offs_cn[None, :] * stride_xCn
     )
-    x = tl.load(x_ptrs, mask=mask_m[:, None, None] & mask_c[None, None, :], other=0.0)
+    x = tl.load(x_ptrs, mask=mask_m[:, None] & mask_cn[None, :], other=0.0) # (BLOCK_SIZE_M, BLOCK_SIZE_C, n)
 
     # Manifold connection path: manifold_out = H_res @ x:
-    # (BLOCK_SIZE_M, n, n) @ (BLOCK_SIZE_M, n, BLOCK_SIZE_C) = (BLOCK_SIZE_M, n, BLOCK_SIZE_C)
+    # (BLOCK_SIZE_M, BLOCK_SIZE_C, n) @ (BLOCK_SIZE_M, n, n) = (BLOCK_SIZE_M, BLOCK_SIZE_C, n)
     # Since n=4 it's more efficient to manually unroll the matmul instead of tl.dot
-    # H_res @ x = H_res[:, :, 0] @ x[:, 0, :]
-    #           + H_res[:, :, 1] @ x[:, 1, :]
-    #           + H_res[:, :, 2] @ x[:, 2, :]
-    #           + H_res[:, :, 3] @ x[:, 3, :]
-    manifold_out_acc = tl.zeros((BLOCK_SIZE_M, n, BLOCK_SIZE_C), dtype=tl.float32)
+    # x @ H_res = x[:, :, 0] @ H_res[:, 0, :]
+    #           + x[:, :, 1] @ H_res[:, 1, :]
+    #           + x[:, :, 2] @ H_res[:, 2, :]
+    #           + x[:, :, 3] @ H_res[:, 3, :]
+    manifold_out_acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_C, n), dtype=tl.float32)
 
-    xT = tl.trans(x, (0, 2, 1))  # (BLOCK_SIZE_M, BLOCK_SIZE_C, n)
-    xT = tl.reshape(xT, (BLOCK_SIZE_M, BLOCK_SIZE_C, 2, 2))
-    x01, x23 = tl.split(xT)  # (BLOCK_SIZE_M, BLOCK_SIZE_C, 2), (BLOCK_SIZE_M, BLOCK_SIZE_C, 2)
+    x_reshape = tl.reshape(x, (BLOCK_SIZE_M, BLOCK_SIZE_C, 2, 2))
+    x01, x23 = tl.split(x_reshape)  # (BLOCK_SIZE_M, BLOCK_SIZE_C, 2), (BLOCK_SIZE_M, BLOCK_SIZE_C, 2)
     x0, x1 = tl.split(x01)  # (BLOCK_SIZE_M, BLOCK_SIZE_C), (BLOCK_SIZE_M, BLOCK_SIZE_C)
     x2, x3 = tl.split(x23)  # (BLOCK_SIZE_M, BLOCK_SIZE_C), (BLOCK_SIZE_M, BLOCK_SIZE_C)
 
-    H_res = tl.reshape(H_res, (BLOCK_SIZE_M, n, 2, 2))
-    H_res01, H_res23 = tl.split(H_res)  # (BLOCK_SIZE_M, n, 2), (BLOCK_SIZE_M, n, 2)
+    H_resT = tl.reshape(tl.trans(H_res, (0, 2, 1)), (BLOCK_SIZE_M, n, 2, 2))
+    H_res01, H_res23 = tl.split(H_resT)  # (BLOCK_SIZE_M, n, 2), (BLOCK_SIZE_M, n, 2)
     H_res0, H_res1 = tl.split(H_res01)  # (BLOCK_SIZE_M, n), (BLOCK_SIZE_M, n)
     H_res2, H_res3 = tl.split(H_res23)  # (BLOCK_SIZE_M, n), (BLOCK_SIZE_M, n)
 
-    manifold_out_acc = tl.fma(H_res0[:, :, None], x0[:, None, :], manifold_out_acc)
-    manifold_out_acc = tl.fma(H_res1[:, :, None], x1[:, None, :], manifold_out_acc)
-    manifold_out_acc = tl.fma(H_res2[:, :, None], x2[:, None, :], manifold_out_acc)
-    manifold_out_acc = tl.fma(H_res3[:, :, None], x3[:, None, :], manifold_out_acc)
+    manifold_out_acc = tl.fma(x0[:, :, None], H_res0[:, None, :], manifold_out_acc)
+    manifold_out_acc = tl.fma(x1[:, :, None], H_res1[:, None, :], manifold_out_acc)
+    manifold_out_acc = tl.fma(x2[:, :, None], H_res2[:, None, :], manifold_out_acc)
+    manifold_out_acc = tl.fma(x3[:, :, None], H_res3[:, None, :], manifold_out_acc)
 
     manifold_out = manifold_out_acc.to(x.dtype)
 
     out = manifold_out + res_out
+    out = tl.reshape(out, (BLOCK_SIZE_M, BLOCK_SIZE_C * n))  # (BLOCK_SIZE_M, BLOCK_SIZE_C*n)
 
     output_ptrs = (
         output_ptr
-        + offs_m[:, None, None] * stride_output_m
-        + offs_n[None, :, None] * stride_output_n
-        + offs_c[None, None, :] * stride_output_c
+        + offs_m[:, None] * stride_output_m
+        + offs_cn[None, :] * stride_output_Cn
     )
-    tl.store(output_ptrs, out, mask=mask_m[:, None, None] & mask_c[None, None, :])
+    tl.store(output_ptrs, out, mask=mask_m[:, None] & mask_cn[None, :])
 
 
 @triton.autotune(
@@ -1278,41 +1266,28 @@ def _mhc_post_res_fwd(
 )
 @triton.jit
 def _mhc_post_res_bwd(
-    grad_output_ptr,  # (M, n, C)
+    grad_output_ptr,  # (M, C, n)
     f_ptr,  # (M, C)
     H_post_ptr,  # (M, n)
-    x_ptr,  # (M, n, C)
+    x_ptr,  # (M, C, n)
     H_res_ptr,  # (M, n, n)
     grad_H_post_ptr,  # (M, n)
     grad_f_ptr,  # (M, C)
     grad_H_res_ptr,  # (M, n, n)
-    grad_x_ptr,  # (M, n, C)
+    grad_x_ptr,  # (M, C, n)
     M,
     C,
     n: tl.constexpr,
     stride_grad_output_m,
-    stride_grad_output_n,
-    stride_grad_output_c,
+    stride_grad_output_Cn,
     stride_fm,
     stride_fc,
-    stride_H_post_m,
-    stride_H_post_n,
     stride_xm,
-    stride_xn,
-    stride_xc,
-    stride_H_res_m,
-    stride_H_res_n1,
-    stride_H_res_n2,
-    stride_grad_H_post_m,
-    stride_grad_H_post_n,
+    stride_xCn,
     stride_grad_fm,
     stride_grad_fc,
-    stride_grad_H_res_m,
-    stride_grad_H_res_n1,
-    stride_grad_H_res_n2,
     stride_grad_xm,
-    stride_grad_xn,
-    stride_grad_xc,
+    stride_grad_xCn,
     # Meta-parameters
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_C: tl.constexpr,
@@ -1322,21 +1297,21 @@ def _mhc_post_res_bwd(
     It reads
     - (BLOCK_SIZE_M, BLOCK_SIZE_C) of f, which is the output of the attention / FFN module
     - (BLOCK_SIZE_M, n) of H_post, which is applied for the transformation of the attention / FFN output
-    - (BLOCK_SIZE_M, n, BLOCK_SIZE_C) of x, which is the skip connection's input
+    - (BLOCK_SIZE_M, BLOCK_SIZE_C, n) of x, which is the skip connection's input
     - (BLOCK_SIZE_M, n*n) of H_res, which is applied for the transformation of the skip connection
     and writes
     - (BLOCK_SIZE_M, n) of grad_H_post
     - (BLOCK_SIZE_M, BLOCK_SIZE_C) of grad_f
     - (BLOCK_SIZE_M, n, n) of grad_H_res
-    - (BLOCK_SIZE_M, n, BLOCK_SIZE_C) of grad_x
+    - (BLOCK_SIZE_M, BLOCK_SIZE_C, n) of grad_x
 
     Forward:
-        out = H_post @ f + H_res @ x
+        out = f @ H_post + x @ H_res
     Backward:
-        grad_H_post = grad_output @ f.T: (BLOCK_SIZE_M, n, BLOCK_SIZE_C) @ (BLOCK_SIZE_M, BLOCK_SIZE_C, 1) = (BLOCK_SIZE_M, n, 1)
-        grad_f = H_post.T @ grad_output: (BLOCK_SIZE_M, 1, n) @ (BLOCK_SIZE_M, n, BLOCK_SIZE_C) = (BLOCK_SIZE_M, 1, BLOCK_SIZE_C)
-        grad_H_res = grad_output @ x.T: (BLOCK_SIZE_M, n, BLOCK_SIZE_C) @ (BLOCK_SIZE_M, BLOCK_SIZE_C, n) = (BLOCK_SIZE_M, n, n)
-        grad_x = H_res.T @ grad_output: (BLOCK_SIZE_M, n, n) @ (BLOCK_SIZE_M, n, BLOCK_SIZE_C) = (BLOCK_SIZE_M, n, BLOCK_SIZE_C)
+        grad_H_post = f.T @ grad_output: (BLOCK_SIZE_M, 1, BLOCK_SIZE_C) @ (BLOCK_SIZE_M, BLOCK_SIZE_C, n) = (BLOCK_SIZE_M, 1, n)
+        grad_f = grad_output @ H_post.T: (BLOCK_SIZE_M, BLOCK_SIZE_C, n) @ (BLOCK_SIZE_M, n, 1) = (BLOCK_SIZE_M, BLOCK_SIZE_C, 1)
+        grad_H_res = x.T @ grad_output: (BLOCK_SIZE_M, n, BLOCK_SIZE_C) @ (BLOCK_SIZE_M, BLOCK_SIZE_C, n) = (BLOCK_SIZE_M, n, n)
+        grad_x = grad_output @ H_res.T: (BLOCK_SIZE_M, BLOCK_SIZE_C, n) @ (BLOCK_SIZE_M, n, n) = (BLOCK_SIZE_M, BLOCK_SIZE_C, n)
     """
 
     pid_m = tl.program_id(0)
@@ -1347,25 +1322,20 @@ def _mhc_post_res_bwd(
     tl.assume(C > 0)
     tl.assume(n == 4)
     tl.assume(stride_fm > 0 and stride_fc == 1)
-    tl.assume(stride_xm > 0 and stride_xn > 0 and stride_xc == 1)
-    tl.assume(stride_H_post_m == n and stride_H_post_n == 1)
-    tl.assume(stride_H_res_m == n * n and stride_H_res_n1 == n and stride_H_res_n2 == 1)
-    tl.assume(stride_grad_output_m > 0 and stride_grad_output_n > 0 and stride_grad_output_c == 1)
+    tl.assume(stride_xm > 0 and stride_xCn == 1)
+    tl.assume(stride_grad_output_m > 0 and stride_grad_output_Cn == 1)
     tl.assume(stride_grad_fm > 0 and stride_grad_fc == 1)
-    tl.assume(stride_grad_H_post_m == n and stride_grad_H_post_n == 1)
-    tl.assume(stride_grad_xm > 0 and stride_grad_xn > 0 and stride_grad_xc == 1)
-    tl.assume(
-        stride_grad_H_res_m == n * n and stride_grad_H_res_n1 == n and stride_grad_H_res_n2 == 1
-    )
+    tl.assume(stride_grad_xm > 0 and stride_grad_xCn == 1)
 
     tl.assume(BLOCK_SIZE_M % 32 == 0)
     tl.assume(BLOCK_SIZE_C % 32 == 0)
 
     offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
     offs_c = pid_c * BLOCK_SIZE_C + tl.arange(0, BLOCK_SIZE_C)
-    offs_n = tl.arange(0, n)
+    offs_cn = pid_c * BLOCK_SIZE_C * n + tl.arange(0, BLOCK_SIZE_C * n)
     mask_m = offs_m < M
     mask_c = offs_c < C
+    mask_cn = offs_cn < C * n
 
     f_ptrs = f_ptr + offs_m[:, None] * stride_fm + offs_c[None, :] * stride_fc
     f = tl.load(f_ptrs, mask=mask_m[:, None] & mask_c[None, :], other=0.0)
@@ -1382,136 +1352,99 @@ def _mhc_post_res_bwd(
 
     grad_out_ptrs = (
         grad_output_ptr
-        + offs_m[:, None, None] * stride_grad_output_m
-        + offs_n[None, :, None] * stride_grad_output_n
-        + offs_c[None, None, :] * stride_grad_output_c
+        + offs_m[:, None] * stride_grad_output_m
+        + offs_cn[None, :] * stride_grad_output_Cn
     )
     grad_out = tl.load(
-        grad_out_ptrs, mask=mask_m[:, None, None] & mask_c[None, None, :], other=0.0
-    )  # (BLOCK_SIZE_M, n, BLOCK_SIZE_C)
-    grad_out_T = tl.trans(
-        grad_out, (0, 2, 1)
-    )  # (BLOCK_SIZE_M, n, BLOCK_SIZE_C) -> (BLOCK_SIZE_M, BLOCK_SIZE_C, n)
-    grad_out_T = tl.reshape(
-        grad_out_T, (BLOCK_SIZE_M, BLOCK_SIZE_C, 2, 2)
+        grad_out_ptrs, mask=mask_m[:, None] & mask_cn[None, :], other=0.0
+    )  # (BLOCK_SIZE_M, BLOCK_SIZE_C * n)
+    grad_out = tl.reshape(grad_out, (BLOCK_SIZE_M, BLOCK_SIZE_C, n))  # (BLOCK_SIZE_M, BLOCK_SIZE_C, n)
+    grad_out_reshape = tl.reshape(
+        grad_out, (BLOCK_SIZE_M, BLOCK_SIZE_C, 2, 2)
     )  # (BLOCK_SIZE_M, BLOCK_SIZE_C, 2, 2)
-    grad_out_T01, grad_out_T23 = tl.split(
-        grad_out_T
+    grad_out01, grad_out23 = tl.split(
+        grad_out_reshape
     )  # (BLOCK_SIZE_M, BLOCK_SIZE_C, 2), (BLOCK_SIZE_M, BLOCK_SIZE_C, 2)
-    grad_out_T0, grad_out_T1 = tl.split(
-        grad_out_T01
+    grad_out0, grad_out1 = tl.split(
+        grad_out01
     )  # (BLOCK_SIZE_M, BLOCK_SIZE_C), (BLOCK_SIZE_M, BLOCK_SIZE_C)
-    grad_out_T2, grad_out_T3 = tl.split(
-        grad_out_T23
+    grad_out2, grad_out3 = tl.split(
+        grad_out23
     )  # (BLOCK_SIZE_M, BLOCK_SIZE_C), (BLOCK_SIZE_M, BLOCK_SIZE_C)
 
-    # grad_f = H_post.T @ grad_output: (BLOCK_SIZE_M, 1, n) @ (BLOCK_SIZE_M, n, BLOCK_SIZE_C) = (BLOCK_SIZE_M, 1, BLOCK_SIZE_C)
-    # .       = H_post.T[:, :, 0] @ grad_out[:, 0, :] (BLOCK_SIZE_M, 1, 1) @ (BLOCK_SIZE_M, 1, BLOCK_SIZE_C)
-    #        + H_post.T[:, :, 1] @ grad_out[:, 1, :]
-    #        + H_post.T[:, :, 2] @ grad_out[:, 2, :]
-    #        + H_post.T[:, :, 3] @ grad_out[:, 3, :]
-    # where grad_out[:, i, :] = grad_out.T[:, :, i]
-    H_post_T = tl.reshape(H_post, (BLOCK_SIZE_M, 2, 2))
-    H_post_T01, H_post_T23 = tl.split(H_post_T)  # (BLOCK_SIZE_M, 2), (BLOCK_SIZE_M, 2)
-    H_post_T0, H_post_T1 = tl.split(H_post_T01)  # (BLOCK_SIZE_M,), (BLOCK_SIZE_M,)
-    H_post_T2, H_post_T3 = tl.split(H_post_T23)  # (BLOCK_SIZE_M,), (BLOCK_SIZE_M,)
+    # grad_f = grad_output @ H_post.T: (BLOCK_SIZE_M, 1, n) @ (BLOCK_SIZE_M, n, BLOCK_SIZE_C) = (BLOCK_SIZE_M, 1, BLOCK_SIZE_C)
+    # Triton doesn't support dot prod with inner dimension < 16, so we need to hack this:
+    #        = grad_out[:, :, 0] @ H_post.T[:, 0, :] (BLOCK_SIZE_M, BLOCK_SIZE_C, 1) @ (BLOCK_SIZE_M, 1, 1)
+    #        + grad_out[:, :, 1] @ H_post.T[:, 1, :]
+    #        + grad_out[:, :, 2] @ H_post.T[:, 2, :]
+    #        + grad_out[:, :, 3] @ H_post.T[:, 3, :]
+    # where H_post.T[:, i, :] = H_post[:, :, i]
+    H_post = tl.reshape(H_post, (BLOCK_SIZE_M, 2, 2))
+    H_post01, H_post23 = tl.split(H_post)  # (BLOCK_SIZE_M, 2), (BLOCK_SIZE_M, 2)
+    H_post0, H_post1 = tl.split(H_post01)  # (BLOCK_SIZE_M,), (BLOCK_SIZE_M,)
+    H_post2, H_post3 = tl.split(H_post23)  # (BLOCK_SIZE_M,), (BLOCK_SIZE_M,)
 
     grad_f_acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_C), dtype=tl.float32)
-    grad_f_acc = tl.fma(H_post_T0[:, None], grad_out_T0, grad_f_acc)
-    grad_f_acc = tl.fma(H_post_T1[:, None], grad_out_T1, grad_f_acc)
-    grad_f_acc = tl.fma(H_post_T2[:, None], grad_out_T2, grad_f_acc)
-    grad_f_acc = tl.fma(H_post_T3[:, None], grad_out_T3, grad_f_acc)
+    # (BLOCK_SIZE_M, BLOCK_SIZE_C) * (BLOCK_SIZE_M, 1) -> (BLOCK_SIZE_M, BLOCK_SIZE_C)
+    grad_f_acc = tl.fma(grad_out0, H_post0[:, None], grad_f_acc)
+    grad_f_acc = tl.fma(grad_out1, H_post1[:, None], grad_f_acc)
+    grad_f_acc = tl.fma(grad_out2, H_post2[:, None], grad_f_acc)
+    grad_f_acc = tl.fma(grad_out3, H_post3[:, None], grad_f_acc)
     grad_f = grad_f_acc.to(f.dtype)
 
     grad_f_ptrs = grad_f_ptr + offs_m[:, None] * stride_grad_fm + offs_c[None, :] * stride_grad_fc
     tl.store(grad_f_ptrs, grad_f, mask=mask_m[:, None] & mask_c[None, :])
 
-    # grad_H_post = grad_output @ f.T
-    # grad_H_post.T = f @ grad_output.T: (BLOCK_SIZE_M, n) = (BLOCK_SIZE_M, BLOCK_SIZE_C) @ (BLOCK_SIZE_M, BLOCK_SIZE_C, n)
-    # grad_H_post.T[:, :, i] = f @ grad_output.T[:, :, i]: (BLOCK_SIZE_M, 1, BLOCK_SIZE_C) @ (BLOCK_SIZE_M, BLOCK_SIZE_C, 1) = (BLOCK_SIZE_M, 1)
-    #                        = (f * grad_output.T[:, :, i].T).sum(dim=1): (BLOCK_SIZE_M, BLOCK_SIZE_C) * (BLOCK_SIZE_M, 1, BLOCK_SIZE_C) = (BLOCK_SIZE_M, 1)
-    grad_H_post0 = tl.sum((f[:, :, None] * grad_out_T0[:, :, None]).to(tl.float32), axis=1)
-    grad_H_post1 = tl.sum((f[:, :, None] * grad_out_T1[:, :, None]).to(tl.float32), axis=1)
-    grad_H_post2 = tl.sum((f[:, :, None] * grad_out_T2[:, :, None]).to(tl.float32), axis=1)
-    grad_H_post3 = tl.sum((f[:, :, None] * grad_out_T3[:, :, None]).to(tl.float32), axis=1)
-
-    grad_H_post01 = tl.join(grad_H_post0, grad_H_post1)
-    grad_H_post23 = tl.join(grad_H_post2, grad_H_post3)
-    grad_H_post = tl.reshape(
-        tl.join(grad_H_post01, grad_H_post23), (BLOCK_SIZE_M * n)
-    )  # (BLOCK_SIZE_M, n)
-
+    # grad_H_post =  f.T @ grad_output # (BLOCK_SIZE_M, 1, BLOCK_SIZE_C) @ (BLOCK_SIZE_M, BLOCK_SIZE_C, n) = (BLOCK_SIZE_M, 1, n)
+    grad_H_post = tl.dot(tl.reshape(f, (BLOCK_SIZE_M, 1, BLOCK_SIZE_C)), tl.reshape(grad_out, (BLOCK_SIZE_M, BLOCK_SIZE_C, n))) # (BLOCK_SIZE_M, 1, n)
+    grad_H_post = tl.reshape(grad_H_post, (BLOCK_SIZE_M * n,))  # (BLOCK_SIZE_M * n)
     offs_grad_H_post = pid_m * BLOCK_SIZE_M * n + tl.arange(0, BLOCK_SIZE_M * n)
     grad_H_post_ptrs = grad_H_post_ptr + offs_grad_H_post
     tl.atomic_add(grad_H_post_ptrs, grad_H_post.to(tl.float32), mask=offs_grad_H_post < M * n)
 
     x_ptrs = (
         x_ptr
-        + offs_m[:, None, None] * stride_xm
-        + offs_n[None, :, None] * stride_xn
-        + offs_c[None, None, :] * stride_xc
+        + offs_m[:, None] * stride_xm
+        + offs_cn[None, :] * stride_xCn
     )
     x = tl.load(
-        x_ptrs, mask=mask_m[:, None, None] & mask_c[None, None, :], other=0.0
-    )  # (BLOCK_SIZE_M, n, BLOCK_SIZE_C)
+        x_ptrs, mask=mask_m[:, None] & mask_cn[None, :], other=0.0
+    )  # (BLOCK_SIZE_M, BLOCK_SIZE_C*n)
+    x = tl.reshape(x, (BLOCK_SIZE_M, BLOCK_SIZE_C, n))  # (BLOCK_SIZE_M, BLOCK_SIZE_C, n)
 
-    # grad_H_res = grad_output @ x.T: (BLOCK_SIZE_M, n, BLOCK_SIZE_C) @ (BLOCK_SIZE_M, BLOCK_SIZE_C, n) = (BLOCK_SIZE_M, n, n)
-    # For n=4, tl.dot is less efficient than manually unrolling the matmul
-    # grad_H_res.T = x @ grad_out.T: (BLOCK_SIZE_M, n, n) = (BLOCK_SIZE_M, n, BLOCK_SIZE_C) @ (BLOCK_SIZE_M, BLOCK_SIZE_C, n)
-    # grad_H_res.T[:, :, i] = x[:, :, :] @ grad_out.T[:, :, i]: (BLOCK_SIZE_M, n, BLOCK_SIZE_C) @ (BLOCK_SIZE_M, BLOCK_SIZE_C, 1) = (BLOCK_SIZE_M, n, 1)
-    #                       = (x[:, :, :] * grad_out.T[:, :, i].T).sum(dim=2): ((BLOCK_SIZE_M, n, BLOCK_SIZE_C) @ (BLOCK_SIZE_M, 1, BLOCK_SIZE_C)).sum(2)
-
-    grad_H_res_T0 = tl.sum(
-        (x * grad_out_T0[:, None, :]).to(tl.float32), axis=2
-    )  # (BLOCK_SIZE_M, n)
-    grad_H_res_T1 = tl.sum(
-        (x * grad_out_T1[:, None, :]).to(tl.float32), axis=2
-    )  # (BLOCK_SIZE_M, n)
-    grad_H_res_T2 = tl.sum(
-        (x * grad_out_T2[:, None, :]).to(tl.float32), axis=2
-    )  # (BLOCK_SIZE_M, n)
-    grad_H_res_T3 = tl.sum(
-        (x * grad_out_T3[:, None, :]).to(tl.float32), axis=2
-    )  # (BLOCK_SIZE_M, n)
-
-    grad_H_res_T01 = tl.join(grad_H_res_T0, grad_H_res_T1)  # (BLOCK_SIZE_M, n, 2)
-    grad_H_res_T23 = tl.join(grad_H_res_T2, grad_H_res_T3)  # (BLOCK_SIZE_M, n, 2)
-    grad_H_res_T = tl.reshape(
-        tl.join(grad_H_res_T01, grad_H_res_T23), (BLOCK_SIZE_M, n, n)
-    )  # (BLOCK_SIZE_M, n, 4)
-    grad_H_res = tl.trans(grad_H_res_T, (0, 2, 1))  # (BLOCK_SIZE_M, n, n)
-    grad_H_res = tl.reshape(grad_H_res, (BLOCK_SIZE_M * n * n,))  # (BLOCK_SIZE_M * n * n,)
-
+    # grad_H_res = x.T @ grad_output: (BLOCK_SIZE_M, n, BLOCK_SIZE_C) @ (BLOCK_SIZE_M, BLOCK_SIZE_C, n) = (BLOCK_SIZE_M, n, n)
+    grad_H_res = tl.dot(tl.trans(x, (0, 2, 1)), grad_out)  # (BLOCK_SIZE_M, n, n)
+    grad_H_res = tl.reshape(grad_H_res, (BLOCK_SIZE_M * n * n,))  # (BLOCK_SIZE_M * n * n)
     offs_grad_H_res = pid_m * BLOCK_SIZE_M * n * n + tl.arange(0, BLOCK_SIZE_M * n * n)
     grad_H_res_ptrs = grad_H_res_ptr + offs_grad_H_res
     tl.atomic_add(grad_H_res_ptrs, grad_H_res.to(tl.float32), mask=offs_grad_H_res < M * n * n)
 
-    # grad_x = H_res.T @ grad_output: (BLOCK_SIZE_M, n, n) @ (BLOCK_SIZE_M, n, BLOCK_SIZE_C) = (BLOCK_SIZE_M, n, BLOCK_SIZE_C)
+    # grad_x = grad_output @ H_res.T: (BLOCK_SIZE_M, BLOCK_SIZE_C, n) @ (BLOCK_SIZE_M, n, n) = (BLOCK_SIZE_M, n, BLOCK_SIZE_C)
     # The inner dim is n=4 which is too small for triton, so we will manually unroll the matmul
-    # grad_x = H_res[:, 0, :].T @ grad_out[:, 0, :]
-    #        + H_res[:, 1, :].T @ grad_out[:, 1, :]
-    #        + H_res[:, 2, :].T @ grad_out[:, 2, :]
-    #        + H_res[:, 3, :].T @ grad_out[:, 3, :]
+    # grad_x = grad_out[:, :, 0] @ H_res.T[:, 0, :]
+    #        + grad_out[:, :, 1] @ H_res.T[:, 1, :]
+    #        + grad_out[:, :, 2] @ H_res.T[:, 2, :]
+    #        + grad_out[:, :, 3] @ H_res.T[:, 3, :]
+    # where H_res.T[:, i, :] = H_res[:, :, i]
     # Due to broadcasting, it's equivalent to multiplying each H_res[:, i, :].T with grad_out[:, i, :]
 
-    H_res_T = tl.trans(H_res, (0, 2, 1))  # (BLOCK_SIZE_M, n, n) -> (BLOCK_SIZE_M, n, n)
-    H_res_T = tl.reshape(H_res_T, (BLOCK_SIZE_M, n, 2, 2))  # (BLOCK_SIZE_M, n, 2, 2)
-    H_res_T01, H_res_T23 = tl.split(H_res_T)  # (BLOCK_SIZE_M, n, 2), (BLOCK_SIZE_M, n, 2)
-    H_res_T0, H_res_T1 = tl.split(H_res_T01)  # (BLOCK_SIZE_M, n), (BLOCK_SIZE_M, n)
-    H_res_T2, H_res_T3 = tl.split(H_res_T23)  # (BLOCK_SIZE_M, n), (BLOCK_SIZE_M, n)
+    H_res_reshape = tl.reshape(H_res, (BLOCK_SIZE_M, n, 2, 2))  # (BLOCK_SIZE_M, n, 2, 2)
+    H_res01, H_res23 = tl.split(H_res_reshape)  # (BLOCK_SIZE_M, n, 2), (BLOCK_SIZE_M, n, 2)
+    H_res0, H_res1 = tl.split(H_res01)  # (BLOCK_SIZE_M, n), (BLOCK_SIZE_M, n)
+    H_res2, H_res3 = tl.split(H_res23)  # (BLOCK_SIZE_M, n), (BLOCK_SIZE_M, n)
 
-    grad_x_acc = tl.zeros((BLOCK_SIZE_M, n, BLOCK_SIZE_C), dtype=tl.float32)
-    grad_x_acc = tl.fma(H_res_T0[:, :, None], grad_out_T0[:, None, :], grad_x_acc)
-    grad_x_acc = tl.fma(H_res_T1[:, :, None], grad_out_T1[:, None, :], grad_x_acc)
-    grad_x_acc = tl.fma(H_res_T2[:, :, None], grad_out_T2[:, None, :], grad_x_acc)
-    grad_x_acc = tl.fma(H_res_T3[:, :, None], grad_out_T3[:, None, :], grad_x_acc)
+    grad_x_acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_C, n), dtype=tl.float32)
+    grad_x_acc = tl.fma(grad_out0[:, :, None], H_res0[:, None, :], grad_x_acc)
+    grad_x_acc = tl.fma(grad_out1[:, :, None], H_res1[:, None, :], grad_x_acc)
+    grad_x_acc = tl.fma(grad_out2[:, :, None], H_res2[:, None, :], grad_x_acc)
+    grad_x_acc = tl.fma(grad_out3[:, :, None], H_res3[:, None, :], grad_x_acc)
 
     grad_x = grad_x_acc.to(x.dtype)
+    grad_x = tl.reshape(grad_x, (BLOCK_SIZE_M, BLOCK_SIZE_C * n))  # (BLOCK_SIZE_M, BLOCK_SIZE_C*n)
 
     grad_x_ptrs = (
         grad_x_ptr
-        + offs_m[:, None, None] * stride_grad_xm
-        + offs_n[None, :, None] * stride_grad_xn
-        + offs_c[None, None, :] * stride_grad_xc
+        + offs_m[:, None] * stride_grad_xm
+        + offs_cn[None, :] * stride_grad_xCn
     )
-    tl.store(grad_x_ptrs, grad_x, mask=mask_m[:, None, None] & mask_c[None, None, :])
+    tl.store(grad_x_ptrs, grad_x, mask=mask_m[:, None] & mask_cn[None, :])

@@ -161,16 +161,16 @@ def mHCPostResRef(f, H_post, x, H_res, n):
 
     f: (B, T, C)
     H_post: (B, T, n)
-    x: (B, T, n, C)
+    x: (B, T, C, n)
     H_res: (B, T, n, n)
     """
 
-    B, T, n, C = x.shape
+    B, T, C, n = x.shape
 
-    f = f.view(B, T, 1, C)
-    H_post = H_post.view(B, T, n, 1)
+    f = f.view(B, T, C, 1)
+    H_post = H_post.view(B, T, 1, n)
 
-    out = H_post @ f + H_res @ x  # (B, T, n, C)
+    out = f @ H_post + x @ H_res  # (B, T, C, n)
 
     return out
 
@@ -470,7 +470,7 @@ def test_mhc_post_res(cfg: MHCConfig, dtype):
 
     f = torch.randn(B, T, C, device="cuda", requires_grad=True, dtype=dtype)
     H_post = torch.randn(B, T, n, device="cuda", requires_grad=True, dtype=dtype)
-    x = torch.randn(B, T, n, C, device="cuda", requires_grad=True, dtype=dtype)
+    x = torch.randn(B, T, C, n, device="cuda", requires_grad=True, dtype=dtype)
     H_res = torch.randn(B, T, n, n, device="cuda", requires_grad=True, dtype=dtype)
 
     f_ref = f.detach().clone().requires_grad_(True)

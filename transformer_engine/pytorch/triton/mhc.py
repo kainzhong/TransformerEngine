@@ -584,7 +584,7 @@ class mHCPostResOp(torch.autograd.Function):
         """
         Perform the fused post-mHC and residual transformation in the forward pass.
 
-        :param x: the original transformer input to the manifold connection, with shape (B, T, n, C)
+        :param x: the original transformer input to the manifold connection, with shape (B, T, C, n)
         :param H_post: the post-transformation matrix, with shape (B, T, n)
         :param H_res: the residual transformation matrix, with shape (B, T, n, n)
         :param f: the output of the attention/FFN module before the post transformation, with shape (B, T, C)
@@ -598,12 +598,12 @@ class mHCPostResOp(torch.autograd.Function):
         H_post = H_post.contiguous()
         H_res = H_res.contiguous()
 
-        B, T, n, C = x.shape
-        nC = n * C
-        assert n == 4 and nC % n == 0, "Only n=4 is supported in this implementation"
+        B, T, C, n = x.shape
+        assert n == 4, "Only n=4 is supported in this implementation"
+        Cn = C * n
         M = B * T
 
-        out = torch.empty((B, T, n, C), device=x.device, dtype=x.dtype)
+        out = torch.empty((B, T, C, n), device=x.device, dtype=x.dtype)
 
         grid = lambda META: (
             triton.cdiv(C, META["BLOCK_SIZE_C"]),
@@ -621,17 +621,10 @@ class mHCPostResOp(torch.autograd.Function):
             n=n,
             stride_fm=C,
             stride_fc=1,
-            stride_H_post_m=n,
-            stride_H_post_n=1,
-            stride_xm=n * C,
-            stride_xn=C,
-            stride_xc=1,
-            stride_H_res_m=n * n,
-            stride_H_res_n1=n,
-            stride_H_res_n2=1,
-            stride_output_m=n * C,
-            stride_output_n=C,
-            stride_output_c=1,
+            stride_xm=Cn,
+            stride_xCn=1,
+            stride_output_m=Cn,
+            stride_output_Cn=1,
         )
 
         ctx.n = n
@@ -646,10 +639,9 @@ class mHCPostResOp(torch.autograd.Function):
         """
 
         grad_output = grad_output.contiguous()
-        B, T, n, C = grad_output.shape
+        B, T, C, n = grad_output.shape
 
         f, H_post, x, H_res = ctx.saved_tensors
-        n = ctx.n
         M = B * T
 
         grad_f = torch.empty_like(f)
@@ -680,28 +672,15 @@ class mHCPostResOp(torch.autograd.Function):
             C=C,
             n=n,
             stride_grad_output_m=n * C,
-            stride_grad_output_n=C,
-            stride_grad_output_c=1,
+            stride_grad_output_Cn=1,
             stride_fm=C,
             stride_fc=1,
-            stride_H_post_m=n,
-            stride_H_post_n=1,
             stride_xm=n * C,
-            stride_xn=C,
-            stride_xc=1,
-            stride_H_res_m=n * n,
-            stride_H_res_n1=n,
-            stride_H_res_n2=1,
-            stride_grad_H_post_m=n,
-            stride_grad_H_post_n=1,
+            stride_xCn=1,
             stride_grad_fm=C,
             stride_grad_fc=1,
-            stride_grad_H_res_m=n * n,
-            stride_grad_H_res_n1=n,
-            stride_grad_H_res_n2=1,
             stride_grad_xm=n * C,
-            stride_grad_xn=C,
-            stride_grad_xc=1,
+            stride_grad_xCn=1,
         )
 
         grad_H_post = grad_H_post.to(H_post.dtype)  # Cast back to the original dtype of H_post
