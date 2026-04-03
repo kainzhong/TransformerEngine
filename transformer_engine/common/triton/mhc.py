@@ -8,8 +8,6 @@ import os
 import triton
 import triton.language as tl
 
-from examples.pytorch.fsdp.fsdp import precision
-
 
 def projection_config_fwd():
     block_m = [32, 64, 128]
@@ -211,7 +209,7 @@ def _mhc_projection_bwd_fused(
     dx = tl.dot(
         dh, phi, input_precision=precision, out_dtype=tl.float32
     )  # (BLOCK_SIZE_M, BLOCK_SIZE_K)
-    dms = tl.load(dms_ptrs, mask=offs_r < M, other=0.0)  # (BLOCK_SIZE_M,)
+    dms = tl.load(dms_ptrs, mask=offs_r < M, other=0.0, cache_modifier=".ca")  # (BLOCK_SIZE_M,)
     dx += x * (dms * 2 / tl.cast(K, tl.float32))[:, None]
     dx_ptrs = dx_ptr + offs_m[:, None] * stride_dxm + offs_k[None, :] * stride_dxk
     dx = dx.to(x.dtype)
@@ -1087,7 +1085,6 @@ def _mhc_pre_bwd(
     )
     tl.store(grad_x_ptrs, grad_x, mask=mask_m[:, None] & mask_cn[None, :], )
 
-
     x_ptrs = (
         x_ptr
         + offs_m[:, None] * stride_xm
@@ -1282,9 +1279,11 @@ def _mhc_post_res_bwd(
     Forward:
         out = f @ H_post + x @ H_res
     Backward:
+        GEMM:
         grad_H_post = f.T @ grad_output: (BLOCK_SIZE_M, 1, BLOCK_SIZE_C) @ (BLOCK_SIZE_M, BLOCK_SIZE_C, n) = (BLOCK_SIZE_M, 1, n)
-        grad_f = grad_output @ H_post.T: (BLOCK_SIZE_M, BLOCK_SIZE_C, n) @ (BLOCK_SIZE_M, n, 1) = (BLOCK_SIZE_M, BLOCK_SIZE_C, 1)
         grad_H_res = x.T @ grad_output: (BLOCK_SIZE_M, n, BLOCK_SIZE_C) @ (BLOCK_SIZE_M, BLOCK_SIZE_C, n) = (BLOCK_SIZE_M, n, n)
+        Not GEMM:
+        grad_f = grad_output @ H_post.T: (BLOCK_SIZE_M, BLOCK_SIZE_C, n) @ (BLOCK_SIZE_M, n, 1) = (BLOCK_SIZE_M, BLOCK_SIZE_C, 1)
         grad_x = grad_output @ H_res.T: (BLOCK_SIZE_M, BLOCK_SIZE_C, n) @ (BLOCK_SIZE_M, n, n) = (BLOCK_SIZE_M, BLOCK_SIZE_C, n)
     """
 
@@ -1373,7 +1372,7 @@ def _mhc_post_res_bwd(
     grad_H_post = tl.dot(
         tl.reshape(f, (BLOCK_SIZE_M, 1, BLOCK_SIZE_C)),
         tl.reshape(grad_out, (BLOCK_SIZE_M, BLOCK_SIZE_C, n)),
-        input_precision="ieee",
+        input_precision=precision,
         out_dtype=tl.float32,
     ) # (BLOCK_SIZE_M, 1, n)
     grad_H_post = tl.reshape(grad_H_post, (BLOCK_SIZE_M * n,))  # (BLOCK_SIZE_M * n)
@@ -1395,7 +1394,7 @@ def _mhc_post_res_bwd(
     grad_H_res = tl.dot(
         tl.trans(x, (0, 2, 1)), 
         grad_out,
-        input_precision="ieee",
+        input_precision=precision,
         out_dtype=tl.float32
     )  # (BLOCK_SIZE_M, n, n)
     grad_H_res = tl.reshape(grad_H_res, (BLOCK_SIZE_M * n * n,))  # (BLOCK_SIZE_M * n * n)
