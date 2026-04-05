@@ -9,6 +9,8 @@ import triton.language as tl
 from transformer_engine.common.triton.mhc import (
     _mhc_elementwise_fwd_fused,
     _mhc_elementwise_bwd_fused,
+    _mhc_post_res_bias_bwd,
+    _mhc_post_res_bias_fwd,
     _mhc_post_res_fwd,
     _mhc_post_res_bwd,
     _mhc_pre_fwd,
@@ -592,7 +594,7 @@ class mHCPreOp(torch.autograd.Function):
 class mHCPostResOp(torch.autograd.Function):
 
     @staticmethod
-    def forward(ctx, f, H_post, x, H_res, n, use_tf32=True):
+    def forward(ctx, f, bias, H_post, x, H_res, n, use_tf32=True):
         """
         Perform the fused post-mHC and residual transformation in the forward pass.
 
@@ -600,13 +602,17 @@ class mHCPostResOp(torch.autograd.Function):
         :param H_post: the post-transformation matrix, with shape (B, T, n)
         :param H_res: the residual transformation matrix, with shape (B, T, n, n)
         :param f: the output of the attention/FFN module before the post transformation, with shape (B, T, C)
+        :param bias: the bias term, with shape (C,) or None
         :param n: the number of hyper connection streams, which is a constant 4 in our implementation.
+        :param use_tf32: whether to use tf32 precision for the matrix multiplications in this kernel
 
-        :return out = H_res @ x + H_post @ f, where f is the output of the attention/FFN module before the post transformation.
+        :return out = H_res @ x + H_post @ (f [+ bias]), where f is the output of the attention/FFN module before the post transformation.
         """
 
         x = x.contiguous()
         f = f.contiguous()
+        if bias is not None:
+            bias = bias.contiguous()
         H_post = H_post.contiguous()
         H_res = H_res.contiguous()
 
@@ -617,30 +623,61 @@ class mHCPostResOp(torch.autograd.Function):
 
         out = torch.empty((B, T, C, n), device=x.device, dtype=x.dtype)
 
-        grid = lambda META: (
-            triton.cdiv(C, META["BLOCK_SIZE_C"]),
-            triton.cdiv(M, META["BLOCK_SIZE_M"]),
-        )
-
-        _mhc_post_res_fwd[grid](
-            f_ptr=f,
-            H_post_ptr=H_post,
-            x_ptr=x,
-            H_res_ptr=H_res,
-            output_ptr=out,
-            M=M,
-            C=C,
-            n=n,
-            stride_fm=C,
-            stride_fc=1,
-            stride_xm=Cn,
-            stride_xCn=1,
-            stride_output_m=Cn,
-            stride_output_Cn=1,
-        )
+        if bias is None:
+            # If no bias then we can use the naive grid where triton will launch blocks in C direction first
+            # In this case it's more cache friendly for H
+            grid = lambda META: (
+                triton.cdiv(C, META["BLOCK_SIZE_C"]),
+                triton.cdiv(M, META["BLOCK_SIZE_M"]),
+            )
+            _mhc_post_res_fwd[grid](
+                f_ptr=f,
+                H_post_ptr=H_post,
+                x_ptr=x,
+                H_res_ptr=H_res,
+                output_ptr=out,
+                M=M,
+                C=C,
+                n=n,
+                stride_fm=C,
+                stride_fc=1,
+                stride_xm=Cn,
+                stride_xCn=1,
+                stride_output_m=Cn,
+                stride_output_Cn=1,
+            )
+        else:
+            # If bias is present then we need use the grouped order since launching in one direction will 
+            # cause cache thrashing for either H or bias
+            grid = lambda META: (
+                triton.cdiv(C, META["BLOCK_SIZE_C"]),
+                triton.cdiv(M, META["BLOCK_SIZE_M"]),
+            )
+            _mhc_post_res_bias_fwd[grid](
+                f_ptr=f,
+                bias_ptr=bias,
+                H_post_ptr=H_post,
+                x_ptr=x,
+                H_res_ptr=H_res,
+                output_ptr=out,
+                M=M,
+                C=C,
+                n=n,
+                stride_fm=C,
+                stride_fc=1,
+                stride_bias=1,
+                stride_xm=Cn,
+                stride_xCn=1,
+                stride_output_m=Cn,
+                stride_output_Cn=1,
+            )
 
         ctx.n = n
-        ctx.save_for_backward(f, H_post, x, H_res)
+        ctx.have_bias = bias is not None
+        if bias is not None:
+            ctx.save_for_backward(f, bias, H_post, x, H_res)
+        else:
+            ctx.save_for_backward(f, H_post, x, H_res)
         ctx.use_tf32 = use_tf32
 
         return out
@@ -654,10 +691,15 @@ class mHCPostResOp(torch.autograd.Function):
         grad_output = grad_output.contiguous()
         B, T, C, n = grad_output.shape
 
-        f, H_post, x, H_res = ctx.saved_tensors
+        if ctx.have_bias:
+            f, bias, H_post, x, H_res = ctx.saved_tensors
+        else:
+            bias = None
+            f, H_post, x, H_res = ctx.saved_tensors
         M = B * T
 
         grad_f = torch.empty_like(f)
+        grad_bias = torch.zeros_like(bias, dtype=torch.float32) if bias is not None else None
         grad_H_post = torch.zeros_like(
             H_post, dtype=torch.float32
         )  # We need to use atomic_add for this so we need higher precision
@@ -672,59 +714,124 @@ class mHCPostResOp(torch.autograd.Function):
         )
 
         if ctx.use_tf32:
-            _mhc_post_res_bwd[grid](
-                grad_output_ptr=grad_output,
-                f_ptr=f,
-                H_post_ptr=H_post,
-                x_ptr=x,
-                H_res_ptr=H_res,
-                grad_H_post_ptr=grad_H_post,
-                grad_f_ptr=grad_f,
-                grad_H_res_ptr=grad_H_res,
-                grad_x_ptr=grad_x,
-                M=M,
-                C=C,
-                n=n,
-                stride_grad_output_m=n * C,
-                stride_grad_output_Cn=1,
-                stride_fm=C,
-                stride_fc=1,
-                stride_xm=n * C,
-                stride_xCn=1,
-                stride_grad_fm=C,
-                stride_grad_fc=1,
-                stride_grad_xm=n * C,
-                stride_grad_xCn=1,
-                precision="tf32",
-            )
+            if bias is None:
+                _mhc_post_res_bwd[grid](
+                    grad_output_ptr=grad_output,
+                    f_ptr=f,
+                    H_post_ptr=H_post,
+                    x_ptr=x,
+                    H_res_ptr=H_res,
+                    grad_H_post_ptr=grad_H_post,
+                    grad_f_ptr=grad_f,
+                    grad_H_res_ptr=grad_H_res,
+                    grad_x_ptr=grad_x,
+                    M=M,
+                    C=C,
+                    n=n,
+                    stride_grad_output_m=n * C,
+                    stride_grad_output_Cn=1,
+                    stride_fm=C,
+                    stride_fc=1,
+                    stride_xm=n * C,
+                    stride_xCn=1,
+                    stride_grad_fm=C,
+                    stride_grad_fc=1,
+                    stride_grad_xm=n * C,
+                    stride_grad_xCn=1,
+                    precision="tf32",
+                )
+            else:
+                _mhc_post_res_bias_bwd[grid](
+                    grad_output_ptr=grad_output,
+                    f_ptr=f,
+                    bias_ptr=bias,
+                    H_post_ptr=H_post,
+                    x_ptr=x,
+                    H_res_ptr=H_res,
+                    grad_H_post_ptr=grad_H_post,
+                    grad_f_ptr=grad_f,
+                    grad_bias_ptr=grad_bias,
+                    grad_H_res_ptr=grad_H_res,
+                    grad_x_ptr=grad_x,
+                    M=M,
+                    C=C,
+                    n=n,
+                    stride_grad_output_m=n * C,
+                    stride_grad_output_Cn=1,
+                    stride_fm=C,
+                    stride_fc=1,
+                    stride_bias=1,
+                    stride_xm=n * C,
+                    stride_xCn=1,
+                    stride_grad_fm=C,
+                    stride_grad_fc=1,
+                    stride_grad_bias=1,
+                    stride_grad_xm=n * C,
+                    stride_grad_xCn=1,
+                    precision="tf32",
+                )
         else:
-            _mhc_post_res_bwd[grid](
-                grad_output_ptr=grad_output,
-                f_ptr=f,
-                H_post_ptr=H_post,
-                x_ptr=x,
-                H_res_ptr=H_res,
-                grad_H_post_ptr=grad_H_post,
-                grad_f_ptr=grad_f,
-                grad_H_res_ptr=grad_H_res,
-                grad_x_ptr=grad_x,
-                M=M,
-                C=C,
-                n=n,
-                stride_grad_output_m=n * C,
-                stride_grad_output_Cn=1,
-                stride_fm=C,
-                stride_fc=1,
-                stride_xm=n * C,
-                stride_xCn=1,
-                stride_grad_fm=C,
-                stride_grad_fc=1,
-                stride_grad_xm=n * C,
-                stride_grad_xCn=1,
-                precision="ieee",
-            )
+            if bias is None:
+                _mhc_post_res_bwd[grid](
+                    grad_output_ptr=grad_output,
+                    f_ptr=f,
+                    H_post_ptr=H_post,
+                    x_ptr=x,
+                    H_res_ptr=H_res,
+                    grad_H_post_ptr=grad_H_post,
+                    grad_f_ptr=grad_f,
+                    grad_H_res_ptr=grad_H_res,
+                    grad_x_ptr=grad_x,
+                    M=M,
+                    C=C,
+                    n=n,
+                    stride_grad_output_m=n * C,
+                    stride_grad_output_Cn=1,
+                    stride_fm=C,
+                    stride_fc=1,
+                    stride_xm=n * C,
+                    stride_xCn=1,
+                    stride_grad_fm=C,
+                    stride_grad_fc=1,
+                    stride_grad_xm=n * C,
+                    stride_grad_xCn=1,
+                    precision="ieee",
+                )
+            else:
+                _mhc_post_res_bias_bwd[grid](
+                    grad_output_ptr=grad_output,
+                    f_ptr=f,
+                    bias_ptr=bias,
+                    H_post_ptr=H_post,
+                    x_ptr=x,
+                    H_res_ptr=H_res,
+                    grad_H_post_ptr=grad_H_post,
+                    grad_f_ptr=grad_f,
+                    grad_bias_ptr=grad_bias,
+                    grad_H_res_ptr=grad_H_res,
+                    grad_x_ptr=grad_x,
+                    M=M,
+                    C=C,
+                    n=n,
+                    stride_grad_output_m=n * C,
+                    stride_grad_output_Cn=1,
+                    stride_fm=C,
+                    stride_fc=1,
+                    stride_bias=1,
+                    stride_xm=n * C,
+                    stride_xCn=1,
+                    stride_grad_fm=C,
+                    stride_grad_fc=1,
+                    stride_grad_bias=1,
+                    stride_grad_xm=n * C,
+                    stride_grad_xCn=1,
+                    precision="ieee",
+                )
+
 
         grad_H_post = grad_H_post.to(H_post.dtype)  # Cast back to the original dtype of H_post
         grad_H_res = grad_H_res.to(H_res.dtype)  # Cast back to the original dtype of H_res
+        if bias is not None:
+            grad_bias = grad_bias.to(bias.dtype)
 
-        return grad_f, grad_H_post, grad_x, grad_H_res, None, None
+        return grad_f, grad_bias, grad_H_post, grad_x, grad_H_res, None, None

@@ -154,13 +154,13 @@ def mHCPreRef(x, H_pre, n):
 
     return out
 
-
 @torch.compile
-def mHCPostResRef(f, H_post, x, H_res, n):
+def mHCPostResRef(f, bias, H_post, x, H_res, n):
     """
     Reference operator for applying mHC's post transformation and residual transformation
 
     f: (B, T, C)
+    bias: (C,) or None
     H_post: (B, T, n)
     x: (B, T, C, n)
     H_res: (B, T, n, n)
@@ -168,13 +168,15 @@ def mHCPostResRef(f, H_post, x, H_res, n):
 
     B, T, C, n = x.shape
 
+    if bias is not None:
+        f = f + bias
+
     f = f.view(B, T, C, 1)
     H_post = H_post.view(B, T, 1, n)
 
     out = f @ H_post + x @ H_res  # (B, T, C, n)
 
     return out
-
 
 @dataclass
 class MHCConfig:
@@ -393,7 +395,8 @@ def test_mhc_combined(cfg: MHCConfig, dtype):
 
 @pytest.mark.parametrize("cfg", mhc_configs, ids=MHCConfig.desc)
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
-def test_mhc_sinkhorn_knopp(cfg: MHCConfig, dtype):
+@pytest.mark.parametrize("recompute", [False, True], ids=["no_recompute", "recompute"])
+def test_mhc_sinkhorn_knopp(cfg: MHCConfig, dtype, recompute):
     B, T, C, n = cfg.B, cfg.T, cfg.C, cfg.n
 
     tols = get_tols(dtype)
@@ -403,7 +406,7 @@ def test_mhc_sinkhorn_knopp(cfg: MHCConfig, dtype):
     x_ref = x.detach().clone().requires_grad_(True)
 
     ref_out = mHCSinkhornRef(x_ref, n)
-    fused_out = mHCSinkhornOp.apply(x, n, False)
+    fused_out = mHCSinkhornOp.apply(x, n, recompute)
 
     torch.testing.assert_close(fused_out, ref_out, **tols)
 
@@ -411,29 +414,6 @@ def test_mhc_sinkhorn_knopp(cfg: MHCConfig, dtype):
     fused_out.sum().backward()
 
     torch.testing.assert_close(x.grad, x_ref.grad, **tols)
-
-
-@pytest.mark.parametrize("cfg", mhc_configs, ids=MHCConfig.desc)
-@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
-def test_mhc_sinkhorn_knopp_recompute(cfg: MHCConfig, dtype):
-    B, T, C, n = cfg.B, cfg.T, cfg.C, cfg.n
-
-    tols = get_tols(dtype)
-
-    x = torch.randn(B, T, n, n, device="cuda", requires_grad=True, dtype=dtype)
-
-    x_ref = x.detach().clone().requires_grad_(True)
-
-    ref_out = mHCSinkhornRef(x_ref, n)
-    fused_out = mHCSinkhornOp.apply(x, n)
-
-    torch.testing.assert_close(fused_out, ref_out, **tols)
-
-    ref_out.sum().backward()
-    fused_out.sum().backward()
-
-    torch.testing.assert_close(x.grad, x_ref.grad, **tols)
-
 
 @pytest.mark.parametrize("cfg", mhc_configs, ids=MHCConfig.desc)
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
@@ -463,24 +443,29 @@ def test_mhc_pre(cfg: MHCConfig, dtype):
 
 @pytest.mark.parametrize("cfg", mhc_configs, ids=MHCConfig.desc)
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
-def test_mhc_post_res(cfg: MHCConfig, dtype):
+@pytest.mark.parametrize("with_bias", [True, False], ids=["with_bias", "no_bias"])
+def test_mhc_post_res(cfg: MHCConfig, dtype, with_bias):
     B, T, C, n = cfg.B, cfg.T, cfg.C, cfg.n
-    nC = n * C
 
     tols = get_tols(dtype)
 
     f = torch.randn(B, T, C, device="cuda", requires_grad=True, dtype=dtype)
+    bias = None
+    if with_bias:
+        bias_raw = torch.randn(C, device="cuda", requires_grad=True, dtype=dtype) * 0.01
+        bias = bias_raw.detach().clone().requires_grad_(True)
     H_post = torch.randn(B, T, n, device="cuda", requires_grad=True, dtype=dtype)
     x = torch.randn(B, T, C, n, device="cuda", requires_grad=True, dtype=dtype)
     H_res = torch.randn(B, T, n, n, device="cuda", requires_grad=True, dtype=dtype)
 
     f_ref = f.detach().clone().requires_grad_(True)
+    bias_ref = None  if bias is None else bias.detach().clone().requires_grad_(True)
     H_post_ref = H_post.detach().clone().requires_grad_(True)
     x_ref = x.detach().clone().requires_grad_(True)
     H_res_ref = H_res.detach().clone().requires_grad_(True)
 
-    ref_out = mHCPostResRef(f_ref, H_post_ref, x_ref, H_res_ref, n)
-    fused_out = mHCPostResOp.apply(f, H_post, x, H_res, n, True)
+    ref_out = mHCPostResRef(f_ref, bias_ref, H_post_ref, x_ref, H_res_ref, n)
+    fused_out = mHCPostResOp.apply(f, bias, H_post, x, H_res, n, False)
 
     torch.testing.assert_close(fused_out, ref_out, **tols)
 
