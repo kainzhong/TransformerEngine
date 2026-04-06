@@ -1485,18 +1485,17 @@ def _mhc_expand_combine_with_bias_fwd(
 
     f_ptrs = f_ptr + offs_m[:, None] * stride_fm + offs_c[None, :] * stride_fc
     f = tl.load(f_ptrs, mask=mask_m[:, None] & mask_c[None, :], other=0.0)
+    bias = tl.load(bias_ptr + offs_c * stride_bias, mask=mask_c, other=0.0)  # (BLOCK_SIZE_C,)
+    f = f + bias[None, :]  # (BLOCK_SIZE_M, BLOCK_SIZE_C)
 
     offs_H_post = pid_m * BLOCK_SIZE_M * n + tl.arange(0, BLOCK_SIZE_M * n)
     H_post = tl.load(H_post_ptr + offs_H_post, mask=offs_H_post < M * n, other=0.0, cache_modifier=".ca")
     H_post = tl.reshape(H_post, (BLOCK_SIZE_M, n))  # (BLOCK_SIZE_M, n)
 
-    bias = tl.load(bias_ptr + offs_c * stride_bias, mask=mask_c, other=0.0)  # (BLOCK_SIZE_C,)
-    res_out = bias[None, :, None] * H_post[:, None, :]  # (BLOCK_SIZE_M, BLOCK_SIZE_C, n)
-
     # Residual connection path: res_out = f @ H_post + bias @ H_post:
     # (BLOCK_SIZE_M, BLOCK_SIZE_C, 1) @ (BLOCK_SIZE_M, 1, n)  = (BLOCK_SIZE_M, n, BLOCK_SIZE_C)
     # Due to broadcasting, it's equivalent to a multiplicaiton
-    res_out = tl.fma(f[:, :, None ], H_post[:, None, :], res_out)  # (BLOCK_SIZE_M, BLOCK_SIZE_C, n)
+    res_out = f[:, :, None ] * H_post[:, None, :]  # (BLOCK_SIZE_M, BLOCK_SIZE_C, n)
 
     H_res_offs = pid_m * BLOCK_SIZE_M * n * n + tl.arange(0, BLOCK_SIZE_M * n * n)
     H_res = tl.load(H_res_ptr + H_res_offs, mask=H_res_offs < M * n * n, other=0.0, cache_modifier=".ca")
