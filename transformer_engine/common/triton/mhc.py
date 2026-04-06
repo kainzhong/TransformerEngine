@@ -473,12 +473,12 @@ def _mhc_sinkhorn_fwd_fused_recompute(
     Fused Sinkhorn-Knopp algorithm to convert a matrix into a doubly stochastic matrix.
     Calculated in log space for numerical stability.
 
-    :param X: a tensor of shape (B, T, n, n), input
-    :param output_ptr: a tensor of shape (B, T, n, n), output
-    :param hist_f_ptr: a tensor of shape (iters+1, B, T, n), to store f history
-    :param hist_g_ptr: a tensor of shape (iters+1, B, T, n), to store g history
-    :param B: batch size
-    :param T: sequence length
+    :param X: a tensor of shape (s, b, n, n), input
+    :param output_ptr: a tensor of shape (s, b, n, n), output
+    :param hist_f_ptr: a tensor of shape (iters+1, s, b, n), to store f history
+    :param hist_g_ptr: a tensor of shape (iters+1, s, b, n), to store g history
+    :param s: sequence length
+    :param b: batch size
     :param BLOCK_SIZE: size of the blocks to process
     :param iters: number of Sinkhorn iterations
     """
@@ -562,10 +562,10 @@ def _mhc_sinkhorn_bwd_fused_recompute(
     :param grad_out_ptr: pointer to the gradient of the output
     :param grad_x_ptr: pointer to the gradient of the input
     :param x_ptr: pointer to the input tensor
-    :param hist_f_ptr: pointer to the tensor storing f history, (iters+1, B, T, n)
-    :param hist_g_ptr: pointer to the tensor storing g history, (iters+1, B, T, n)
-    :param B: batch size
-    :param T: sequence length
+    :param hist_f_ptr: pointer to the tensor storing f history, (iters+1, s, b, n)
+    :param hist_g_ptr: pointer to the tensor storing g history, (iters+1, s, b, n)
+    :param s: sequence length
+    :param b: batch size
     :param n: size of the submatrix (n x n)
     :param BLOCK_SIZE: size of the blocks to process
     :param iters: number of iterations
@@ -600,7 +600,7 @@ def _mhc_sinkhorn_bwd_fused_recompute(
     grad_out = tl.load(grad_out_ptrs, mask=mask_batch[:, None], other=0.0)  # (BATCH_SIZE, n*n)
     grad_out = tl.reshape(grad_out, (BATCH_SIZE, n, n))  # (BATCH_SIZE, n, n)
 
-    BTn = M * n
+    sbn = M * n
 
     # Recompute the full history of f and g
     log_mu = tl.zeros((BATCH_SIZE, n), dtype=x.dtype)  # (BATCH_SIZE, n)
@@ -622,7 +622,7 @@ def _mhc_sinkhorn_bwd_fused_recompute(
         f = log_mu - f - f_max
 
         f_hist_ptrs = (
-            hist_f_ptr + (iter_idx + 1) * BTn + offs_batch[:, None] * n + offs_n_hist[None, :]
+            hist_f_ptr + (iter_idx + 1) * sbn + offs_batch[:, None] * n + offs_n_hist[None, :]
         )
         tl.store(f_hist_ptrs, f, mask=mask_batch[:, None])
 
@@ -633,7 +633,7 @@ def _mhc_sinkhorn_bwd_fused_recompute(
         g = log_nu - g - g_max
 
         g_hist_ptrs = (
-            hist_g_ptr + (iter_idx + 1) * BTn + offs_batch[:, None] * n + offs_n_hist[None, :]
+            hist_g_ptr + (iter_idx + 1) * sbn + offs_batch[:, None] * n + offs_n_hist[None, :]
         )
         tl.store(g_hist_ptrs, g, mask=mask_batch[:, None])
 
@@ -643,17 +643,17 @@ def _mhc_sinkhorn_bwd_fused_recompute(
     grad_g = tl.sum(grad_log_P, axis=1)  # (BATCH_SIZE, n)
     grad_x = grad_log_P
 
-    g_hist_ptrs = hist_g_ptr + iters * BTn + offs_batch[:, None] * n + offs_n_hist[None, :]
+    g_hist_ptrs = hist_g_ptr + iters * sbn + offs_batch[:, None] * n + offs_n_hist[None, :]
     g = tl.load(g_hist_ptrs, mask=mask_batch[:, None], other=0.0)
     g = tl.reshape(g, (BATCH_SIZE, n))
 
     for iter_idx in range(iters, 0, -1):
-        f_hist_ptrs = hist_f_ptr + iter_idx * BTn + offs_batch[:, None] * n + offs_n_hist[None, :]
+        f_hist_ptrs = hist_f_ptr + iter_idx * sbn + offs_batch[:, None] * n + offs_n_hist[None, :]
         f = tl.load(f_hist_ptrs, mask=mask_batch[:, None], other=0.0)
         f = tl.reshape(f, (BATCH_SIZE, n))
 
         g_hist_ptrs = (
-            hist_g_ptr + (iter_idx - 1) * BTn + offs_batch[:, None] * n + offs_n_hist[None, :]
+            hist_g_ptr + (iter_idx - 1) * sbn + offs_batch[:, None] * n + offs_n_hist[None, :]
         )
         g_next = tl.load(g_hist_ptrs, mask=mask_batch[:, None], other=0.0)
         g_next = tl.reshape(g_next, (BATCH_SIZE, n))
@@ -709,12 +709,12 @@ def _mhc_sinkhorn_fwd_fused(
     Fused Sinkhorn-Knopp algorithm to convert a matrix into a doubly stochastic matrix.
     Calculated in log space for numerical stability.
 
-    :param X: a tensor of shape (B, T, n, n), input
-    :param output_ptr: a tensor of shape (B, T, n, n), output
-    :param hist_f_ptr: a tensor of shape (iters+1, B, T, n), to store f history
-    :param hist_g_ptr: a tensor of shape (iters+1, B, T, n), to store g history
-    :param B: batch size
-    :param T: sequence length
+    :param X: a tensor of shape (s, b, n, n), input
+    :param output_ptr: a tensor of shape (s, b, n, n), output
+    :param hist_f_ptr: a tensor of shape (iters+1, s, b, n), to store f history
+    :param hist_g_ptr: a tensor of shape (iters+1, s, b, n), to store g history
+    :param s: sequence length
+    :param b: batch size
     :param BLOCK_SIZE: size of the blocks to process
     :param iters: number of Sinkhorn iterations
     """
@@ -741,7 +741,7 @@ def _mhc_sinkhorn_fwd_fused(
     f = tl.zeros((BATCH_SIZE, n), dtype=x.dtype)  # (BATCH_SIZE, n)
     g = tl.zeros((BATCH_SIZE, n), dtype=x.dtype)  # (BATCH_SIZE, n)
 
-    BTn = M * n
+    sbn = M * n
 
     # Store the initial f and g to history
     f_hist_ptrs = hist_f_ptr + offs_batch[:, None] * n + offs_n_hist[None, :]
@@ -757,7 +757,7 @@ def _mhc_sinkhorn_fwd_fused(
         f = log_mu - f - f_max
 
         f_hist_ptrs = (
-            hist_f_ptr + (iter_idx + 1) * BTn + offs_batch[:, None] * n + offs_n_hist[None, :]
+            hist_f_ptr + (iter_idx + 1) * sbn + offs_batch[:, None] * n + offs_n_hist[None, :]
         )
         tl.store(f_hist_ptrs, f, mask=mask_batch[:, None])
 
@@ -768,7 +768,7 @@ def _mhc_sinkhorn_fwd_fused(
         g = log_nu - g - g_max
 
         g_hist_ptrs = (
-            hist_g_ptr + (iter_idx + 1) * BTn + offs_batch[:, None] * n + offs_n_hist[None, :]
+            hist_g_ptr + (iter_idx + 1) * sbn + offs_batch[:, None] * n + offs_n_hist[None, :]
         )
         tl.store(g_hist_ptrs, g, mask=mask_batch[:, None])
 
@@ -817,10 +817,10 @@ def _mhc_sinkhorn_bwd_fused(
     :param grad_out_ptr: pointer to the gradient of the output
     :param grad_x_ptr: pointer to the gradient of the input
     :param x_ptr: pointer to the input tensor
-    :param hist_f_ptr: pointer to the tensor storing f history, (iters+1, B, T, n)
-    :param hist_g_ptr: pointer to the tensor storing g history, (iters+1, B, T, n)
-    :param B: batch size
-    :param T: sequence length
+    :param hist_f_ptr: pointer to the tensor storing f history, (iters+1, s, b, n)
+    :param hist_g_ptr: pointer to the tensor storing g history, (iters+1, s, b, n)
+    :param s: sequence length
+    :param b: batch size
     :param n: size of the submatrix (n x n)
     :param BLOCK_SIZE: size of the blocks to process
     :param iters: number of iterations
@@ -855,7 +855,7 @@ def _mhc_sinkhorn_bwd_fused(
     grad_out = tl.load(grad_out_ptrs, mask=mask_batch[:, None], other=0.0)  # (BATCH_SIZE, n*n)
     grad_out = tl.reshape(grad_out, (BATCH_SIZE, n, n))  # (BATCH_SIZE, n, n)
 
-    BTn = M * n
+    sbn = M * n
 
     # Backward pass
     grad_log_P = grad_out * P  # (BATCH_SIZE, n, n)
@@ -863,17 +863,17 @@ def _mhc_sinkhorn_bwd_fused(
     grad_g = tl.sum(grad_log_P, axis=1)  # (BATCH_SIZE, n)
     grad_x = grad_log_P
 
-    g_hist_ptrs = hist_g_ptr + iters * BTn + offs_batch[:, None] * n + offs_n_hist[None, :]
+    g_hist_ptrs = hist_g_ptr + iters * sbn + offs_batch[:, None] * n + offs_n_hist[None, :]
     g = tl.load(g_hist_ptrs, mask=mask_batch[:, None], other=0.0)
     g = tl.reshape(g, (BATCH_SIZE, n))
 
     for iter_idx in range(iters, 0, -1):
-        f_hist_ptrs = hist_f_ptr + iter_idx * BTn + offs_batch[:, None] * n + offs_n_hist[None, :]
+        f_hist_ptrs = hist_f_ptr + iter_idx * sbn + offs_batch[:, None] * n + offs_n_hist[None, :]
         f = tl.load(f_hist_ptrs, mask=mask_batch[:, None], other=0.0)
         f = tl.reshape(f, (BATCH_SIZE, n))
 
         g_hist_ptrs = (
-            hist_g_ptr + (iter_idx - 1) * BTn + offs_batch[:, None] * n + offs_n_hist[None, :]
+            hist_g_ptr + (iter_idx - 1) * sbn + offs_batch[:, None] * n + offs_n_hist[None, :]
         )
         g_next = tl.load(g_hist_ptrs, mask=mask_batch[:, None], other=0.0)
         g_next = tl.reshape(g_next, (BATCH_SIZE, n))
