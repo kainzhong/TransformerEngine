@@ -1495,7 +1495,7 @@ def _mhc_expand_combine_with_bias_fwd(
     # Residual connection path: res_out = f @ H_post + bias @ H_post:
     # (BLOCK_SIZE_M, BLOCK_SIZE_C, 1) @ (BLOCK_SIZE_M, 1, n)  = (BLOCK_SIZE_M, n, BLOCK_SIZE_C)
     # Due to broadcasting, it's equivalent to a multiplicaiton
-    res_out = f[:, :, None ] * H_post[:, None, :]  # (BLOCK_SIZE_M, BLOCK_SIZE_C, n)
+    res_out = f[:, :, None] * H_post[:, None, :]  # (BLOCK_SIZE_M, BLOCK_SIZE_C, n)
 
     H_res_offs = pid_m * BLOCK_SIZE_M * n * n + tl.arange(0, BLOCK_SIZE_M * n * n)
     H_res = tl.load(H_res_ptr + H_res_offs, mask=H_res_offs < M * n * n, other=0.0, cache_modifier=".ca")
