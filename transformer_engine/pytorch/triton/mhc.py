@@ -604,13 +604,12 @@ class mHCExpandCombineOp(torch.autograd.Function):
 
         out = torch.empty((s, b, C, n), device=x.device, dtype=x.dtype)
 
+        grid = lambda META: (
+            triton.cdiv(C, META["BLOCK_SIZE_C"]),
+            triton.cdiv(M, META["BLOCK_SIZE_M"]),
+        )
+
         if bias is None:
-            # If no bias then we can use the naive grid where triton will launch blocks in C direction first
-            # In this case it's more cache friendly for H
-            grid = lambda META: (
-                triton.cdiv(C, META["BLOCK_SIZE_C"]),
-                triton.cdiv(M, META["BLOCK_SIZE_M"]),
-            )
             _mhc_expand_combine_fwd[grid](
                 f_ptr=f,
                 H_post_ptr=H_post,
@@ -628,12 +627,6 @@ class mHCExpandCombineOp(torch.autograd.Function):
                 stride_output_Cn=1,
             )
         else:
-            # If bias is present then we need use the grouped order since launching in one direction will 
-            # cause cache thrashing for either H or bias
-            grid = lambda META: (
-                triton.cdiv(C, META["BLOCK_SIZE_C"]),
-                triton.cdiv(M, META["BLOCK_SIZE_M"]),
-            )
             _mhc_expand_combine_with_bias_fwd[grid](
                 f_ptr=f,
                 bias_ptr=bias,
