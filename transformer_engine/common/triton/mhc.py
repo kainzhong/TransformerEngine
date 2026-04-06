@@ -203,11 +203,12 @@ def _mhc_projection_bwd_fused(
     phi = tl.load(
         phi_ptrs, mask=(offs_n_full[:, None] < N) & mask_k[None, :], other=0.0
     )  # (BLOCK_SIZE_N, BLOCK_SIZE_K)
-    grad_x = tl.dot(
-        grad_h, phi, input_precision=precision, out_dtype=tl.float32
-    )  # (BLOCK_SIZE_M, BLOCK_SIZE_K)
     grad_ms = tl.load(grad_ms_ptrs, mask=offs_r < M, other=0.0, cache_modifier=".ca")  # (BLOCK_SIZE_M,)
-    grad_x += x * (grad_ms * 2 / tl.cast(K, tl.float32))[:, None]
+
+    grad_x = x * (grad_ms * 2 / tl.cast(K, tl.float32))[:, None]
+    grad_x = tl.dot(
+        grad_h, phi, acc=grad_x, input_precision=precision, out_dtype=tl.float32
+    )  # (BLOCK_SIZE_M, BLOCK_SIZE_K)
     grad_x_ptrs = grad_x_ptr + offs_m[:, None] * stride_grad_xm + offs_k[None, :] * stride_grad_xk
     grad_x = grad_x.to(x.dtype)
     tl.store(grad_x_ptrs, grad_x, mask=mask_m[:, None] & mask_k[None, :])
@@ -1179,7 +1180,8 @@ def _mhc_expand_combine_fwd(
     # Residual connection path: res_out = f @ H_post:
     # (BLOCK_SIZE_M, BLOCK_SIZE_C, 1) @ (BLOCK_SIZE_M, 1, n)  = (BLOCK_SIZE_M, n, BLOCK_SIZE_C)
     # Due to broadcasting, it's equivalent to a multiplicaiton
-    res_out = f[:, :, None ] * H_post[:, None, :]  # (BLOCK_SIZE_M, BLOCK_SIZE_C, n)
+    out_acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_C, n), dtype=tl.float32)
+    out_acc = tl.fma(f[:, :, None], H_post[:, None, :], out_acc)
 
     H_res_offs = pid_m * BLOCK_SIZE_M * n * n + tl.arange(0, BLOCK_SIZE_M * n * n)
     H_res = tl.load(H_res_ptr + H_res_offs, mask=H_res_offs < M * n * n, other=0.0, cache_modifier=".ca")
@@ -1199,7 +1201,6 @@ def _mhc_expand_combine_fwd(
     #           + x[:, :, 1] @ H_res[:, 1, :]
     #           + x[:, :, 2] @ H_res[:, 2, :]
     #           + x[:, :, 3] @ H_res[:, 3, :]
-    manifold_out_acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_C, n), dtype=tl.float32)
 
     x_reshape = tl.reshape(x, (BLOCK_SIZE_M, BLOCK_SIZE_C, 2, 2))
     x01, x23 = tl.split(x_reshape)  # (BLOCK_SIZE_M, BLOCK_SIZE_C, 2), (BLOCK_SIZE_M, BLOCK_SIZE_C, 2)
@@ -1211,14 +1212,12 @@ def _mhc_expand_combine_fwd(
     H_res0, H_res1 = tl.split(H_res01)  # (BLOCK_SIZE_M, n), (BLOCK_SIZE_M, n)
     H_res2, H_res3 = tl.split(H_res23)  # (BLOCK_SIZE_M, n), (BLOCK_SIZE_M, n)
 
-    manifold_out_acc = tl.fma(x0[:, :, None], H_res0[:, None, :], manifold_out_acc)
-    manifold_out_acc = tl.fma(x1[:, :, None], H_res1[:, None, :], manifold_out_acc)
-    manifold_out_acc = tl.fma(x2[:, :, None], H_res2[:, None, :], manifold_out_acc)
-    manifold_out_acc = tl.fma(x3[:, :, None], H_res3[:, None, :], manifold_out_acc)
+    out_acc = tl.fma(x0[:, :, None], H_res0[:, None, :], out_acc)
+    out_acc = tl.fma(x1[:, :, None], H_res1[:, None, :], out_acc)
+    out_acc = tl.fma(x2[:, :, None], H_res2[:, None, :], out_acc)
+    out_acc = tl.fma(x3[:, :, None], H_res3[:, None, :], out_acc)
 
-    manifold_out = manifold_out_acc.to(x.dtype)
-
-    out = manifold_out + res_out
+    out = out_acc.to(x.dtype)
     out = tl.reshape(out, (BLOCK_SIZE_M, BLOCK_SIZE_C * n))  # (BLOCK_SIZE_M, BLOCK_SIZE_C*n)
 
     output_ptrs = (
@@ -1486,7 +1485,6 @@ def _mhc_expand_combine_with_bias_fwd(
     f_ptrs = f_ptr + offs_m[:, None] * stride_fm + offs_c[None, :] * stride_fc
     f = tl.load(f_ptrs, mask=mask_m[:, None] & mask_c[None, :], other=0.0)
     bias = tl.load(bias_ptr + offs_c * stride_bias, mask=mask_c, other=0.0)  # (BLOCK_SIZE_C,)
-    f = f + bias[None, :]  # (BLOCK_SIZE_M, BLOCK_SIZE_C)
 
     offs_H_post = pid_m * BLOCK_SIZE_M * n + tl.arange(0, BLOCK_SIZE_M * n)
     H_post = tl.load(H_post_ptr + offs_H_post, mask=offs_H_post < M * n, other=0.0, cache_modifier=".ca")
@@ -1495,7 +1493,9 @@ def _mhc_expand_combine_with_bias_fwd(
     # Residual connection path: res_out = f @ H_post + bias @ H_post:
     # (BLOCK_SIZE_M, BLOCK_SIZE_C, 1) @ (BLOCK_SIZE_M, 1, n)  = (BLOCK_SIZE_M, n, BLOCK_SIZE_C)
     # Due to broadcasting, it's equivalent to a multiplicaiton
-    res_out = f[:, :, None] * H_post[:, None, :]  # (BLOCK_SIZE_M, BLOCK_SIZE_C, n)
+    out_acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_C, n), dtype=tl.float32)
+    out_acc = tl.fma(bias[None, :, None], H_post[:, None, :], out_acc)
+    out_acc = tl.fma(f[:, :, None], H_post[:, None, :], out_acc)
 
     H_res_offs = pid_m * BLOCK_SIZE_M * n * n + tl.arange(0, BLOCK_SIZE_M * n * n)
     H_res = tl.load(H_res_ptr + H_res_offs, mask=H_res_offs < M * n * n, other=0.0, cache_modifier=".ca")
@@ -1515,7 +1515,6 @@ def _mhc_expand_combine_with_bias_fwd(
     #           + x[:, :, 1] @ H_res[:, 1, :]
     #           + x[:, :, 2] @ H_res[:, 2, :]
     #           + x[:, :, 3] @ H_res[:, 3, :]
-    manifold_out_acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_C, n), dtype=tl.float32)
 
     x_reshape = tl.reshape(x, (BLOCK_SIZE_M, BLOCK_SIZE_C, 2, 2))
     x01, x23 = tl.split(x_reshape)  # (BLOCK_SIZE_M, BLOCK_SIZE_C, 2), (BLOCK_SIZE_M, BLOCK_SIZE_C, 2)
@@ -1527,14 +1526,12 @@ def _mhc_expand_combine_with_bias_fwd(
     H_res0, H_res1 = tl.split(H_res01)  # (BLOCK_SIZE_M, n), (BLOCK_SIZE_M, n)
     H_res2, H_res3 = tl.split(H_res23)  # (BLOCK_SIZE_M, n), (BLOCK_SIZE_M, n)
 
-    manifold_out_acc = tl.fma(x0[:, :, None], H_res0[:, None, :], manifold_out_acc)
-    manifold_out_acc = tl.fma(x1[:, :, None], H_res1[:, None, :], manifold_out_acc)
-    manifold_out_acc = tl.fma(x2[:, :, None], H_res2[:, None, :], manifold_out_acc)
-    manifold_out_acc = tl.fma(x3[:, :, None], H_res3[:, None, :], manifold_out_acc)
+    out_acc = tl.fma(x0[:, :, None], H_res0[:, None, :], out_acc)
+    out_acc = tl.fma(x1[:, :, None], H_res1[:, None, :], out_acc)
+    out_acc = tl.fma(x2[:, :, None], H_res2[:, None, :], out_acc)
+    out_acc = tl.fma(x3[:, :, None], H_res3[:, None, :], out_acc)
 
-    manifold_out = manifold_out_acc.to(x.dtype)
-
-    out = manifold_out + res_out
+    out = out_acc.to(x.dtype)
     out = tl.reshape(out, (BLOCK_SIZE_M, BLOCK_SIZE_C * n))  # (BLOCK_SIZE_M, BLOCK_SIZE_C*n)
 
     output_ptrs = (
@@ -1636,7 +1633,6 @@ def _mhc_expand_combine_with_bias_bwd(
     f = tl.load(f_ptrs, mask=mask_m[:, None] & mask_c[None, :], other=0.0)
 
     bias = tl.load(bias_ptr + offs_c * stride_bias, mask=mask_c, other=0.0)  # (BLOCK_SIZE_C,)
-    f = f + bias[None, :]  # (BLOCK_SIZE_M, BLOCK_SIZE_C)
 
     H_post_offs = pid_m * BLOCK_SIZE_M * n + tl.arange(0, BLOCK_SIZE_M * n)
     H_post = tl.load(H_post_ptr + H_post_offs, mask=H_post_offs < M * n, other=0.0)
@@ -1662,6 +1658,13 @@ def _mhc_expand_combine_with_bias_bwd(
     grad_H_post = tl.dot(
         tl.reshape(f, (BLOCK_SIZE_M, 1, BLOCK_SIZE_C)),
         tl.reshape(grad_out, (BLOCK_SIZE_M, BLOCK_SIZE_C, n)),
+        input_precision=precision,
+        out_dtype=tl.float32,
+    ) # (BLOCK_SIZE_M, 1, n)
+    grad_H_post = tl.dot(
+        tl.broadcast_to(bias[None, None, :], (BLOCK_SIZE_M, 1, BLOCK_SIZE_C)),
+        tl.reshape(grad_out, (BLOCK_SIZE_M, BLOCK_SIZE_C, n)),
+        acc=grad_H_post,
         input_precision=precision,
         out_dtype=tl.float32,
     ) # (BLOCK_SIZE_M, 1, n)

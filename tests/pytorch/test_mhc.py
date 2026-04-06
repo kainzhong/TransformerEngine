@@ -23,7 +23,6 @@ reset_rng_states()
 torch.backends.cuda.matmul.allow_tf32 = False
 
 
-@torch.compile
 def mHCProjectionRef(x, phi):
     """
     Reference operator for mHC's projection building operation.
@@ -48,7 +47,6 @@ def mHCProjectionRef(x, phi):
     return Hs.to(x_dtype), ms
 
 
-@torch.compile
 def mHCScaleRef(H, alpha, beta, ms, n):
     """
     Reference operator for mHC's pre and post calculations
@@ -101,7 +99,6 @@ def mHCScaleRef(H, alpha, beta, ms, n):
     return out.to(H_dtype)
 
 
-@torch.compile
 def mHCSinkhornRef(H_res, n=4, iterations=20):
     """
     Sinkhorn-Knopp algorithm to convert a matrix into a doubly stochastic matrix.
@@ -136,7 +133,6 @@ def mHCSinkhornRef(H_res, n=4, iterations=20):
     return H_res_out
 
 
-@torch.compile
 def mHCAggregateRef(x, H_pre, n):
     """
     Reference operator for applying mHC's pre matrix H to a vector x.
@@ -153,7 +149,6 @@ def mHCAggregateRef(x, H_pre, n):
 
     return out
 
-@torch.compile
 def mHCExpandCombineRef(f, bias, H_post, x, H_res, n):
     """
     Reference operator for applying mHC's post transformation and residual transformation
@@ -167,15 +162,25 @@ def mHCExpandCombineRef(f, bias, H_post, x, H_res, n):
 
     s, b, C, n = x.shape
 
+    # My triton kernels use FMA and MMA instructions with fp32 accumulator for bf16 test cases
+    # which has better numerical stability than this pytorch implementation
+    # To match the kernel's accuracy we need to cast to fp32 here to match kernels' result
+    input_dtype = f.dtype
+    f = f.to(torch.float32)
+    bias = bias.to(torch.float32) if bias is not None else None
+    H_post = H_post.to(torch.float32)
+    x = x.to(torch.float32)
+    H_res = H_res.to(torch.float32)
+
     if bias is not None:
-        f = f + bias
+        f = f + bias[None, None, :]
 
     f = f.view(s, b, C, 1)
     H_post = H_post.view(s, b, 1, n)
 
     out = f @ H_post + x @ H_res  # (s, b, C, n)
 
-    return out
+    return out.to(input_dtype)
 
 @dataclass
 class MHCConfig:
@@ -232,27 +237,27 @@ mhc_configs = [
     MHCConfig(
         8,
         128,
-        16 * 192,
+        5129,
     ),
     MHCConfig(
         8,
-        1,
-        16 * 500,
+        512,
+        8000,
+    ),
+    MHCConfig(
+        4,
+        1024,
+        8192,
+    ),
+    MHCConfig(
+        2,
+        4096,
+        8192,
     ),
     MHCConfig(
         8,
         128,
-        16 * 512,
-    ),
-    MHCConfig(
-        8,
-        1,
-        16 * 376,
-    ),
-    MHCConfig(
-        8,
-        128,
-        16 * 1024,
+        16384,
     ),
 ]
 
@@ -449,8 +454,7 @@ def test_mhc_expand_combine(cfg: MHCConfig, dtype, with_bias):
     f = torch.randn(s, b, C, device="cuda", requires_grad=True, dtype=dtype)
     bias = None
     if with_bias:
-        bias_raw = torch.randn(C, device="cuda", requires_grad=True, dtype=dtype) * 0.1
-        bias = bias_raw.detach().clone().requires_grad_(True)
+        bias = torch.randn(C, device="cuda", requires_grad=True, dtype=dtype)
     H_post = torch.randn(s, b, n, device="cuda", requires_grad=True, dtype=dtype)
     x = torch.randn(s, b, C, n, device="cuda", requires_grad=True, dtype=dtype)
     H_res = torch.randn(s, b, n, n, device="cuda", requires_grad=True, dtype=dtype)
