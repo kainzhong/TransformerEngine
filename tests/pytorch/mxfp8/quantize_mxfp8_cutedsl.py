@@ -129,37 +129,56 @@ class MXFP8QuantizeConfig:
 
 
 # ---------------------------------------------------------------------------
-# Rowwise MXFP8 quantization kernel — shared memory tiled
+# Unified MXFP8 quantization kernel — shared memory tiled, single-pass
 # ---------------------------------------------------------------------------
-class MXFP8RowwiseSmemKernel:
-    """Rowwise quantization with shared-memory tiling.
+class MXFP8QuantizeSmemKernel:
+    """MXFP8 quantization with shared-memory tiling (rowwise, colwise, or both).
 
-    Matches C++ kernel layout:
+    Matches C++ kernel's BIDIMENSIONAL scaling mode:
       Grid  (ceil(N/64), ceil(M/64))
       Block (64)
       Each block processes a 64x64 chunk in 2 stages of 32x64.
 
-    Cooperative load: all 64 threads load one 32x64 tile (coalesced).
-    Rowwise thread mapping (per stage):
-      tid_Y = tidx // 2   -> row in [0, 32)
-      tid_X = tidx %  2   -> scale-block in {0, 1}
-      Each thread reads 32 contiguous elements from smem.
+    Per stage, the tile is loaded into shared memory once.  The colwise
+    pass reads columns from smem first, then the rowwise pass reads rows.
+    When both directions are enabled, global memory is read only once per
+    element — matching the C++ single-pass behaviour.
+
+    Thread mappings (per stage):
+      Colwise:  thread tidx handles column tidx, 32 rows (stride BUFF_DIM_X).
+      Rowwise:  tid_Y = tidx // 2 -> row, tid_X = tidx % 2 -> scale-block.
     """
 
     def __init__(self, cfg):
         self.cfg = cfg
 
     @cute.jit
-    def __call__(self, x_ptr, out_ptr, scale_ptr, M, max_norm_rcp, stream):
+    def __call__(
+        self,
+        x_ptr,
+        out_row_ptr, scale_row_ptr,
+        out_col_ptr, scale_col_ptr,
+        M, max_norm_rcp, stream,
+    ):
         cfg = self.cfg
         num_scale_cols = cfg.N // SCALE_DIM
+        num_scale_rows = cfg.M // SCALE_DIM
 
         mX = cute.make_tensor(x_ptr, cute.make_layout((M, cfg.N), stride=(cfg.N, 1)))
-        mO = cute.make_tensor(out_ptr, cute.make_layout((M, cfg.N), stride=(cfg.N, 1)))
-        mS = cute.make_tensor(scale_ptr,
-                              cute.make_layout((M, num_scale_cols), stride=(num_scale_cols, 1)))
 
-        self.kernel(mX, mO, mS, max_norm_rcp).launch(
+        # Rowwise output tensors
+        mO_row = cute.make_tensor(out_row_ptr, cute.make_layout((M, cfg.N), stride=(cfg.N, 1)))
+        mS_row = cute.make_tensor(
+            scale_row_ptr,
+            cute.make_layout((M, num_scale_cols), stride=(num_scale_cols, 1)))
+
+        # Colwise output tensors
+        mO_col = cute.make_tensor(out_col_ptr, cute.make_layout((M, cfg.N), stride=(cfg.N, 1)))
+        mS_col = cute.make_tensor(
+            scale_col_ptr,
+            cute.make_layout((num_scale_rows, cfg.N), stride=(cfg.N, 1)))
+
+        self.kernel(mX, mO_row, mS_row, mO_col, mS_col, max_norm_rcp).launch(
             grid=[cute.ceil_div(Int32(cfg.N), CHUNK_DIM_X),
                   cute.ceil_div(M, CHUNK_DIM_Y), 1],
             block=[THREADS_PER_CHUNK, 1, 1],
@@ -167,105 +186,21 @@ class MXFP8RowwiseSmemKernel:
         )
 
     @cute.kernel
-    def kernel(self, mX, mO, mS, max_norm_rcp):
+    def kernel(self, mX, mO_row, mS_row, mO_col, mS_col, max_norm_rcp):
         cfg = self.cfg
         tidx, _, _ = cute.arch.thread_idx()
         bidx, bidy, _ = cute.arch.block_idx()
 
         M = mX.shape[0]
         N = cfg.N
-        num_scale_cols = N // SCALE_DIM
 
         block_off_Y = bidy * CHUNK_DIM_Y
         block_off_X = bidx * CHUNK_DIM_X
 
-        # Rowwise thread mapping
-        tid_Y = tidx // THREADS_X
-        tid_X = tidx % THREADS_X
-
-        # Shared memory for one 32x64 input tile
-        smem = utils.SmemAllocator()
-        sX = smem.allocate_tensor(
-            cfg.dtype,
-            cute.make_ordered_layout((BUFF_DIM_Y, BUFF_DIM_X), order=(1, 0)),
-            byte_alignment=128,
-        )
-
-        for stage in cutlass.range_constexpr(STAGES):
-            base_row = block_off_Y + stage * BUFF_DIM_Y
-
-            # Cooperative load: 64 threads x 32 rows (coalesced along cols)
-            # M and N are required to be multiples of CHUNK_DIM at the API level
-            for r in cutlass.range_constexpr(BUFF_DIM_Y):
-                sX[r, tidx] = mX[base_row + r, block_off_X + tidx]
-            cute.arch.barrier()
-
-            # Rowwise computation — read 32 contiguous elements from smem
-            g_row = base_row + tid_Y
-            scale_col = bidx * THREADS_X + tid_X
-            col_start = tid_X * SCALE_DIM
-
-            amax = Float32(0.0)
-            for i in cutlass.range_constexpr(SCALE_DIM):
-                val = Float32(sX[tid_Y, col_start + i])
-                amax = cute.arch.fmax(amax, fabs_f32(val))
-
-            biased_exp = float_to_e8m0(amax * max_norm_rcp)
-            mS[g_row, scale_col] = Uint8(biased_exp)
-
-            inv_scale = exp2f_rcp(biased_exp)
-            g_col_start = block_off_X + col_start
-            for i in cutlass.range_constexpr(SCALE_DIM):
-                val = Float32(sX[tid_Y, col_start + i])
-                mO[g_row, g_col_start + i] = Uint8(cvt_f32_to_fp8e4m3(val * inv_scale))
-
-            cute.arch.barrier()
-
-
-# ---------------------------------------------------------------------------
-# Colwise MXFP8 quantization kernel — shared memory tiled
-# ---------------------------------------------------------------------------
-class MXFP8ColwiseSmemKernel:
-    """Colwise quantization with shared-memory tiling.
-
-    Same grid/block as rowwise.  Per stage each of the 64 threads handles
-    one column of the 32x64 tile (32 elements along rows read from smem).
-    """
-
-    def __init__(self, cfg):
-        self.cfg = cfg
-
-    @cute.jit
-    def __call__(self, x_ptr, out_ptr, scale_ptr, M, max_norm_rcp, stream):
-        cfg = self.cfg
-        num_scale_rows = cfg.M // SCALE_DIM
-
-        mX = cute.make_tensor(x_ptr, cute.make_layout((M, cfg.N), stride=(cfg.N, 1)))
-        mO = cute.make_tensor(out_ptr, cute.make_layout((M, cfg.N), stride=(cfg.N, 1)))
-        mS = cute.make_tensor(scale_ptr,
-                              cute.make_layout((num_scale_rows, cfg.N), stride=(cfg.N, 1)))
-
-        self.kernel(mX, mO, mS, max_norm_rcp).launch(
-            grid=[cute.ceil_div(Int32(cfg.N), CHUNK_DIM_X),
-                  cute.ceil_div(M, CHUNK_DIM_Y), 1],
-            block=[THREADS_PER_CHUNK, 1, 1],
-            smem=BUFF_DIM_Y * BUFF_DIM_X * (cfg.dtype.width // 8) + 128,
-        )
-
-    @cute.kernel
-    def kernel(self, mX, mO, mS, max_norm_rcp):
-        cfg = self.cfg
-        tidx, _, _ = cute.arch.thread_idx()
-        bidx, bidy, _ = cute.arch.block_idx()
-
-        M = mX.shape[0]
-        N = cfg.N
-        num_scale_rows = cfg.M // SCALE_DIM
-
-        block_off_Y = bidy * CHUNK_DIM_Y
-        block_off_X = bidx * CHUNK_DIM_X
-
-        g_col = block_off_X + tidx
+        # Thread mappings
+        tid_Y_row = tidx // THREADS_X
+        tid_X_row = tidx % THREADS_X
+        g_col_cw = block_off_X + tidx   # colwise: thread per column
 
         smem = utils.SmemAllocator()
         sX = smem.allocate_tensor(
@@ -277,26 +212,49 @@ class MXFP8ColwiseSmemKernel:
         for stage in cutlass.range_constexpr(STAGES):
             base_row = block_off_Y + stage * BUFF_DIM_Y
 
-            # Cooperative load (M, N multiples of CHUNK_DIM — checked at API)
+            # --- Cooperative load (once per stage) ---
             for r in cutlass.range_constexpr(BUFF_DIM_Y):
                 sX[r, tidx] = mX[base_row + r, block_off_X + tidx]
             cute.arch.barrier()
 
-            # Colwise: thread tidx handles column tidx, 32 rows from smem
-            scale_row = (block_off_Y + stage * BUFF_DIM_Y) // SCALE_DIM
+            # --- Colwise pass (if enabled) ---
+            if cutlass.const_expr(cfg.colwise):
+                scale_row = base_row // SCALE_DIM
 
-            amax = Float32(0.0)
-            for i in cutlass.range_constexpr(SCALE_DIM):
-                val = Float32(sX[i, tidx])
-                amax = cute.arch.fmax(amax, fabs_f32(val))
+                amax_c = Float32(0.0)
+                for i in cutlass.range_constexpr(SCALE_DIM):
+                    val = Float32(sX[i, tidx])
+                    amax_c = cute.arch.fmax(amax_c, fabs_f32(val))
 
-            biased_exp = float_to_e8m0(amax * max_norm_rcp)
-            mS[scale_row, g_col] = Uint8(biased_exp)
+                biased_exp_c = float_to_e8m0(amax_c * max_norm_rcp)
+                mS_col[scale_row, g_col_cw] = Uint8(biased_exp_c)
 
-            inv_scale = exp2f_rcp(biased_exp)
-            for i in cutlass.range_constexpr(SCALE_DIM):
-                val = Float32(sX[i, tidx])
-                mO[base_row + i, g_col] = Uint8(cvt_f32_to_fp8e4m3(val * inv_scale))
+                inv_scale_c = exp2f_rcp(biased_exp_c)
+                for i in cutlass.range_constexpr(SCALE_DIM):
+                    val = Float32(sX[i, tidx])
+                    mO_col[base_row + i, g_col_cw] = Uint8(
+                        cvt_f32_to_fp8e4m3(val * inv_scale_c))
+
+            # --- Rowwise pass (if enabled) ---
+            if cutlass.const_expr(cfg.rowwise):
+                g_row_rw = base_row + tid_Y_row
+                scale_col = bidx * THREADS_X + tid_X_row
+                col_start = tid_X_row * SCALE_DIM
+
+                amax_r = Float32(0.0)
+                for i in cutlass.range_constexpr(SCALE_DIM):
+                    val = Float32(sX[tid_Y_row, col_start + i])
+                    amax_r = cute.arch.fmax(amax_r, fabs_f32(val))
+
+                biased_exp_r = float_to_e8m0(amax_r * max_norm_rcp)
+                mS_row[g_row_rw, scale_col] = Uint8(biased_exp_r)
+
+                inv_scale_r = exp2f_rcp(biased_exp_r)
+                g_col_start = block_off_X + col_start
+                for i in cutlass.range_constexpr(SCALE_DIM):
+                    val = Float32(sX[tid_Y_row, col_start + i])
+                    mO_row[g_row_rw, g_col_start + i] = Uint8(
+                        cvt_f32_to_fp8e4m3(val * inv_scale_r))
 
             cute.arch.barrier()
 
@@ -307,15 +265,16 @@ class MXFP8ColwiseSmemKernel:
 _compile_cache: dict = {}
 
 
-def _get_compiled_kernel(kernel_cls, cfg, stream, direction):
-    key = (direction, cfg.dtype, cfg.M, cfg.N, cfg.fp8_dtype)
+def _get_compiled_kernel(cfg, stream):
+    key = (cfg.dtype, cfg.M, cfg.N, cfg.fp8_dtype, cfg.rowwise, cfg.colwise)
     if key not in _compile_cache:
-        kernel_obj = kernel_cls(cfg)
+        kernel_obj = MXFP8QuantizeSmemKernel(cfg)
+        u8_ptr = make_ptr(Uint8, 16, cute.AddressSpace.gmem, assumed_align=16)
         compiled = cute.compile(
             kernel_obj,
             make_ptr(cfg.dtype, 16, cute.AddressSpace.gmem, assumed_align=16),
-            make_ptr(Uint8, 16, cute.AddressSpace.gmem, assumed_align=16),
-            make_ptr(Uint8, 16, cute.AddressSpace.gmem, assumed_align=16),
+            u8_ptr, u8_ptr,   # rowwise data, scale
+            u8_ptr, u8_ptr,   # colwise data, scale
             Int32(1), Float32(cfg.max_norm_rcp), stream,
         )
         _compile_cache[key] = compiled
@@ -349,30 +308,34 @@ def quantize_mxfp8_cutedsl(
     max_norm_rcp = FP8E4M3_MAX_NORM_RCP if fp8_dtype == "e4m3" else FP8E5M2_MAX_NORM_RCP
     torch_stream = torch.cuda.current_stream()
     stream = cuda.CUstream(torch_stream.cuda_stream)
+
+    # Allocate outputs
     result = {}
-
     if rowwise:
-        cfg = MXFP8QuantizeConfig(cutlass_dtype, M, N, fp8_dtype, rowwise=True)
-        compiled = _get_compiled_kernel(MXFP8RowwiseSmemKernel, cfg, stream, "rowwise")
-        out_data = torch.empty((M, N), dtype=torch.uint8, device=x.device)
-        out_scale = torch.empty((M, N // SCALE_DIM), dtype=torch.uint8, device=x.device)
-        compiled(make_ptr(cutlass_dtype, x.data_ptr()),
-                 make_ptr(Uint8, out_data.data_ptr()),
-                 make_ptr(Uint8, out_scale.data_ptr()),
-                 Int32(M), Float32(max_norm_rcp), stream)
-        result["rowwise_data"] = out_data
-        result["rowwise_scale"] = out_scale
-
+        result["rowwise_data"] = torch.empty((M, N), dtype=torch.uint8, device=x.device)
+        result["rowwise_scale"] = torch.empty((M, N // SCALE_DIM), dtype=torch.uint8, device=x.device)
     if colwise:
-        cfg = MXFP8QuantizeConfig(cutlass_dtype, M, N, fp8_dtype, colwise=True)
-        compiled = _get_compiled_kernel(MXFP8ColwiseSmemKernel, cfg, stream, "colwise")
-        out_data = torch.empty((M, N), dtype=torch.uint8, device=x.device)
-        out_scale = torch.empty((M // SCALE_DIM, N), dtype=torch.uint8, device=x.device)
-        compiled(make_ptr(cutlass_dtype, x.data_ptr()),
-                 make_ptr(Uint8, out_data.data_ptr()),
-                 make_ptr(Uint8, out_scale.data_ptr()),
-                 Int32(M), Float32(max_norm_rcp), stream)
-        result["colwise_data"] = out_data
-        result["colwise_scale"] = out_scale
+        result["colwise_data"] = torch.empty((M, N), dtype=torch.uint8, device=x.device)
+        result["colwise_scale"] = torch.empty((M // SCALE_DIM, N), dtype=torch.uint8, device=x.device)
+
+    # Single unified kernel launch — loads global memory once for both directions
+    cfg = MXFP8QuantizeConfig(cutlass_dtype, M, N, fp8_dtype, rowwise=rowwise, colwise=colwise)
+    compiled = _get_compiled_kernel(cfg, stream)
+
+    # For unused directions, point to the other direction's buffer (never written)
+    dummy = result.get("rowwise_data", result.get("colwise_data"))
+    dummy_scale = result.get("rowwise_scale", result.get("colwise_scale"))
+
+    def _ptr(t):
+        return make_ptr(Uint8, t.data_ptr())
+
+    compiled(
+        make_ptr(cutlass_dtype, x.data_ptr()),
+        _ptr(result["rowwise_data"]) if rowwise else _ptr(dummy),
+        _ptr(result["rowwise_scale"]) if rowwise else _ptr(dummy_scale),
+        _ptr(result["colwise_data"]) if colwise else _ptr(dummy),
+        _ptr(result["colwise_scale"]) if colwise else _ptr(dummy_scale),
+        Int32(M), Float32(max_norm_rcp), stream,
+    )
 
     return result
