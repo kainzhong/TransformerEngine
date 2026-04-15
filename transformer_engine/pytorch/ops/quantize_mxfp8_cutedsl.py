@@ -262,32 +262,55 @@ class MXFP8QuantizeSmemKernel:
         # Thread mappings
         tid_Y_row = tidx // THREADS_X
         tid_X_row = tidx % THREADS_X
-        g_col_cw = block_off_X + tidx   # colwise: thread per column
-
-        # --- Double-buffered shared memory (BUFFS_NUM = 2) ---
-        smem = utils.SmemAllocator()
-        sX0 = smem.allocate_tensor(
-            cfg.dtype,
-            cute.make_ordered_layout((BUFF_DIM_Y, BUFF_DIM_X), order=(1, 0)),
-            byte_alignment=128,
-        )
-        sX1 = smem.allocate_tensor(
-            cfg.dtype,
-            cute.make_ordered_layout((BUFF_DIM_Y, BUFF_DIM_X), order=(1, 0)),
-            byte_alignment=128,
-        )
+        g_col_cw = block_off_X + tidx
 
         # Bank-conflict constants (used by rowwise pass)
         thread_lane = tidx % THREADS_PER_WARP
         bank_group = thread_lane // THREADS_PER_BANK
 
-        # --- Prefetch stage 0 into buffer 0 ---
-        base_row_0 = block_off_Y
-        for r in cutlass.range_constexpr(BUFF_DIM_Y):
-            sX0[r, tidx] = mX[base_row_0 + r, block_off_X + tidx]
+        # --- Double-buffered shared memory (BUFFS_NUM = 2) ---
+        smem = utils.SmemAllocator()
+        smem_layout = cute.make_ordered_layout(
+            (BUFF_DIM_Y, BUFF_DIM_X), order=(1, 0))
+        sX0 = smem.allocate_tensor(cfg.dtype, smem_layout, byte_alignment=128)
+        sX1 = smem.allocate_tensor(cfg.dtype, smem_layout, byte_alignment=128)
+
+        # --- cp.async TiledCopy: 64 threads, 128-bit (8-element) vectorised ---
+        # thr (8,8): 8 thread-rows × 8 thread-cols = 64 threads
+        # val (4,8): 4 rows × 8 elements per thread = 32 elements/thread
+        # → tile = (32, 64)
+        thr_layout = cute.make_ordered_layout((8, 8), order=(1, 0))
+        val_layout = cute.make_ordered_layout((4, 8), order=(1, 0))
+        copy_atom_async = cute.make_copy_atom(
+            cute.nvgpu.cpasync.CopyG2SOp(), mX.element_type,
+            num_bits_per_copy=128,
+        )
+        tiled_copy = cute.make_tiled_copy_tv(
+            copy_atom_async, thr_layout, val_layout)
+        thr_copy = tiled_copy.get_slice(tidx)
+
+        # Per-stage global tiles: local_tile with (32, 64) tiler
+        tiler = (BUFF_DIM_Y, BUFF_DIM_X)
+        gX_s0 = cute.local_tile(mX, tiler, (bidy * 2, bidx))
+        gX_s1 = cute.local_tile(mX, tiler, (bidy * 2 + 1, bidx))
+
+        # Partition global and smem for each stage
+        tXgX_s0 = thr_copy.partition_S(gX_s0)
+        tXsX_s0 = thr_copy.partition_D(sX0)
+        tXgX_s1 = thr_copy.partition_S(gX_s1)
+        tXsX_s1 = thr_copy.partition_D(sX1)
+
+        # --- Issue both cp.async loads upfront for maximum overlap ---
+        cute.copy(copy_atom_async, tXgX_s0, tXsX_s0)
+        cute.arch.cp_async_commit_group()
+        cute.copy(copy_atom_async, tXgX_s1, tXsX_s1)
+        cute.arch.cp_async_commit_group()
+
+        # --- Stage 0: wait for buf 0, compute (stage 1 loads in background) ---
+        cute.arch.cp_async_wait_group(1)
         cute.arch.barrier()
 
-        # --- Stage 0: compute from buf 0, prefetch stage 1 into buf 1 ---
+        base_row_0 = block_off_Y
         self._compute_stage(
             sX0, mO_row, mS_row, mO_col, mS_col,
             base_row_0, block_off_X, bidx,
@@ -295,14 +318,11 @@ class MXFP8QuantizeSmemKernel:
             bank_group, max_norm_rcp,
         )
 
-        # Prefetch stage 1 into buffer 1 (overlaps with stage 0 global writes)
-        base_row_1 = block_off_Y + BUFF_DIM_Y
-        cute.arch.barrier()
-        for r in cutlass.range_constexpr(BUFF_DIM_Y):
-            sX1[r, tidx] = mX[base_row_1 + r, block_off_X + tidx]
+        # --- Stage 1: wait for buf 1, compute ---
+        cute.arch.cp_async_wait_group(0)
         cute.arch.barrier()
 
-        # --- Stage 1: compute from buf 1 ---
+        base_row_1 = block_off_Y + BUFF_DIM_Y
         self._compute_stage(
             sX1, mO_row, mS_row, mO_col, mS_col,
             base_row_1, block_off_X, bidx,
