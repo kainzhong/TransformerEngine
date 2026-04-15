@@ -206,7 +206,7 @@ class MXFP8QuantizeSmemKernel:
             grid=[cute.ceil_div(Int32(cfg.N), CHUNK_DIM_X),
                   cute.ceil_div(M, CHUNK_DIM_Y), 1],
             block=[THREADS_PER_CHUNK, 1, 1],
-            smem=BUFF_DIM_Y * BUFF_DIM_X * (cfg.dtype.width // 8) + 128,
+            smem=2 * BUFF_DIM_Y * BUFF_DIM_X * (cfg.dtype.width // 8) + 256,
         )
 
     @cute.kernel
@@ -226,78 +226,110 @@ class MXFP8QuantizeSmemKernel:
         tid_X_row = tidx % THREADS_X
         g_col_cw = block_off_X + tidx   # colwise: thread per column
 
+        # --- Double-buffered shared memory (BUFFS_NUM = 2) ---
         smem = utils.SmemAllocator()
-        sX = smem.allocate_tensor(
+        sX0 = smem.allocate_tensor(
+            cfg.dtype,
+            cute.make_ordered_layout((BUFF_DIM_Y, BUFF_DIM_X), order=(1, 0)),
+            byte_alignment=128,
+        )
+        sX1 = smem.allocate_tensor(
             cfg.dtype,
             cute.make_ordered_layout((BUFF_DIM_Y, BUFF_DIM_X), order=(1, 0)),
             byte_alignment=128,
         )
 
-        for stage in cutlass.range_constexpr(STAGES):
-            base_row = block_off_Y + stage * BUFF_DIM_Y
+        # Bank-conflict constants (used by rowwise pass)
+        thread_lane = tidx % THREADS_PER_WARP
+        bank_group = thread_lane // THREADS_PER_BANK
 
-            # --- Cooperative load (once per stage) ---
-            for r in cutlass.range_constexpr(BUFF_DIM_Y):
-                sX[r, tidx] = mX[base_row + r, block_off_X + tidx]
-            cute.arch.barrier()
+        # --- Prefetch stage 0 into buffer 0 ---
+        base_row_0 = block_off_Y
+        for r in cutlass.range_constexpr(BUFF_DIM_Y):
+            sX0[r, tidx] = mX[base_row_0 + r, block_off_X + tidx]
+        cute.arch.barrier()
 
-            # --- Colwise pass (if enabled) ---
-            if cutlass.const_expr(cfg.colwise):
-                scale_row = base_row // SCALE_DIM
+        # --- Stage 0: compute from buf 0, prefetch stage 1 into buf 1 ---
+        self._compute_stage(
+            sX0, mO_row, mS_row, mO_col, mS_col,
+            base_row_0, block_off_X, bidx,
+            tid_Y_row, tid_X_row, g_col_cw,
+            bank_group, max_norm_rcp,
+        )
 
-                amax_c = Float32(0.0)
-                for i in cutlass.range_constexpr(SCALE_DIM):
-                    val = Float32(sX[i, tidx])
-                    amax_c = cute.arch.fmax(amax_c, fabs_f32(val))
+        # Prefetch stage 1 into buffer 1 (overlaps with stage 0 global writes)
+        base_row_1 = block_off_Y + BUFF_DIM_Y
+        cute.arch.barrier()
+        for r in cutlass.range_constexpr(BUFF_DIM_Y):
+            sX1[r, tidx] = mX[base_row_1 + r, block_off_X + tidx]
+        cute.arch.barrier()
 
-                biased_exp_c = float_to_e8m0(amax_c * max_norm_rcp)
-                mS_col[scale_row, g_col_cw] = Uint8(biased_exp_c)
+        # --- Stage 1: compute from buf 1 ---
+        self._compute_stage(
+            sX1, mO_row, mS_row, mO_col, mS_col,
+            base_row_1, block_off_X, bidx,
+            tid_Y_row, tid_X_row, g_col_cw,
+            bank_group, max_norm_rcp,
+        )
 
-                inv_scale_c = exp2f_rcp(biased_exp_c)
-                for i in cutlass.range_constexpr(SCALE_DIM):
-                    val = Float32(sX[i, tidx])
-                    mO_col[base_row + i, g_col_cw] = Uint8(
-                        cvt_f32_to_fp8e4m3(val * inv_scale_c))
+    @cute.jit
+    def _compute_stage(
+        self, sX, mO_row, mS_row, mO_col, mS_col,
+        base_row, block_off_X, bidx,
+        tid_Y_row, tid_X_row, g_col_cw,
+        bank_group, max_norm_rcp,
+    ):
+        """Process one 32×64 tile from shared memory (colwise then rowwise)."""
+        cfg = self.cfg
 
-            # --- Rowwise pass (if enabled) — bank-conflict-free wave access ---
-            if cutlass.const_expr(cfg.rowwise):
-                g_row_rw = base_row + tid_Y_row
-                scale_col = bidx * THREADS_X + tid_X_row
-                col_start = tid_X_row * SCALE_DIM
+        # --- Colwise pass ---
+        if cutlass.const_expr(cfg.colwise):
+            scale_row = base_row // SCALE_DIM
 
-                # Bank-conflict avoidance: rotate which 4-element group
-                # each thread reads per wave, based on warp lane position.
-                thread_lane = tidx % THREADS_PER_WARP
-                bank_group = thread_lane // THREADS_PER_BANK
+            amax_c = Float32(0.0)
+            for i in cutlass.range_constexpr(SCALE_DIM):
+                tidx_local = g_col_cw - block_off_X
+                val = Float32(sX[i, tidx_local])
+                amax_c = cute.arch.fmax(amax_c, fabs_f32(val))
 
-                # 1. Amax over 8 waves of 4 elements each (swizzled order)
-                amax_r = Float32(0.0)
-                for w in cutlass.range_constexpr(WAVES):
-                    swizzled_grp = ((w + bank_group) * PACK_SIZE) % SCALE_DIM
-                    for e in cutlass.range_constexpr(PACK_SIZE):
-                        val = Float32(sX[tid_Y_row, col_start + swizzled_grp + e])
-                        amax_r = cute.arch.fmax(amax_r, fabs_f32(val))
+            biased_exp_c = float_to_e8m0(amax_c * max_norm_rcp)
+            mS_col[scale_row, g_col_cw] = Uint8(biased_exp_c)
 
-                # 2. Scale factor
-                biased_exp_r = float_to_e8m0(amax_r * max_norm_rcp)
-                mS_row[g_row_rw, scale_col] = Uint8(biased_exp_r)
+            inv_scale_c = exp2f_rcp(biased_exp_c)
+            for i in cutlass.range_constexpr(SCALE_DIM):
+                tidx_local = g_col_cw - block_off_X
+                val = Float32(sX[i, tidx_local])
+                mO_col[base_row + i, g_col_cw] = Uint8(
+                    cvt_f32_to_fp8e4m3(val * inv_scale_c))
 
-                # 3. Scale + 2-wide FP8 conversion (swizzled order)
-                inv_scale_r = exp2f_rcp(biased_exp_r)
-                g_col_base = block_off_X + col_start
-                for w in cutlass.range_constexpr(WAVES):
-                    swizzled_grp = ((w + bank_group) * PACK_SIZE) % SCALE_DIM
-                    # Convert pairs of elements using the 2-wide PTX instruction
-                    for e in cutlass.range_constexpr(PACK_SIZE // 2):
-                        v0 = Float32(sX[tid_Y_row, col_start + swizzled_grp + 2 * e])
-                        v1 = Float32(sX[tid_Y_row, col_start + swizzled_grp + 2 * e + 1])
-                        packed = cvt_f32x2_to_fp8e4m3x2(v0 * inv_scale_r,
-                                                         v1 * inv_scale_r)
-                        g_c = g_col_base + swizzled_grp + 2 * e
-                        mO_row[g_row_rw, g_c] = Uint8(packed >> Int32(8))
-                        mO_row[g_row_rw, g_c + 1] = Uint8(packed & Int32(0xFF))
+        # --- Rowwise pass — bank-conflict-free wave access ---
+        if cutlass.const_expr(cfg.rowwise):
+            g_row_rw = base_row + tid_Y_row
+            scale_col = bidx * THREADS_X + tid_X_row
+            col_start = tid_X_row * SCALE_DIM
 
-            cute.arch.barrier()
+            amax_r = Float32(0.0)
+            for w in cutlass.range_constexpr(WAVES):
+                swizzled_grp = ((w + bank_group) * PACK_SIZE) % SCALE_DIM
+                for e in cutlass.range_constexpr(PACK_SIZE):
+                    val = Float32(sX[tid_Y_row, col_start + swizzled_grp + e])
+                    amax_r = cute.arch.fmax(amax_r, fabs_f32(val))
+
+            biased_exp_r = float_to_e8m0(amax_r * max_norm_rcp)
+            mS_row[g_row_rw, scale_col] = Uint8(biased_exp_r)
+
+            inv_scale_r = exp2f_rcp(biased_exp_r)
+            g_col_base = block_off_X + col_start
+            for w in cutlass.range_constexpr(WAVES):
+                swizzled_grp = ((w + bank_group) * PACK_SIZE) % SCALE_DIM
+                for e in cutlass.range_constexpr(PACK_SIZE // 2):
+                    v0 = Float32(sX[tid_Y_row, col_start + swizzled_grp + 2 * e])
+                    v1 = Float32(sX[tid_Y_row, col_start + swizzled_grp + 2 * e + 1])
+                    packed = cvt_f32x2_to_fp8e4m3x2(v0 * inv_scale_r,
+                                                     v1 * inv_scale_r)
+                    g_c = g_col_base + swizzled_grp + 2 * e
+                    mO_row[g_row_rw, g_c] = Uint8(packed >> Int32(8))
+                    mO_row[g_row_rw, g_c + 1] = Uint8(packed & Int32(0xFF))
 
 
 # ---------------------------------------------------------------------------
