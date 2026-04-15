@@ -138,17 +138,44 @@ def cvt_f32x2_to_fp8e4m3x2(val_hi: Float32, val_lo: Float32,
         T.i32(), result_i16.ir_value(loc=loc, ip=ip), loc=loc, ip=ip))
 
 
+@dsl_user_op
+def gemm_swizzled_scale_idx(i: Int32, j: Int32, num_tiles_X: Int32,
+                             *, loc=None, ip=None) -> Int32:
+    """Convert compact scale indices (i, j) to GEMM-swizzled linear index.
+
+    Matches swizzle.cuh::gemm_swizzled_scale_idx.
+    Layout: 128×4 tiles, internal ordering per cuBLAS MXFP8 spec:
+        (row_in_tile % 32) * 16 + (row_in_tile // 32) * 4 + col_in_tile
+    """
+    TILE_DIM_X = Int32(4)
+    TILE_DIM_Y = Int32(128)
+    TILE_SIZE = Int32(512)   # 4 * 128
+
+    tile_idx_X = j // TILE_DIM_X
+    tile_idx_Y = i // TILE_DIM_Y
+    idx_in_tile_X = j % TILE_DIM_X
+    idx_in_tile_Y = i % TILE_DIM_Y
+
+    idx = (tile_idx_Y * num_tiles_X + tile_idx_X) * TILE_SIZE
+    idx = idx + (idx_in_tile_Y % Int32(32)) * Int32(16)
+    idx = idx + (idx_in_tile_Y // Int32(32)) * Int32(4)
+    idx = idx + idx_in_tile_X
+    return idx
+
+
 # ---------------------------------------------------------------------------
 # Kernel configuration
 # ---------------------------------------------------------------------------
 class MXFP8QuantizeConfig:
-    def __init__(self, dtype, M, N, fp8_dtype="e4m3", rowwise=True, colwise=False):
+    def __init__(self, dtype, M, N, fp8_dtype="e4m3", rowwise=True, colwise=False,
+                 with_gemm_swizzled_scales=False):
         self.dtype = dtype
         self.M = M
         self.N = N
         self.fp8_dtype = fp8_dtype
         self.rowwise = rowwise
         self.colwise = colwise
+        self.with_gemm_swizzled_scales = with_gemm_swizzled_scales
         self.max_norm_rcp = FP8E4M3_MAX_NORM_RCP if fp8_dtype == "e4m3" else FP8E5M2_MAX_NORM_RCP
 
 
@@ -192,15 +219,26 @@ class MXFP8QuantizeSmemKernel:
 
         # Rowwise output tensors
         mO_row = cute.make_tensor(out_row_ptr, cute.make_layout((M, cfg.N), stride=(cfg.N, 1)))
-        mS_row = cute.make_tensor(
-            scale_row_ptr,
-            cute.make_layout((M, num_scale_cols), stride=(num_scale_cols, 1)))
+        if cutlass.const_expr(cfg.with_gemm_swizzled_scales):
+            # Flat 1D scale tensor for swizzled writes
+            mS_row = cute.make_tensor(
+                scale_row_ptr,
+                cute.make_layout((M * num_scale_cols,), stride=(1,)))
+        else:
+            mS_row = cute.make_tensor(
+                scale_row_ptr,
+                cute.make_layout((M, num_scale_cols), stride=(num_scale_cols, 1)))
 
         # Colwise output tensors
         mO_col = cute.make_tensor(out_col_ptr, cute.make_layout((M, cfg.N), stride=(cfg.N, 1)))
-        mS_col = cute.make_tensor(
-            scale_col_ptr,
-            cute.make_layout((num_scale_rows, cfg.N), stride=(cfg.N, 1)))
+        if cutlass.const_expr(cfg.with_gemm_swizzled_scales):
+            mS_col = cute.make_tensor(
+                scale_col_ptr,
+                cute.make_layout((num_scale_rows * cfg.N,), stride=(1,)))
+        else:
+            mS_col = cute.make_tensor(
+                scale_col_ptr,
+                cute.make_layout((num_scale_rows, cfg.N), stride=(cfg.N, 1)))
 
         self.kernel(mX, mO_row, mS_row, mO_col, mS_col, max_norm_rcp).launch(
             grid=[cute.ceil_div(Int32(cfg.N), CHUNK_DIM_X),
@@ -293,7 +331,14 @@ class MXFP8QuantizeSmemKernel:
                 amax_c = cute.arch.fmax(amax_c, fabs_f32(val))
 
             biased_exp_c = float_to_e8m0(amax_c * max_norm_rcp)
-            mS_col[scale_row, g_col_cw] = Uint8(biased_exp_c)
+            if cutlass.const_expr(cfg.with_gemm_swizzled_scales):
+                # Colwise: gemm_swizzled_scale_idx(col, row, ceil(M/128))
+                num_row_tiles = (cfg.M + 127) // 128
+                sw_idx = gemm_swizzled_scale_idx(g_col_cw, Int32(scale_row),
+                                                  Int32(num_row_tiles))
+                mS_col[sw_idx] = Uint8(biased_exp_c)
+            else:
+                mS_col[scale_row, g_col_cw] = Uint8(biased_exp_c)
 
             inv_scale_c = exp2f_rcp(biased_exp_c)
             for i in cutlass.range_constexpr(SCALE_DIM):
@@ -316,7 +361,14 @@ class MXFP8QuantizeSmemKernel:
                     amax_r = cute.arch.fmax(amax_r, fabs_f32(val))
 
             biased_exp_r = float_to_e8m0(amax_r * max_norm_rcp)
-            mS_row[g_row_rw, scale_col] = Uint8(biased_exp_r)
+            if cutlass.const_expr(cfg.with_gemm_swizzled_scales):
+                # Rowwise: gemm_swizzled_scale_idx(row, scale_col, ceil(N/128))
+                num_col_tiles = (cfg.N + 127) // 128
+                sw_idx = gemm_swizzled_scale_idx(g_row_rw, scale_col,
+                                                  Int32(num_col_tiles))
+                mS_row[sw_idx] = Uint8(biased_exp_r)
+            else:
+                mS_row[g_row_rw, scale_col] = Uint8(biased_exp_r)
 
             inv_scale_r = exp2f_rcp(biased_exp_r)
             g_col_base = block_off_X + col_start
@@ -339,7 +391,8 @@ _compile_cache: dict = {}
 
 
 def _get_compiled_kernel(cfg, stream):
-    key = (cfg.dtype, cfg.M, cfg.N, cfg.fp8_dtype, cfg.rowwise, cfg.colwise)
+    key = (cfg.dtype, cfg.M, cfg.N, cfg.fp8_dtype, cfg.rowwise, cfg.colwise,
+           cfg.with_gemm_swizzled_scales)
     if key not in _compile_cache:
         kernel_obj = MXFP8QuantizeSmemKernel(cfg)
         u8_ptr = make_ptr(Uint8, 16, cute.AddressSpace.gmem, assumed_align=16)
@@ -369,6 +422,7 @@ def quantize_mxfp8_cutedsl(
     fp8_dtype: str = "e4m3",
     rowwise: bool = True,
     colwise: bool = False,
+    with_gemm_swizzled_scales: bool = False,
 ) -> dict:
     """Quantize a 2D tensor to MXFP8 format using CuTeDSL kernels with smem tiling."""
     assert x.is_cuda and x.is_contiguous() and x.ndim == 2
@@ -392,7 +446,8 @@ def quantize_mxfp8_cutedsl(
         result["colwise_scale"] = torch.empty((M // SCALE_DIM, N), dtype=torch.uint8, device=x.device)
 
     # Single unified kernel launch — loads global memory once for both directions
-    cfg = MXFP8QuantizeConfig(cutlass_dtype, M, N, fp8_dtype, rowwise=rowwise, colwise=colwise)
+    cfg = MXFP8QuantizeConfig(cutlass_dtype, M, N, fp8_dtype, rowwise=rowwise, colwise=colwise,
+                               with_gemm_swizzled_scales=with_gemm_swizzled_scales)
     compiled = _get_compiled_kernel(cfg, stream)
 
     # For unused directions, point to the other direction's buffer (never written)
