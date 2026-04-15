@@ -43,6 +43,12 @@ STAGES = CHUNK_DIM_Y // BUFF_DIM_Y  # 2
 THREADS_X = CHUNK_DIM_X // SCALE_DIM  # 2 scale-blocks per row
 THREADS_Y = THREADS_PER_CHUNK // THREADS_X  # 32 rows per buffer
 
+# Vectorised access constants for bank-conflict avoidance (rowwise pass)
+PACK_SIZE = 4                              # Elements per vector load
+WAVES = SCALE_DIM // PACK_SIZE             # 8 waves of 4 elements
+THREADS_PER_WARP = 32
+THREADS_PER_BANK = (32 * 4) // SCALE_DIM  # 4 — threads sharing a bank group
+
 # FP8E4M3 max representable value
 FP8E4M3_MAX_NORM = 448.0
 FP8E4M3_MAX_NORM_RCP = 1.0 / FP8E4M3_MAX_NORM
@@ -112,6 +118,24 @@ def cvt_f32_to_fp8e4m3(val: Float32, *, loc=None, ip=None) -> Int32:
     result_i32 = Int32(mlir_arith.extui(
         T.i32(), result_i16.ir_value(loc=loc, ip=ip), loc=loc, ip=ip))
     return result_i32 & Int32(0xFF)
+
+
+@dsl_user_op
+def cvt_f32x2_to_fp8e4m3x2(val_hi: Float32, val_lo: Float32,
+                             *, loc=None, ip=None) -> Int32:
+    """Convert two float32 values to two packed fp8e4m3fn bytes in one instruction.
+
+    Returns an int32 where bits [7:0] = fp8(val_lo), bits [15:8] = fp8(val_hi).
+    This mirrors ptx::mul_cvt_2x which converts 2 values in one instruction.
+    """
+    result_i16 = Int16(llvm.inline_asm(
+        T.i16(),
+        [val_hi.ir_value(loc=loc, ip=ip), val_lo.ir_value(loc=loc, ip=ip)],
+        "cvt.rn.satfinite.e4m3x2.f32 $0, $1, $2;",
+        "=h,f,f", has_side_effects=False, is_align_stack=False,
+        asm_dialect=llvm.AsmDialect.AD_ATT))
+    return Int32(mlir_arith.extui(
+        T.i32(), result_i16.ir_value(loc=loc, ip=ip), loc=loc, ip=ip))
 
 
 # ---------------------------------------------------------------------------
@@ -235,26 +259,43 @@ class MXFP8QuantizeSmemKernel:
                     mO_col[base_row + i, g_col_cw] = Uint8(
                         cvt_f32_to_fp8e4m3(val * inv_scale_c))
 
-            # --- Rowwise pass (if enabled) ---
+            # --- Rowwise pass (if enabled) — bank-conflict-free wave access ---
             if cutlass.const_expr(cfg.rowwise):
                 g_row_rw = base_row + tid_Y_row
                 scale_col = bidx * THREADS_X + tid_X_row
                 col_start = tid_X_row * SCALE_DIM
 
-                amax_r = Float32(0.0)
-                for i in cutlass.range_constexpr(SCALE_DIM):
-                    val = Float32(sX[tid_Y_row, col_start + i])
-                    amax_r = cute.arch.fmax(amax_r, fabs_f32(val))
+                # Bank-conflict avoidance: rotate which 4-element group
+                # each thread reads per wave, based on warp lane position.
+                thread_lane = tidx % THREADS_PER_WARP
+                bank_group = thread_lane // THREADS_PER_BANK
 
+                # 1. Amax over 8 waves of 4 elements each (swizzled order)
+                amax_r = Float32(0.0)
+                for w in cutlass.range_constexpr(WAVES):
+                    swizzled_grp = ((w + bank_group) * PACK_SIZE) % SCALE_DIM
+                    for e in cutlass.range_constexpr(PACK_SIZE):
+                        val = Float32(sX[tid_Y_row, col_start + swizzled_grp + e])
+                        amax_r = cute.arch.fmax(amax_r, fabs_f32(val))
+
+                # 2. Scale factor
                 biased_exp_r = float_to_e8m0(amax_r * max_norm_rcp)
                 mS_row[g_row_rw, scale_col] = Uint8(biased_exp_r)
 
+                # 3. Scale + 2-wide FP8 conversion (swizzled order)
                 inv_scale_r = exp2f_rcp(biased_exp_r)
-                g_col_start = block_off_X + col_start
-                for i in cutlass.range_constexpr(SCALE_DIM):
-                    val = Float32(sX[tid_Y_row, col_start + i])
-                    mO_row[g_row_rw, g_col_start + i] = Uint8(
-                        cvt_f32_to_fp8e4m3(val * inv_scale_r))
+                g_col_base = block_off_X + col_start
+                for w in cutlass.range_constexpr(WAVES):
+                    swizzled_grp = ((w + bank_group) * PACK_SIZE) % SCALE_DIM
+                    # Convert pairs of elements using the 2-wide PTX instruction
+                    for e in cutlass.range_constexpr(PACK_SIZE // 2):
+                        v0 = Float32(sX[tid_Y_row, col_start + swizzled_grp + 2 * e])
+                        v1 = Float32(sX[tid_Y_row, col_start + swizzled_grp + 2 * e + 1])
+                        packed = cvt_f32x2_to_fp8e4m3x2(v0 * inv_scale_r,
+                                                         v1 * inv_scale_r)
+                        g_c = g_col_base + swizzled_grp + 2 * e
+                        mO_row[g_row_rw, g_c] = Uint8(packed >> Int32(8))
+                        mO_row[g_row_rw, g_c + 1] = Uint8(packed & Int32(0xFF))
 
             cute.arch.barrier()
 
