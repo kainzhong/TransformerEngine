@@ -244,7 +244,9 @@ class MXFP8QuantizeSmemKernel:
             grid=[cute.ceil_div(Int32(cfg.N), CHUNK_DIM_X),
                   cute.ceil_div(M, CHUNK_DIM_Y), 1],
             block=[THREADS_PER_CHUNK, 1, 1],
-            smem=2 * BUFF_DIM_Y * BUFF_DIM_X * (cfg.dtype.width // 8) + 256,
+            smem=(2 * BUFF_DIM_Y * BUFF_DIM_X * (cfg.dtype.width // 8)  # 2 input buffers
+                  + 2 * BUFF_DIM_Y * BUFF_DIM_X * 1                    # 2 output buffers (uint8)
+                  + 512),                                               # alignment padding
         )
 
     @cute.kernel
@@ -274,6 +276,14 @@ class MXFP8QuantizeSmemKernel:
             (BUFF_DIM_Y, BUFF_DIM_X), order=(1, 0))
         sX0 = smem.allocate_tensor(cfg.dtype, smem_layout, byte_alignment=128)
         sX1 = smem.allocate_tensor(cfg.dtype, smem_layout, byte_alignment=128)
+
+        # Output smem buffers (FP8 = uint8, 32×64 = 2KB each)
+        out_smem_layout = cute.make_ordered_layout(
+            (BUFF_DIM_Y, BUFF_DIM_X), order=(1, 0))
+        if cutlass.const_expr(cfg.rowwise):
+            sO_row = smem.allocate_tensor(Uint8, out_smem_layout, byte_alignment=128)
+        if cutlass.const_expr(cfg.colwise):
+            sO_col = smem.allocate_tensor(Uint8, out_smem_layout, byte_alignment=128)
 
         # --- cp.async TiledCopy: 64 threads, 128-bit (8-element) vectorised ---
         # thr (8,8): 8 thread-rows × 8 thread-cols = 64 threads
@@ -306,16 +316,26 @@ class MXFP8QuantizeSmemKernel:
         cute.copy(copy_atom_async, tXgX_s1, tXsX_s1)
         cute.arch.cp_async_commit_group()
 
+        # Output smem refs (use sO_row / sO_col allocated above; None when disabled)
+        sO_row_ref = sO_row if cutlass.const_expr(cfg.rowwise) else None
+        sO_col_ref = sO_col if cutlass.const_expr(cfg.colwise) else None
+
         # --- Stage 0: wait for buf 0, compute (stage 1 loads in background) ---
         cute.arch.cp_async_wait_group(1)
         cute.arch.barrier()
 
         base_row_0 = block_off_Y
         self._compute_stage(
-            sX0, mO_row, mS_row, mO_col, mS_col,
+            sX0, sO_row_ref, sO_col_ref, mS_row, mS_col,
             base_row_0, block_off_X, bidx,
             tid_Y_row, tid_X_row, g_col_cw,
             bank_group, max_norm_rcp,
+        )
+        # Flush output smem → global (coalesced cooperative store)
+        cute.arch.barrier()
+        self._flush_output_smem(
+            sO_row_ref, sO_col_ref, mO_row, mO_col,
+            base_row_0, block_off_X, tidx,
         )
 
         # --- Stage 1: wait for buf 1, compute ---
@@ -324,35 +344,39 @@ class MXFP8QuantizeSmemKernel:
 
         base_row_1 = block_off_Y + BUFF_DIM_Y
         self._compute_stage(
-            sX1, mO_row, mS_row, mO_col, mS_col,
+            sX1, sO_row_ref, sO_col_ref, mS_row, mS_col,
             base_row_1, block_off_X, bidx,
             tid_Y_row, tid_X_row, g_col_cw,
             bank_group, max_norm_rcp,
         )
+        cute.arch.barrier()
+        self._flush_output_smem(
+            sO_row_ref, sO_col_ref, mO_row, mO_col,
+            base_row_1, block_off_X, tidx,
+        )
 
     @cute.jit
     def _compute_stage(
-        self, sX, mO_row, mS_row, mO_col, mS_col,
+        self, sX, sO_row, sO_col, mS_row, mS_col,
         base_row, block_off_X, bidx,
         tid_Y_row, tid_X_row, g_col_cw,
         bank_group, max_norm_rcp,
     ):
-        """Process one 32×64 tile from shared memory (colwise then rowwise)."""
+        """Compute one 32×64 stage: write FP8 output to smem (not global)."""
         cfg = self.cfg
 
-        # --- Colwise pass ---
+        # --- Colwise pass → output to sO_col ---
         if cutlass.const_expr(cfg.colwise):
+            tidx_local = g_col_cw - block_off_X
             scale_row = base_row // SCALE_DIM
 
             amax_c = Float32(0.0)
             for i in cutlass.range_constexpr(SCALE_DIM):
-                tidx_local = g_col_cw - block_off_X
                 val = Float32(sX[i, tidx_local])
                 amax_c = cute.arch.fmax(amax_c, fabs_f32(val))
 
             biased_exp_c = float_to_e8m0(amax_c * max_norm_rcp)
             if cutlass.const_expr(cfg.with_gemm_swizzled_scales):
-                # Colwise: gemm_swizzled_scale_idx(col, row, ceil(M/128))
                 num_row_tiles = (cfg.M + 127) // 128
                 sw_idx = gemm_swizzled_scale_idx(g_col_cw, Int32(scale_row),
                                                   Int32(num_row_tiles))
@@ -362,12 +386,10 @@ class MXFP8QuantizeSmemKernel:
 
             inv_scale_c = exp2f_rcp(biased_exp_c)
             for i in cutlass.range_constexpr(SCALE_DIM):
-                tidx_local = g_col_cw - block_off_X
                 val = Float32(sX[i, tidx_local])
-                mO_col[base_row + i, g_col_cw] = Uint8(
-                    cvt_f32_to_fp8e4m3(val * inv_scale_c))
+                sO_col[i, tidx_local] = Uint8(cvt_f32_to_fp8e4m3(val * inv_scale_c))
 
-        # --- Rowwise pass — bank-conflict-free wave access ---
+        # --- Rowwise pass → output to sO_row (bank-conflict-free writes) ---
         if cutlass.const_expr(cfg.rowwise):
             g_row_rw = base_row + tid_Y_row
             scale_col = bidx * THREADS_X + tid_X_row
@@ -382,7 +404,6 @@ class MXFP8QuantizeSmemKernel:
 
             biased_exp_r = float_to_e8m0(amax_r * max_norm_rcp)
             if cutlass.const_expr(cfg.with_gemm_swizzled_scales):
-                # Rowwise: gemm_swizzled_scale_idx(row, scale_col, ceil(N/128))
                 num_col_tiles = (cfg.N + 127) // 128
                 sw_idx = gemm_swizzled_scale_idx(g_row_rw, scale_col,
                                                   Int32(num_col_tiles))
@@ -391,7 +412,6 @@ class MXFP8QuantizeSmemKernel:
                 mS_row[g_row_rw, scale_col] = Uint8(biased_exp_r)
 
             inv_scale_r = exp2f_rcp(biased_exp_r)
-            g_col_base = block_off_X + col_start
             for w in cutlass.range_constexpr(WAVES):
                 swizzled_grp = ((w + bank_group) * PACK_SIZE) % SCALE_DIM
                 for e in cutlass.range_constexpr(PACK_SIZE // 2):
@@ -399,9 +419,30 @@ class MXFP8QuantizeSmemKernel:
                     v1 = Float32(sX[tid_Y_row, col_start + swizzled_grp + 2 * e + 1])
                     packed = cvt_f32x2_to_fp8e4m3x2(v0 * inv_scale_r,
                                                      v1 * inv_scale_r)
-                    g_c = g_col_base + swizzled_grp + 2 * e
-                    mO_row[g_row_rw, g_c] = Uint8(packed >> Int32(8))
-                    mO_row[g_row_rw, g_c + 1] = Uint8(packed & Int32(0xFF))
+                    sO_row[tid_Y_row, col_start + swizzled_grp + 2 * e] = Uint8(
+                        packed >> Int32(8))
+                    sO_row[tid_Y_row, col_start + swizzled_grp + 2 * e + 1] = Uint8(
+                        packed & Int32(0xFF))
+
+    @cute.jit
+    def _flush_output_smem(
+        self, sO_row, sO_col, mO_row, mO_col,
+        base_row, block_off_X, tidx,
+    ):
+        """Cooperative coalesced copy from output smem to global memory.
+
+        64 threads, each copies one column per row → 64 contiguous bytes per
+        row, giving perfect coalescing for the smem→global stores.
+        """
+        cfg = self.cfg
+
+        if cutlass.const_expr(cfg.rowwise):
+            for r in cutlass.range_constexpr(BUFF_DIM_Y):
+                mO_row[base_row + r, block_off_X + tidx] = sO_row[r, tidx]
+
+        if cutlass.const_expr(cfg.colwise):
+            for r in cutlass.range_constexpr(BUFF_DIM_Y):
+                mO_col[base_row + r, block_off_X + tidx] = sO_col[r, tidx]
 
 
 # ---------------------------------------------------------------------------
