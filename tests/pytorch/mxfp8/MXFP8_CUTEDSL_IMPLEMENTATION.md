@@ -4,8 +4,10 @@
 
 This document describes the CuTeDSL reimplementation of the MXFP8 quantization
 kernel originally written in CUDA C++ (`quantize_mxfp8.cuh`). It covers what
-has been implemented, how it works, what optimizations from the C++ version are
-missing, and concrete guidance on how to add them using CuTeDSL APIs.
+is implemented, how it works, and what remains to close the gap with the C++
+reference.
+
+For performance numbers, see `MXFP8_CUTEDSL_PERFORMANCE.md`.
 
 ### File Locations
 
@@ -13,10 +15,27 @@ missing, and concrete guidance on how to add them using CuTeDSL APIs.
 |------|------|
 | `transformer_engine/common/cast/mxfp8/quantize_mxfp8.cuh` | Original CUDA C++ kernel |
 | `transformer_engine/common/cast/mxfp8/swizzle.cuh` | GEMM-swizzled scale index helper |
-| `transformer_engine/common/cast/mxfp8/specialized/quantize_mxfp8.cuh` | Blackwell-specialized variants |
 | `transformer_engine/common/util/ptx.cuh` | `float_to_e8m0`, `exp2f_rcp` PTX helpers |
 | `tests/pytorch/mxfp8/quantize_mxfp8_cutedsl.py` | **CuTeDSL kernel + glue code** |
-| `tests/pytorch/mxfp8/test_mxfp8_quantize_cutedsl.py` | **Test file (27 tests, all passing)** |
+| `tests/pytorch/mxfp8/test_mxfp8_quantize_cutedsl.py` | Test file (27 tests, all passing) |
+| `tests/pytorch/mxfp8/bench_mxfp8_cutedsl.py` | Benchmark vs. C++ reference |
+| `tests/pytorch/mxfp8/run_nsys_profile.sh` | nsys profiling wrapper |
+| `tests/pytorch/mxfp8/MXFP8_CUTEDSL_PERFORMANCE.md` | Performance results |
+
+### Evolution
+
+The implementation was built up in seven commits, each matching a C++-kernel
+optimization and verified against the reference with `atol=0, rtol=0`:
+
+```
+03d46ee  Step 7: Output smem staging with coalesced write-back
+0d3d17a  Step 6: cp.async global→smem loads with load/compute overlap
+ac12437  Step 5: GEMM-swizzled scale layout
+1d00f63  Step 4: Double-buffered shared memory pipeline
+8b07e5d  Step 3: Bank-conflict-free wave access + 2-wide FP8 conversion
+223a9b3  Step 2: Bidirectional single-pass kernel
+0dd5204  Step 1: Shared memory tiling with C++ thread layout
+```
 
 ---
 
@@ -30,506 +49,349 @@ or FP32, it produces:
   blocks along columns.
 - **Colwise**: FP8E4M3 data `(M, N)` + E8M0 scales `(M/32, N)` — 32-element
   blocks along rows.
+- **Bidirectional**: both of the above in a single kernel launch, input loaded
+  from global memory once.
+- **GEMM-swizzled scales** (optional): scales in the 128×4 tile layout expected
+  by cuBLAS MXFP8 GEMMs.
 
 ### Correctness
 
-The implementation produces **bit-identical** output to the reference C++ kernel
-for all tested shapes (128x128 up to 16384x8192), verified with `atol=0, rtol=0`
-comparisons against `MXFP8Quantizer`.
+Produces **bit-identical** output to the reference C++ kernel for all tested
+shapes (128×128 up to 16384×8192), verified with `atol=0, rtol=0`:
+
+```bash
+cd tests/pytorch/mxfp8
+pytest test_mxfp8_quantize_cutedsl.py           # 27 tests
+```
+
+### Constraints
+
+- M and N must be multiples of `CHUNK_DIM = 64`.
+- Input dtype: BF16, FP16, or FP32. Output dtype: FP8E4M3.
+- Requires SM90+ (cp.async).
 
 ---
 
-## 2. How It Works
+## 2. Kernel Structure
 
-### 2.1 Algorithm (Per 32-Element Block)
+### 2.1 Tile Dimensions (matches C++ `quantize_mxfp8.cuh`)
 
-```
-amax = max(|x_i|)  for i in [0..31]
-biased_exponent = float_to_e8m0(amax * (1 / max_fp8_value))
-inverse_scale = 2^(127 - biased_exponent)
-for each element:
-    out[i] = fp8(x[i] * inverse_scale)
-```
+| Constant           | Value | Role |
+|--------------------|------:|------|
+| `SCALE_DIM`        |    32 | MXFP8 block size |
+| `CHUNK_DIM_Y`      |    64 | Rows per CTA |
+| `CHUNK_DIM_X`      |    64 | Cols per CTA |
+| `THREADS_PER_CHUNK`|    64 | Threads per CTA |
+| `BUFF_DIM_Y`       |    32 | Rows per smem buffer |
+| `BUFF_DIM_X`       |    64 | Cols per smem buffer |
+| `STAGES`           |     2 | `CHUNK_DIM_Y / BUFF_DIM_Y` |
+| `BUFFS_NUM`        |     2 | Double buffering |
+| `THREADS_X`        |     2 | Rowwise scale-blocks per row (`CHUNK_DIM_X / SCALE_DIM`) |
+| `THREADS_Y`        |    32 | Rowwise rows per stage |
+| `PACK_SIZE`        |     4 | Elements per vector load |
+| `WAVES`            |     8 | Rowwise waves per scale-block (`SCALE_DIM / PACK_SIZE`) |
+| `THREADS_PER_BANK` |     4 | Threads sharing an smem bank group |
 
-This is identical to the C++ kernel's logic at lines 218-297 (colwise) and
-300-460 (rowwise) of `quantize_mxfp8.cuh`.
+### 2.2 Single Unified Kernel
 
-### 2.2 CuTeDSL Kernel Structure
-
-Each kernel follows the standard CuTeDSL two-decorator pattern:
-
-```
-class MXFP8RowwiseQuantizeKernel:
-    @cute.jit           # Host-side: creates CuTe tensors, launches kernel
-    def __call__(self, x_ptr, out_ptr, scale_ptr, M, max_norm_rcp, stream):
-        mX = cute.make_tensor(x_ptr, cute.make_layout((M, N), stride=(N, 1)))
-        ...
-        self.kernel(mX, mO, mS, max_norm_rcp).launch(grid=..., block=...)
-
-    @cute.kernel         # Device-side: GPU code
-    def kernel(self, mX, mO, mS, max_norm_rcp):
-        tidx, _, _ = cute.arch.thread_idx()
-        bidx, bidy, _ = cute.arch.block_idx()
-        ...
-```
-
-**Compilation** is done once per `(dtype, M, N, fp8_dtype)` combination via
-`cute.compile()` and cached in a Python dict. At call time, only the `make_ptr`
-wrapping and the compiled function invocation happen.
-
-### 2.3 Low-Level DSL Operations
-
-Five `@dsl_user_op` functions implement the math using MLIR arith operations
-and inline PTX:
-
-| Function | Implementation | C++ Equivalent |
-|----------|---------------|----------------|
-| `fabs_f32(val)` | `bitcast` to i32, clear sign bit, `bitcast` back | `fabsf()` |
-| `float_to_e8m0(val)` | `(bitcast(val) + 0x7FFFFF) >> 23`, clamp to 254 via `arith.minsi` | `ptx::float_to_e8m0()` |
-| `exp2f_rcp(biased_exp)` | `bitcast((254 - exp) << 23)` with `arith.select` for edges | `ptx::exp2f_rcp()` |
-| `cvt_f32_to_fp8e4m3(val)` | Inline PTX: `cvt.rn.satfinite.e4m3x2.f32` | `static_cast<OType>()` |
-| `_bitcast_f32_to_i32` / `_bitcast_i32_to_f32` | `arith.bitcast` | `__float_as_int` / `__int_as_float` |
-
-**Key design note on `float_to_e8m0`**: The C++ version uses 3 branches
-(mantissa check, exponent cap, subnormal edge). The CuTeDSL version uses a
-branchless integer trick: adding `0x7FFFFF` (all-ones mantissa) to the IEEE 754
-bit pattern causes a carry into the exponent field exactly when any mantissa bit
-is set, naturally rounding up non-power-of-2 values.
-
-**Key design note on `cvt_f32_to_fp8e4m3`**: CuTeDSL's `TensorSSA.to(Float8E4M3FN)`
-works on vectors but not on scalars (the underlying MLIR op `nvgpu.cvt_fptrunc`
-requires a vector operand). We work around this with inline PTX that packs
-`(0.0, val)` into the 2-wide `cvt.rn.satfinite.e4m3x2.f32` instruction and
-extracts the low byte.
-
-### 2.4 Thread Mapping
-
-**Rowwise kernel**: Each thread owns one `(row, scale_block)` pair. The thread
-reads 32 contiguous elements from that row, finds the amax, computes the scale,
-and writes 32 FP8 bytes + 1 scale byte.
+One `MXFP8QuantizeSmemKernel` class handles all three modes (rowwise-only,
+colwise-only, bidirectional) via compile-time branching on `cutlass.const_expr(cfg.rowwise)`
+and `cutlass.const_expr(cfg.colwise)`. Unused passes are eliminated at JIT time.
 
 ```
-Grid:  (ceil(M / rows_per_block), ceil(num_scale_cols / threads_per_row), 1)
-Block: (128, 1, 1)
+@cute.jit                  host-side: make_tiled_tma_atom-style setup
+def __call__(...):         build gmem tensors, launch kernel
+    self.kernel(...).launch(grid=..., block=..., smem=...)
 
-thread -> (global_row, scale_col) = (bidx * rows_per_block + tidx // tpr,
-                                     bidy * tpr + tidx % tpr)
+@cute.kernel               device-side: GPU code
+def kernel(self, ...):
+    # 1. Allocate smem: 2 input buffers + 2 output buffers + scales via global
+    # 2. cp.async both stages into buf 0 and buf 1 (upfront, fully overlapped)
+    # 3. Stage 0: wait(1) → compute (colwise then rowwise) → TMA-like fence → store smem→gmem
+    # 4. Stage 1: wait(0) → compute → fence → store
 ```
 
-**Colwise kernel**: Each thread owns one `(scale_block, col)` pair. The thread
-reads 32 elements along the column (stride = N), finds the amax, and writes
-the same way.
+### 2.3 Data Flow Per Stage
 
 ```
-Grid:  (ceil(N / 128), M // 32, 1)
-Block: (128, 1, 1)
+                global memory
+                     |
+                cp.async (128-bit, vectorised, async)
+                     v
+              input smem buffer [0 or 1]  (32 x 64 x dtype)
+                     |
+        colwise read (stride BUFF_DIM_X, 1 col per thread)
+        rowwise read (PACK_SIZE=4 waves, bank-group swizzled)
+                     |
+                [amax, E8M0 scale, inv_scale, mul, cast to FP8]
+                     |
+                  output smem buffer (32 x 64 x uint8)
+                     |
+             fence + barrier
+                     |
+              cooperative smem → gmem store (coalesced)
+                     |
+                global memory
 ```
+
+Scales are written directly to global memory (they are small and scattered, so
+smem staging would not help).
 
 ---
 
-## 3. What Is Missing vs. the C++ Version
+## 3. Optimizations Applied (Steps 1–7)
 
-### 3.1 Shared Memory Tiling + TMA
+### Step 1 — Shared memory tiling with C++ thread layout
 
-**C++ behavior**: The kernel loads `CHUNK_DIM_Y x CHUNK_DIM_X` (64x64 or
-128x128) tiles from global memory into shared memory using TMA
-(`cp_async_bulk_tensor_2d`). Threads then read from shared memory.
+- Allocate `(32, 64)` smem tile per block, `(64, 64)` chunk, processed in 2 stages.
+- Cooperative `(64 threads × 32 rows)` coalesced load from global.
+- Rowwise thread mapping `tid_Y = tidx // 2`, `tid_X = tidx % 2` (matches C++).
+- Colwise thread mapping `tidx → column` (matches C++).
 
-**Current CuTeDSL**: Each thread reads 32 elements directly from global memory
-via scalar loads. No shared memory is used.
+**Effect**: halves global reads (input loaded once to smem, read twice for amax + scale).
 
-**Impact**: Lower memory bandwidth utilization. TMA provides asynchronous bulk
-transfers that overlap with computation and require no explicit address
-calculation.
+### Step 2 — Bidirectional single-pass kernel
 
-### 3.2 Double Buffering (Multi-Stage Pipeline)
+- Colwise and rowwise passes share the same smem tile.
+- Compile-time `cutlass.const_expr` selects which passes run.
 
-**C++ behavior**: Uses `BUFFS_NUM=2` shared memory buffers and `STAGES =
-CHUNK_DIM_Y / BUFF_DIM_Y` loop iterations. While stage `s` is being computed,
-stage `s+1`'s TMA load is already in flight. Barrier-based synchronization
-(`mbarrier`) coordinates the pipeline.
+**Effect**: halves global reads again for the `rowwise + colwise` case —
+one input load serves both quantization directions.
 
-**Current CuTeDSL**: No pipelining. Each of the 32 loads is a blocking scalar
-read.
+### Step 3 — Bank-conflict-free wave access + 2-wide FP8 conversion
 
-**Impact**: Compute and memory are fully serialized; no latency hiding.
+Rowwise smem reads use the C++ kernel's bank-group swizzle to avoid 4-way bank
+conflicts within a warp:
 
-### 3.3 Bank-Conflict Avoidance (Swizzled Shared Memory Access)
-
-**C++ behavior**: Rowwise reads from shared memory use a swizzled index:
-```cpp
-const size_t swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM_X;
 ```
-where `bank_group = thread_lane / THREADS_PER_BANK`. This rotates which 4-byte
-group each thread accesses, ensuring threads in the same cycle hit different
-banks.
-
-**Current CuTeDSL**: Not applicable (no shared memory).
-
-### 3.4 Vectorized Loads and Stores
-
-**C++ behavior**: Threads load `PACK_SIZE=4` elements at a time (`Vec<IType,4>.load_from()`),
-process 2-wide values using FP16x2 / BF16x2 types (`IType2`, `ptx::abs_max_2x`,
-`ptx::mul_cvt_2x`), and store 4 elements at a time.
-
-**Current CuTeDSL**: All loads and stores are scalar (1 element per instruction).
-The FP8 conversion uses the 2-wide `e4m3x2` PTX instruction but wastes the second
-slot by passing 0.0.
-
-**Impact**: ~4x fewer memory transactions than optimal.
-
-### 3.5 Bidirectional Single-Pass Kernel
-
-**C++ behavior**: When `ROWWISE_SCALING && COLWISE_SCALING`, both directions
-are computed in a single kernel launch. The colwise pass reads from shared memory
-first (column-strided access), then the rowwise pass reads the same shared memory
-tile (row-strided access). The input is loaded from global memory only once.
-
-**Current CuTeDSL**: Separate kernel launches for rowwise and colwise,
-doubling global memory traffic.
-
-**Impact**: 2x the global memory reads for the bidirectional case.
-
-### 3.6 GEMM-Swizzled Scale Layout
-
-**C++ behavior**: When `WITH_GEMM_SWIZZLED_SCALES=true`, scale factors are
-written in the "swizzled" order expected by cuBLAS MXFP8 GEMMs
-([docs](https://docs.nvidia.com/cuda/cublas/#d-block-scaling-factors-layout)):
-```cpp
-scale_idx = gemm_swizzled_scale_idx(i, j, num_tiles_X);
-// Tiles of 128 x 4 in the scale buffer, internal 32x16+4 layout
+bank_group = (tidx % 32) // THREADS_PER_BANK   # THREADS_PER_BANK = 4
+for w in range(WAVES):                         # WAVES = 8
+    swizzled_grp = ((w + bank_group) * PACK_SIZE) % SCALE_DIM
+    # read 4 contiguous elements at col_start + swizzled_grp
 ```
 
-**Current CuTeDSL**: Scales are written in plain row-major order.
+Also added `cvt_f32x2_to_fp8e4m3x2()` that uses the 2-wide PTX instruction
+`cvt.rn.satfinite.e4m3x2.f32` to convert two floats per instruction (mirrors
+`ptx::mul_cvt_2x` in the C++ kernel).
 
-**Impact**: A separate permutation pass is needed before GEMM, or the GEMM must
-fall back to non-swizzled scales.
+**Effect**: eliminates smem bank conflicts; halves FP8 conversion instruction count.
 
-### 3.7 Activation / Bias-Gradient Fusion
+### Step 4 — Double-buffered smem pipeline
 
-**C++ behavior**: The kernel templates over `IS_ACT`, `IS_DACT`, `IS_DBIAS` to
-fuse activation functions (e.g. SiLU, GeLU), their derivatives, and bias
-gradient accumulation into the quantization pass. In the bidirectional case with
-activations (`IS_CACHED_ACT_OP`), computed activations from the colwise pass are
-cached in shared memory and reused in the rowwise pass to avoid recomputation.
+- Two smem input buffers (`sX0`, `sX1`) and two output buffers (`sO_row`, `sO_col`).
+- Stage ping-pong pattern: stage 0 computes from `sX0` while stage 1 loads into `sX1`.
 
-**Current CuTeDSL**: Cast-only; no activation, derivative, or bias fusion.
+**Effect**: enables overlap between stages (realized once async loads are in place at Step 6).
 
-### 3.8 Amax Tracking
+### Step 5 — GEMM-swizzled scale layout
 
-**C++ behavior**: An optional `amax_ptr` collects the global maximum absolute
-value across the entire tensor using warp-level `reduce_max` followed by
-`atomicMaxFloat`.
-
-**Current CuTeDSL**: No amax output.
-
----
-
-## 4. How to Implement the Missing Optimizations in CuTeDSL
-
-### 4.1 Shared Memory Tiling
-
-Use CuTeDSL's `SmemAllocator` to allocate a tile in shared memory, load from
-global using a `TiledCopy`, then read from smem into registers.
-
-```python
-@cute.kernel
-def kernel(self, mX, mO, mS, max_norm_rcp):
-    cfg = self.cfg
-    tidx, _, _ = cute.arch.thread_idx()
-    bidx, bidy, _ = cute.arch.block_idx()
-
-    # --- Allocate shared memory ---
-    smem = utils.SmemAllocator()
-    sX = smem.allocate_tensor(
-        mX.element_type,
-        cute.make_ordered_layout((BUFF_DIM_Y, BUFF_DIM_X), order=(1, 0)),
-        byte_alignment=128,
-    )
-
-    # --- Tile input and partition across threads ---
-    tiler_mn = (BUFF_DIM_Y, BUFF_DIM_X)
-    gX = cute.local_tile(mX, tiler_mn, (bidx, bidy))
-
-    # Create TV layout (threads mapped to coalesced columns)
-    thr_layout = cute.make_ordered_layout(
-        (THREADS_Y, THREADS_X), order=(1, 0)
-    )
-    val_layout = cute.make_ordered_layout(
-        (1, vec_size), order=(1, 0)
-    )
-    copy_atom = cute.make_copy_atom(cute.nvgpu.CopyUniversalOp(), mX.element_type)
-    tiled_copy = cute.make_tiled_copy_tv(copy_atom, thr_layout, val_layout)
-
-    thr_copy = tiled_copy.get_slice(tidx)
-    tXgX = thr_copy.partition_S(gX)   # global source
-    tXsX = thr_copy.partition_D(sX)   # smem destination
-
-    # --- Load global -> smem ---
-    cute.copy(copy_atom, tXgX, tXsX)
-    cute.arch.barrier()
-
-    # --- Read from smem into registers, compute ---
-    # (thread indexing into sX for the 32-element blocks follows)
-    ...
-```
-
-The key CuTeDSL concepts:
-- `cute.local_tile(tensor, tile_shape, coord)` slices the global tensor to a
-  per-CTA tile.
-- `cute.make_tiled_copy_tv` maps threads to memory locations for coalesced
-  access.
-- `cute.copy(atom, src, dst)` emits vectorized load/store instructions.
-- `cute.arch.barrier()` is `__syncthreads()`.
-
-### 4.2 Double Buffering with Async Copy
-
-For SM80+ (Ampere), use `cpasync` copy atoms. For SM90+ (Hopper), use TMA.
-
-**Ampere async copy (cp.async):**
-
-```python
-copy_atom_async = cute.make_copy_atom(
-    cute.nvgpu.cpasync.CopyG2SOp(),
-    mX.element_type,
-    num_bits_per_copy=128,
-)
-
-# Issue async copy for stage 0
-cute.copy(copy_atom_async, tXgX_stage0, tXsX_buf0)
-cute.arch.cp_async_commit_group()
-
-# Start compute on stage 0 while stage 1 loads
-for stage in range(STAGES):
-    buf = stage % 2
-
-    if stage + 1 < STAGES:
-        # Prefetch next stage into the other buffer
-        next_buf = (stage + 1) % 2
-        cute.copy(copy_atom_async, tXgX_stages[stage+1], tXsX_bufs[next_buf])
-        cute.arch.cp_async_commit_group()
-
-    # Wait for current stage's data
-    cute.arch.cp_async_wait_group(1 if stage + 1 < STAGES else 0)
-    cute.arch.barrier()
-
-    # Compute on buf
-    ...compute(sX_bufs[buf])...
-
-    cute.arch.barrier()
-```
-
-**Hopper TMA**: The C++ kernel uses `cp_async_bulk_tensor_2d` which maps to
-CuTe's TMA descriptors. In CuTeDSL, this would use the TMA copy atoms from
-`cute.nvgpu.tma`:
-
-```python
-# Host side: create TMA descriptor
-tma_load = cute.make_tma_copy(
-    cute.nvgpu.tma.CopyG2SOp(),
-    mX,
-    sX_layout,
-)
-# Device side: issue TMA load
-cute.copy(tma_load, tXgX, tXsX, tma_bar_ptr=mbar)
-```
-
-### 4.3 Vectorized Loads and 2-Wide FP8 Conversion
-
-Instead of scalar element access, use CuTe fragments:
-
-```python
-# After loading to smem:
-tXrX = cute.make_fragment_like(tXsX)   # register fragment
-cute.autovec_copy(tXsX, tXrX)          # smem -> rmem (vectorized)
-
-x = tXrX.load().to(Float32)            # upcast to f32 TensorSSA
-
-# Compute amax (local reduction over the fragment)
-x_abs = fabs_tensorssa(x)              # element-wise abs via TensorSSA ops
-local_amax = x_abs.reduce(cute.ReductionOp.MAX, init_val=Float32(0.0),
-                           reduction_profile=0)
-
-# Scale
-scaled = x * inv_scale_broadcast
-
-# Convert to FP8 and store (vectorized via TensorSSA.to())
-tXrO.store(scaled.to(cutlass.Float8E4M3FN))
-cute.copy(copy_atom_store, tXrO, tXgO)
-```
-
-The `TensorSSA.to(Float8E4M3FN)` path works on vectors and maps to the
-`nvgpu.cvt_fptrunc` MLIR operation, which emits the packed `cvt.rn.satfinite`
-PTX instruction on the full register vector. This eliminates the per-element
-inline PTX workaround.
-
-### 4.4 Bidirectional Single-Pass Kernel
-
-Combine both passes in one kernel. After loading into shared memory:
-
-1. **Colwise pass**: Each thread reads 32 elements along a column from smem
-   (stride = `BUFF_DIM_X`), computes amax, scale, quantizes, writes colwise
-   output.
-2. `__syncthreads()`
-3. **Rowwise pass**: Each thread reads 32 contiguous elements in a row from
-   smem, computes amax, scale, quantizes, writes rowwise output.
-
-Both passes share the same smem tile, so global memory is loaded only once.
-
-The C++ kernel uses template booleans `ROWWISE_SCALING` / `COLWISE_SCALING` to
-compile out unused passes. In CuTeDSL, use `cutlass.const_expr(cfg.rowwise)`:
-
-```python
-if cutlass.const_expr(cfg.colwise):
-    # Colwise pass (reads from smem column-strided)
-    ...
-
-cute.arch.barrier()
-
-if cutlass.const_expr(cfg.rowwise):
-    # Rowwise pass (reads from smem row-contiguous)
-    ...
-```
-
-### 4.5 GEMM-Swizzled Scale Layout
-
-Translate the `gemm_swizzled_scale_idx` function to a `@dsl_user_op`:
+Translated `gemm_swizzled_scale_idx` from `swizzle.cuh` to a `@dsl_user_op`:
 
 ```python
 @dsl_user_op
-def gemm_swizzled_scale_idx(i: Int32, j: Int32, num_tiles_X: Int32,
-                             *, loc=None, ip=None) -> Int32:
-    """Convert compact (i, j) to GEMM-swizzled linear index.
-
-    Layout: 128x4 tiles, internal ordering:
-        (row % 32) * 16 + (row // 32) * 4 + (col % 4)
-    """
-    TILE_DIM_X = Int32(4)
-    TILE_DIM_Y = Int32(128)
-    TILE_SIZE = Int32(512)   # 4 * 128
-
-    tile_idx_X = j // TILE_DIM_X
-    tile_idx_Y = i // TILE_DIM_Y
-    idx_in_tile_X = j % TILE_DIM_X
-    idx_in_tile_Y = i % TILE_DIM_Y
-
-    idx = (tile_idx_Y * num_tiles_X + tile_idx_X) * TILE_SIZE
-    idx = idx + (idx_in_tile_Y % Int32(32)) * Int32(16)
-    idx = idx + (idx_in_tile_Y // Int32(32)) * Int32(4)
-    idx = idx + idx_in_tile_X
-    return idx
+def gemm_swizzled_scale_idx(i, j, num_tiles_X):
+    # 128×4 tile layout per cuBLAS MXFP8 spec
+    # idx = (row_in_tile % 32) * 16 + (row_in_tile // 32) * 4 + col_in_tile
 ```
 
-Then in the kernel, select the write index:
+Exposed via `quantize_mxfp8_cutedsl(..., with_gemm_swizzled_scales=True)`.
+
+**Effect**: scales are GEMM-ready without a separate permutation pass.
+
+### Step 6 — cp.async global→smem loads
+
+Replaced synchronous global loads with CuTe's async TiledCopy:
 
 ```python
-if cutlass.const_expr(cfg.with_gemm_swizzled_scales):
-    scale_idx = gemm_swizzled_scale_idx(global_row, scale_col, num_tiles)
-    mS_flat[scale_idx] = Uint8(biased_exponent)
-else:
-    mS[global_row, scale_col] = Uint8(biased_exponent)
-```
-
-### 4.6 Bank-Conflict-Free Shared Memory Access
-
-For the rowwise pass reading from shared memory, the C++ kernel rotates which
-4-element group each thread accesses based on its bank group:
-
-```cpp
-swizzled_group_idx = ((wave + bank_group) * PACK_SIZE) % SCALE_DIM_X
-```
-
-In CuTeDSL, apply the same rotation when indexing into the smem tensor:
-
-```python
-lane = cute.arch.lane_idx()
-bank_group = lane // THREADS_PER_BANK   # THREADS_PER_BANK = 4
-
-for w in cutlass.range_constexpr(WAVES):  # WAVES = 32 / 4 = 8
-    swizzled_group = ((w + bank_group) * PACK_SIZE) % SCALE_DIM_X
-    swizzled_col = row_base_x + swizzled_group
-    # Load 4 elements from smem at swizzled_col
-    ...
-```
-
-Alternatively, CuTeDSL supports swizzle layouts natively via
-`smem.allocate_tensor(..., swizzle=swizzle_layout)`, which can automate
-bank-conflict avoidance at the layout level.
-
-### 4.7 Activation / Bias-Gradient Fusion
-
-This is a higher-level feature. The kernel would accept additional input tensors
-(activation input, bias workspace) and template parameters. The structure
-mirrors the C++ kernel's `COMPUTE_ACTIVATIONS` path:
-
-```python
-if cutlass.const_expr(cfg.is_act):
-    elt = activation_op(elt)
-if cutlass.const_expr(cfg.is_dact):
-    act_in_elt = Float32(act_input_smem[offset])
-    elt = elt * activation_deriv_op(act_in_elt)
-if cutlass.const_expr(cfg.is_dbias):
-    partial_dbias += elt
-```
-
-For the cached activation optimization (`IS_CACHED_ACT_OP`), the colwise pass
-writes computed activations back to the input smem buffer, and the rowwise pass
-reads from there instead of recomputing:
-
-```python
-# In colwise pass:
-if cutlass.const_expr(cfg.cached_act):
-    cached_act_smem[offset] = IType(elt)
-
-cute.arch.barrier()
-
-# In rowwise pass:
-if cutlass.const_expr(cfg.cached_act):
-    elt = Float32(cached_act_smem[offset])  # reuse, don't recompute
-```
-
-### 4.8 Amax Tracking
-
-Use CuTeDSL's warp reduction and an atomicMax on global memory:
-
-```python
-from reduce import block_reduce
-
-# After each thread computes its local amax:
-block_amax = block_reduce(
-    thread_amax, cute.arch.fmax, reduction_buffer, Float32(0.0)
+thr_layout = cute.make_ordered_layout((8, 8), order=(1, 0))  # 64 threads
+val_layout = cute.make_ordered_layout((4, 8), order=(1, 0))  # 8-elem vec
+copy_atom_async = cute.make_copy_atom(
+    cute.nvgpu.cpasync.CopyG2SOp(), mX.element_type,
+    num_bits_per_copy=128,
 )
+tiled_copy = cute.make_tiled_copy_tv(copy_atom_async, thr_layout, val_layout)
 
-# Thread 0 does atomic max to global
-if tidx == 0:
-    atomic_max_float(amax_ptr, block_amax)
+# Issue both stages upfront, wait for stage 0 while stage 1 loads in background
+cute.copy(copy_atom_async, tXgX_s0, tXsX_s0); cute.arch.cp_async_commit_group()
+cute.copy(copy_atom_async, tXgX_s1, tXsX_s1); cute.arch.cp_async_commit_group()
+cute.arch.cp_async_wait_group(1)   # wait for stage 0, stage 1 keeps loading
+cute.arch.barrier()
+# ... compute stage 0 ...
+cute.arch.cp_async_wait_group(0)
+cute.arch.barrier()
+# ... compute stage 1 ...
 ```
 
-The `atomic_max_float` can be implemented as a `@dsl_user_op` wrapping
-`atom.global.max.f32` PTX, or using the `atomicMaxFloat` pattern from the
-C++ kernel (CAS loop for float atomics on pre-SM90).
+**Effect**: true async load/compute overlap. This is the most impactful perf win.
+
+### Step 7 — Output smem staging with coalesced write-back
+
+FP8 output written to shared memory first, then cooperatively flushed to
+global memory via coalesced stores (64 threads × 1 byte/thread/row).
+
+```
+compute → sO_row / sO_col  (swizzled writes for rowwise)
+fence + barrier
+cooperative store: mO_row[base_row + r, block_off_X + tidx] = sO_row[r, tidx]
+```
+
+**Effect**: eliminates scattered global stores (especially the column-strided
+colwise writes); matches the C++ kernel's output path structure.
 
 ---
 
-## 5. Suggested Implementation Order
+## 4. Low-Level DSL Operations
 
-1. **Shared memory tiling + async copy** (4.1 + 4.2): Biggest performance win.
-   Use `cpasync.CopyG2SOp()` for Ampere, TMA for Hopper+. Follow the rmsnorm
-   example at `cutlass/examples/python/CuTeDSL/blackwell/rmsnorm.py`.
+Six `@dsl_user_op` helpers implement math not available as high-level CuTeDSL
+ops:
 
-2. **Vectorized loads + TensorSSA FP8 conversion** (4.3): Eliminates the
-   per-element inline PTX workaround and reduces instruction count ~4x. Use
-   `TensorSSA.to(Float8E4M3FN)` for the conversion.
+| Function | Purpose | Implementation |
+|----------|---------|----------------|
+| `_bitcast_f32_to_i32` / `_bitcast_i32_to_f32` | FP32↔INT32 bitcast | `arith.bitcast` |
+| `fabs_f32` | Absolute value | bitcast, clear sign bit |
+| `float_to_e8m0` | Float → E8M0 biased exponent | Branchless: `(bits + 0x7FFFFF) >> 23`, clamped to 254 |
+| `exp2f_rcp` | `2^(127 - biased_exp)` | `(254 - exp) << 23` as float bits + edge-case `arith.select` |
+| `cvt_f32_to_fp8e4m3` | Scalar FP32 → FP8 | Inline PTX `cvt.rn.satfinite.e4m3x2.f32` with `0.0` companion |
+| `cvt_f32x2_to_fp8e4m3x2` | 2-wide FP32 → FP8 | Same PTX, both operands used |
+| `gemm_swizzled_scale_idx` | Compact → swizzled scale index | `swizzle.cuh` translation |
 
-3. **Bidirectional single-pass** (4.4): Halves global memory traffic for the
-   common `rowwise=True, colwise=True` case. Requires shared memory from step 1.
+### Design notes
 
-4. **GEMM-swizzled scales** (4.5): Pure index math, easy to add as a
-   `@dsl_user_op` once the kernel structure is in place.
+**`float_to_e8m0`**: The C++ version uses three branches (mantissa check,
+exponent cap, subnormal edge). The CuTeDSL version uses a branchless integer
+trick: adding `0x7FFFFF` (all-ones mantissa) to the IEEE 754 bit pattern
+causes a carry into the exponent field exactly when any mantissa bit is set,
+naturally rounding up non-power-of-2 values.
 
-5. **Bank-conflict avoidance** (4.6): Micro-optimization on top of step 1.
+**`cvt_f32_to_fp8e4m3`**: CuTeDSL's `TensorSSA.to(Float8E4M3FN)` works on
+vectors but not on scalars (the underlying MLIR op `nvgpu.cvt_fptrunc`
+requires a vector operand). The scalar path uses inline PTX; the 2-wide
+variant packs two real operands for full utilization of the PTX instruction.
 
-6. **Amax tracking** (4.8): Small addition; follow the `reduce.py` example.
+---
 
-7. **Activation/bias fusion** (4.7): Feature parity. Only needed when the
-   quantization kernel is used in a fused backward pass.
+## 5. What's Still Missing vs. the C++ Version
+
+### 5.1 TMA bulk transfers (the remaining ~2× performance gap)
+
+The C++ kernel uses `cp.async.bulk.tensor.2d` for both input loads (`gmem→smem`)
+and output stores (`smem→gmem`). The CuTeDSL implementation uses Ampere-style
+`cp.async` for loads and cooperative scalar stores for outputs.
+
+**Why this matters**: TMA bulk transfers one whole 32×64 tile per PTX
+instruction, bypass L1, don't occupy thread registers during transfer, and
+saturate HBM bandwidth. cp.async is limited to 128-bit transfers per thread
+per instruction.
+
+**Impact**: see `MXFP8_CUTEDSL_PERFORMANCE.md` — CuTeDSL peaks at ~2.96 TB/s
+rowwise while C++ reaches ~5.81 TB/s on GB200.
+
+**Integration status**: An attempt got as far as clean compilation (0.2s with
+`CUTLASS_DSL_SM_ARCH=sm_100a`) but crashed at runtime with an opaque TMA
+instruction error. Key gotchas discovered:
+
+- Pass the **TMA coord tensor** (returned from `make_tiled_tma_atom`) — not
+  the original `mX` — through `flat_divide` for `tma_partition`.
+- `cute.copy` with a TMA atom requires `with cute.arch.elect_one():` — a
+  plain `if tidx == 0:` triggers an infinite MLIR compilation loop.
+- Without `CUTLASS_DSL_SM_ARCH=sm_100a`, PTX targets SM90 and TMA instructions
+  fail at runtime with "unspecified launch failure".
+- The mbarrier expected-tx bytes, `mbarrier_init_fence`, and `fence_proxy`
+  ordering all need to be right; debugging requires Nsight Compute.
+
+### 5.2 Activation / Bias-Gradient Fusion
+
+The C++ kernel templates over `IS_ACT`, `IS_DACT`, `IS_DBIAS` to fuse
+activation functions (SiLU, GeLU, ...), their derivatives, and bias-gradient
+accumulation into the quantization pass. In bidirectional mode with
+`IS_CACHED_ACT_OP`, computed activations from the colwise pass are cached in
+smem and reused in the rowwise pass.
+
+**CuTeDSL status**: Cast-only. Adding fusion requires extra input tensors
+(activation input, bias workspace) and compile-time `cutlass.const_expr`
+branching in `_compute_stage`. Mechanically straightforward but untouched.
+
+### 5.3 Amax Tracking
+
+Optional `amax_ptr` in C++ collects the global max|x| via warp reduction +
+`atomicMaxFloat`. CuTeDSL version doesn't emit an amax. Easy addition
+(warp reduce via `cute.arch.warp_reduction` + an inline-PTX atomic-max).
+
+---
+
+## 6. How to Close the TMA Gap
+
+Minimal change — replace `cpasync.CopyG2SOp` with `cpasync.CopyBulkTensorTileG2SOp`
+for loads and `cpasync.CopyBulkTensorTileS2GOp` for stores, using the patterns
+from the Blackwell FMHA example (`examples/python/CuTeDSL/blackwell/fmha.py`):
+
+```python
+# Host side
+tma_atom_in, tma_tensor_in = cpasync.make_tiled_tma_atom(
+    cpasync.CopyBulkTensorTileG2SOp(), mX, smem_layout, (BUFF_DIM_Y, BUFF_DIM_X))
+tma_atom_out, tma_tensor_out = cpasync.make_tiled_tma_atom(
+    cpasync.CopyBulkTensorTileS2GOp(), mO, smem_layout, (BUFF_DIM_Y, BUFF_DIM_X))
+
+# Device side — prefetch descriptors at kernel entry
+cpasync.prefetch_descriptor(tma_atom_in)
+cpasync.prefetch_descriptor(tma_atom_out)
+
+# Partition (pass the TMA coord tensor, flat_divided, grouped)
+gX_fd = cute.flat_divide(tma_tensor_in, tiler)
+tIsI, tIgI = cpasync.tma_partition(
+    tma_atom_in, 0, cute.make_layout(1),
+    cute.group_modes(sX_staged, 0, 2),   # staged smem
+    cute.group_modes(gX_fd, 0, 2),
+)
+
+# Issue TMA load (MUST be in elect_one, not plain `if tidx == 0`)
+with cute.arch.elect_one():
+    cute.arch.mbarrier_arrive_and_expect_tx(mbar, tma_bytes)
+    cute.copy(tma_atom_in,
+              tIgI[None, bidy, bidx],
+              tIsI[None, stage_idx],
+              tma_bar_ptr=mbar)
+cute.arch.mbarrier_wait(mbar, phase=0)
+
+# ... compute ...
+
+# Issue TMA store
+cute.arch.fence_proxy("async.shared", space="cta")
+cute.arch.barrier()
+with cute.arch.elect_one():
+    cute.copy(tma_atom_out, tOsO[None, stage_idx], tOgO[None, bidy, bidx])
+    cute.arch.cp_async_bulk_commit_group()
+cute.arch.cp_async_bulk_wait_group(0, read=True)
+```
+
+Launch environment:
+```bash
+CUTLASS_DSL_SM_ARCH=sm_100a python bench_mxfp8_cutedsl.py ...
+```
+
+Expected outcome if the runtime crash is resolved: rowwise bandwidth ~5.5
+TB/s (≈95% of C++).
+
+---
+
+## 7. API
+
+```python
+from quantize_mxfp8_cutedsl import quantize_mxfp8_cutedsl
+
+result = quantize_mxfp8_cutedsl(
+    x,                                    # (M, N) BF16/FP16/FP32 CUDA tensor
+    fp8_dtype="e4m3",                     # or "e5m2"
+    rowwise=True,
+    colwise=False,
+    with_gemm_swizzled_scales=False,
+)
+# result["rowwise_data"]     (M, N)       uint8 (FP8)
+# result["rowwise_scale"]    (M, N/32)    uint8 (E8M0)
+# result["colwise_data"]     (M, N)       uint8 (FP8)
+# result["colwise_scale"]    (M/32, N)    uint8 (E8M0)
+```
+
+Internally: one JIT compile per `(dtype, M, N, fp8_dtype, rowwise, colwise,
+with_gemm_swizzled_scales)` tuple, cached in a module-level dict. Subsequent
+calls only wrap pointers with `make_ptr` and invoke the compiled kernel.
