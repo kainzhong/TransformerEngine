@@ -289,26 +289,33 @@ class MXFP8QuantizeSmemKernel:
         # thr (8,8): 8 thread-rows × 8 thread-cols = 64 threads
         # val (4,8): 4 rows × 8 elements per thread = 32 elements/thread
         # → tile = (32, 64)
-        thr_layout = cute.make_ordered_layout((8, 8), order=(1, 0))
-        val_layout = cute.make_ordered_layout((4, 8), order=(1, 0))
+        thr_layout = cute.make_layout((2,32), stride=(32,1))
+        val_layout = cute.make_layout((16,2), stride=(2,1))
+        # https://kainzhong.github.io/CuTe-Layout-Visualizer/?key=tv-2-%288%2C8%29%3A%288%2C1%29-%284%2C8%29%3A%288%2C1%29
+        print(f"thr_layout: {thr_layout}, val_layout: {val_layout}, make_layout_tv: {cute.make_layout_tv(thr_layout, val_layout)}\n")
         copy_atom_async = cute.make_copy_atom(
             cute.nvgpu.cpasync.CopyG2SOp(), mX.element_type,
-            num_bits_per_copy=128,
+            num_bits_per_copy=32,
         )
         tiled_copy = cute.make_tiled_copy_tv(
             copy_atom_async, thr_layout, val_layout)
+        print(f"copy_atom_async: {copy_atom_async}\ntiled_copy: {tiled_copy}\n")
         thr_copy = tiled_copy.get_slice(tidx)
+        print(f"thr_copy: {thr_copy}")
 
         # Per-stage global tiles: local_tile with (32, 64) tiler
         tiler = (BUFF_DIM_Y, BUFF_DIM_X)
+        print(f"tiler: {tiler}")
         gX_s0 = cute.local_tile(mX, tiler, (bidy * 2, bidx))
         gX_s1 = cute.local_tile(mX, tiler, (bidy * 2 + 1, bidx))
+        print(f"gX_s0: {gX_s0}, gX_s1: {gX_s1}\n")
 
         # Partition global and smem for each stage
         tXgX_s0 = thr_copy.partition_S(gX_s0)
         tXsX_s0 = thr_copy.partition_D(sX0)
         tXgX_s1 = thr_copy.partition_S(gX_s1)
         tXsX_s1 = thr_copy.partition_D(sX1)
+        print(f"tXgX_s0: {tXgX_s0}, tXsX_s0: {tXsX_s0}, tXgX_s1: {tXgX_s1}, tXsX_s1: {tXsX_s1}\n")
 
         # --- Issue both cp.async loads upfront for maximum overlap ---
         cute.copy(copy_atom_async, tXgX_s0, tXsX_s0)
@@ -429,20 +436,39 @@ class MXFP8QuantizeSmemKernel:
         self, sO_row, sO_col, mO_row, mO_col,
         base_row, block_off_X, tidx,
     ):
-        """Cooperative coalesced copy from output smem to global memory.
+        """Coalesced smem→gmem flush via 128-bit vectorized stores.
 
-        64 threads, each copies one column per row → 64 contiguous bytes per
-        row, giving perfect coalescing for the smem→global stores.
+        Lowers to `st.global.v4.b32` (STG.E.128): 16 B/thread per atom.
+        Tile = 32×64 uint8 = 2048 B; 64 threads × 32 B = 2 atoms/thread.
+        Thread grid (16,4), val (2,16) → each thread writes 16 contiguous
+        bytes in each of 2 rows.
         """
         cfg = self.cfg
 
+        thr_layout = cute.make_layout((16, 4), stride=(4, 1))
+        val_layout = cute.make_layout((2, 16), stride=(16, 1))
+        copy_atom = cute.make_copy_atom(
+            cute.nvgpu.CopyUniversalOp(), Uint8,
+            num_bits_per_copy=128,
+        )
+        tiled_copy = cute.make_tiled_copy_tv(copy_atom, thr_layout, val_layout)
+        thr_copy = tiled_copy.get_slice(tidx)
+
+        tiler = (BUFF_DIM_Y, BUFF_DIM_X)
+        tile_y = base_row // BUFF_DIM_Y
+        tile_x = block_off_X // BUFF_DIM_X
+
         if cutlass.const_expr(cfg.rowwise):
-            for r in cutlass.range_constexpr(BUFF_DIM_Y):
-                mO_row[base_row + r, block_off_X + tidx] = sO_row[r, tidx]
+            gO_row = cute.local_tile(mO_row, tiler, (tile_y, tile_x))
+            cute.copy(copy_atom,
+                      thr_copy.partition_S(sO_row),
+                      thr_copy.partition_D(gO_row))
 
         if cutlass.const_expr(cfg.colwise):
-            for r in cutlass.range_constexpr(BUFF_DIM_Y):
-                mO_col[base_row + r, block_off_X + tidx] = sO_col[r, tidx]
+            gO_col = cute.local_tile(mO_col, tiler, (tile_y, tile_x))
+            cute.copy(copy_atom,
+                      thr_copy.partition_S(sO_col),
+                      thr_copy.partition_D(gO_col))
 
 
 # ---------------------------------------------------------------------------
