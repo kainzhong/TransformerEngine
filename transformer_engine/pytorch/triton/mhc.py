@@ -11,11 +11,16 @@ import triton
 from transformer_engine.common.triton.mhc import (
     _mhc_scale_fwd_fused,
     _mhc_scale_bwd_fused,
-    _mhc_expand_combine_with_bias_fwd,
-    _mhc_expand_combine_with_bias_bwd,
-    _mhc_expand_combine_fwd,
-    _mhc_expand_combine_bwd,
-    _mhc_aggregate_fwd,
+    _mhc_expand_combine_with_bias_fwd_n2,
+    _mhc_expand_combine_with_bias_fwd_n4,
+    _mhc_expand_combine_with_bias_bwd_n2,
+    _mhc_expand_combine_with_bias_bwd_n4,
+    _mhc_expand_combine_fwd_n2,
+    _mhc_expand_combine_fwd_n4,
+    _mhc_expand_combine_bwd_n2,
+    _mhc_expand_combine_bwd_n4,
+    _mhc_aggregate_fwd_n2,
+    _mhc_aggregate_fwd_n4,
     _mhc_aggregate_bwd,
     _mhc_projection_fwd_fused,
     _mhc_projection_bwd_fused,
@@ -52,7 +57,7 @@ def mhc_fused_sinkhorn(
     H_res : torch.Tensor
         input H_res matrix of shape (s, b, n, n) that needs to be normalized into a doubly stochastic matrix.
     n : int
-        number of hyper connections, where only n=4 is supported in the current implementation
+        number of hyper connections, where only n=4 or n=2 is supported in the current implementation
     recompute_hist : bool
         whether to recompute the intermediate history in the backward pass to save memory
     iters : int
@@ -98,7 +103,7 @@ def mhc_fused_scale(
     ms : torch.Tensor
         mean square for each row of H from the projection kernel, of shape (M,), used for RMSNorm scaling
     n : int
-        number of hyper connections, where only n=4 is supported in the current implementation
+        number of hyper connections, where only n=4 or n=2 is supported in the current implementation
 
     Returns
     -------
@@ -132,7 +137,7 @@ def mhc_fused_aggregate(x: torch.Tensor, H_pre: torch.Tensor, n: int, use_tf32: 
     H_pre: torch.Tensor
         input H_pre matrix of shape (s, b, n)
     n: int
-        number of hyper connections, where only n=4 is supported in the current implementation
+        number of hyper connections, where only n=4 or n=2 is supported in the current implementation
     use_tf32: bool
         whether to use TF32 precision for matmul operations. If False, it will use ieee for better precision.
         This is mainly used by our unittests since TF32 precision will introduce some errors and cause tests to fail
@@ -394,7 +399,7 @@ class mHCScaleFusedOp(torch.autograd.Function):
         alpha (tensor): The scaling factors of shape (3,), one for each of H_pre, H_post, H_res.
         beta (tensor): The bias terms of shape (1, 2n+n*n).
         ms (tensor): The mean square from the projection kernel, of shape (M,), used for RMSNorm scaling.
-        n (int): The number of hyper connections (only n=4 is supported).
+        n (int): The number of hyper connections (only n=4 or n=2 is supported).
 
         Returns:
         tensor: The scaled output of shape (M, 32), where only the first N elements are valid.
@@ -539,7 +544,7 @@ class mHCSinkhornOp(torch.autograd.Function):
         Parameters:
         ctx : The context object.
         H_res (tensor): The input H_res matrix of shape (s, b, n, n).
-        n (int): The number of hyper connections (only n=4 is supported).
+        n (int): The number of hyper connections (only n=4 or n=2 is supported).
         recompute_hist (bool): Whether to recompute the intermediate f/g history in the backward pass to save memory. If False, stores history buffers of shape (iters+1, s, b, n).
         iters (int): The number of Sinkhorn iterations (20 is enough for convergence per the DeepSeek paper).
 
@@ -702,7 +707,7 @@ class mHCAggregateOp(torch.autograd.Function):
         ctx : The context object.
         x (tensor): The input activation tensor of shape (s, b, C, n).
         H_pre (tensor): The pre-connection matrix of shape (s, b, n), used as weights for aggregation.
-        n (int): The number of hyper connections (only n=4 is supported).
+        n (int): The number of hyper connections (only n=4 or n=2 is supported).
         use_tf32 (bool): Whether to use TF32 precision for matmul operations.
 
         Returns:
@@ -724,7 +729,8 @@ class mHCAggregateOp(torch.autograd.Function):
             triton.cdiv(M, META["BLOCK_SIZE_M"]),
         )
 
-        _mhc_aggregate_fwd[grid](
+        kernel = _mhc_aggregate_fwd_n2 if n == 2 else _mhc_aggregate_fwd_n4
+        kernel[grid](
             x_ptr=x,
             H_pre_ptr=H_pre,
             output_ptr=out,
@@ -765,7 +771,6 @@ class mHCAggregateOp(torch.autograd.Function):
 
         s, b, C, n = x.shape
         nC = n * C
-        assert n == 4, "Only n=4 is supported in this implementation"
         M = s * b
 
         grad_x = torch.empty_like(x)
@@ -822,7 +827,7 @@ class mHCExpandCombineOp(torch.autograd.Function):
         H_post (tensor): The post-connection matrix of shape (s, b, n).
         x (tensor): The hyper connection input tensor of shape (s, b, C, n) before aggregation.
         H_res (tensor): The residual connection matrix of shape (s, b, n, n).
-        n (int): The number of hyper connections (only n=4 is supported).
+        n (int): The number of hyper connections (only n=4 or n=2 is supported).
         use_tf32 (bool): Whether to use TF32 precision for matmul operations.
 
         Returns:
@@ -849,7 +854,8 @@ class mHCExpandCombineOp(torch.autograd.Function):
         )
 
         if bias is None:
-            _mhc_expand_combine_fwd[grid](
+            kernel = _mhc_expand_combine_fwd_n2 if n == 2 else _mhc_expand_combine_fwd_n4
+            kernel[grid](
                 f_ptr=f,
                 H_post_ptr=H_post,
                 x_ptr=x,
@@ -866,7 +872,8 @@ class mHCExpandCombineOp(torch.autograd.Function):
                 stride_output_Cn=1,
             )
         else:
-            _mhc_expand_combine_with_bias_fwd[grid](
+            kernel = _mhc_expand_combine_with_bias_fwd_n2 if n == 2 else _mhc_expand_combine_with_bias_fwd_n4
+            kernel[grid](
                 f_ptr=f,
                 bias_ptr=bias,
                 H_post_ptr=H_post,
@@ -940,7 +947,8 @@ class mHCExpandCombineOp(torch.autograd.Function):
         )
 
         if bias is None:
-            _mhc_expand_combine_bwd[grid](
+            kernel = _mhc_expand_combine_bwd_n2 if n == 2 else _mhc_expand_combine_bwd_n4
+            kernel[grid](
                 grad_output_ptr=grad_output,
                 f_ptr=f,
                 H_post_ptr=H_post,
@@ -966,7 +974,8 @@ class mHCExpandCombineOp(torch.autograd.Function):
                 precision="tf32" if ctx.use_tf32 else "ieee",
             )
         else:
-            _mhc_expand_combine_with_bias_bwd[grid](
+            kernel = _mhc_expand_combine_with_bias_bwd_n2 if n == 2 else _mhc_expand_combine_with_bias_bwd_n4
+            kernel[grid](
                 grad_output_ptr=grad_output,
                 f_ptr=f,
                 bias_ptr=bias,
