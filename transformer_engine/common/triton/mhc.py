@@ -479,7 +479,6 @@ def _mhc_sinkhorn_fwd_fused_recompute(
 
     tl.static_assert(BLOCK_SIZE % (n * n) == 0, "BLOCK_SIZE must be divisible by n*n")
     tl.assume(M > 0 and iters > 0)
-    tl.assume(n == 4)
 
     BATCH_SIZE: tl.constexpr = BLOCK_SIZE // (n * n)
 
@@ -553,7 +552,6 @@ def _mhc_sinkhorn_bwd_fused_recompute(
 
     tl.static_assert(BLOCK_SIZE % (n * n) == 0, "BLOCK_SIZE must be divisible by n*n")
     tl.assume(M > 0 and iters > 0)
-    tl.assume(n == 4)
 
     BATCH_SIZE: tl.constexpr = BLOCK_SIZE // (n * n)  # Assume there's no remainder for simplicity
 
@@ -687,7 +685,6 @@ def _mhc_sinkhorn_fwd_fused(
 
     tl.static_assert(BLOCK_SIZE % (n * n) == 0, "BLOCK_SIZE must be divisible by n*n")
     tl.assume(M > 0 and iters > 0)
-    tl.assume(n == 4)
 
     BATCH_SIZE: tl.constexpr = BLOCK_SIZE // (n * n)  # Assume there's no remainder for simplicity
 
@@ -780,7 +777,6 @@ def _mhc_sinkhorn_bwd_fused(
 
     tl.static_assert(BLOCK_SIZE % (n * n) == 0, "BLOCK_SIZE must be divisible by n*n")
     tl.assume(M > 0 and iters > 0)
-    tl.assume(n == 4)
 
     BATCH_SIZE: tl.constexpr = BLOCK_SIZE // (n * n)  # Assume there's no remainder for simplicity
 

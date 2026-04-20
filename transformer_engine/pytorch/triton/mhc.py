@@ -526,7 +526,7 @@ class mHCSinkhornOp(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(ctx, H_res, n=4, recompute_hist=True, iters=20):
+    def forward(ctx, H_res, n, recompute_hist=True, iters=20):
         """
         The forward pass of the Sinkhorn operation. Performs iterative row-column normalization
         in log space to convert H_res into a doubly stochastic matrix. Each iteration alternately
