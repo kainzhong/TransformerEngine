@@ -992,6 +992,7 @@ def _mhc_aggregate_fwd_n2(
     H_pre = tl.load(
         H_pre_ptr + offs_H_pre, mask=offs_H_pre < M * n, other=0.0, cache_modifier=".ca"
     )  # (BLOCK_SIZE_M * n)
+    H_pre = tl.reshape(H_pre, (BLOCK_SIZE_M, n))  # (BLOCK_SIZE_M, n)
     H_pre0, H_pre1 = tl.split(H_pre)
 
     x_ptrs = x_ptr + offs_m[:, None] * stride_xm + offs_cn[None, :] * stride_xCn
