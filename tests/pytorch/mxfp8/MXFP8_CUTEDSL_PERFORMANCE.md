@@ -1,5 +1,7 @@
 # MXFP8 Quantization: CuTeDSL vs. C++ Performance Analysis
 
+TODO: test on prenyx B200 and you should see 6TB bandwidth utilization for the non-specialized, for specialized you should see ~7TB
+
 Benchmark of the CuTeDSL MXFP8 quantization kernel against the Transformer
 Engine C++ reference (`MXFP8Quantizer` → `quantize_mxfp8.cuh`) on a single
 NVIDIA GB200 (SM100a, HBM3e).
