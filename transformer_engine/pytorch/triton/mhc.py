@@ -63,7 +63,7 @@ def mhc_fused_sinkhorn(
     out : torch.Tensor
         out of shape (s, b, n, n), which is the final H_res after Sinkhorn normalization
     """
-    assert n == 4, "Only n=4 is supported in this implementation"
+    assert n in [4, 2], "Only n=4 or n=2 is supported in this implementation"
     out = mHCSinkhornOp.apply(H_res, n, recompute_hist, iters)
     return out
 
@@ -110,7 +110,7 @@ def mhc_fused_scale(
         Scaled H_res of shape (M, n*n), which mixes the n streams of the (s, b, C, n) input of a Hyper Connection block
 
     """
-    assert n == 4, "Only n=4 is supported in this implementation"
+    assert n in [4, 2], "Only n=4 or n=2 is supported in this implementation"
     check_deterministic("mhc_fused_scale")
     out = mHCScaleFusedOp.apply(H, alpha, beta, ms, n)
     h_pre = out[..., :n]
@@ -142,7 +142,7 @@ def mhc_fused_aggregate(x: torch.Tensor, H_pre: torch.Tensor, n: int, use_tf32: 
     out: torch.Tensor
          output activation tensor of shape (s, b, C), which is the aggregated output after merging n hyper connections
     """
-    assert n == 4, "Only n=4 is supported in this implementation"
+    assert n in [4, 2], "Only n=4 or n=2 is supported in this implementation"
     check_deterministic("mhc_fused_aggregate")
     out = mHCAggregateOp.apply(x, H_pre, n, use_tf32)
     return out
@@ -185,7 +185,7 @@ def mhc_fused_expand_combine(
     out : torch.Tensor
         out of shape (s, b, C, n), which is the expanded and combined output after merging n hyper connections
     """
-    assert n == 4, "Only n=4 is supported in this implementation"
+    assert n in [4, 2], "Only n=4 or n=2 is supported in this implementation"
     check_deterministic("mhc_fused_expand_combine")
     out = mHCExpandCombineOp.apply(
         f,
@@ -203,17 +203,17 @@ def mhc_fused_projection(x: torch.Tensor, phi: torch.Tensor, use_tf32: bool = Tr
     """
     Fused projection operation to compute H matrices and mean square for RMSNorm (see eq. 14-15, section 4.3.1 of the DeepSeek mHC paper):
 
-    H = x @ phi^T: (M, K) @ (K, N) -> (M, N), which is padded to (M, 32) for better memory access pattern in the next kernels.
+    H = x @ phi^T: (M, K) @ (K, N) -> (M, N), which is padded to (M, 32) for n=4 or (M, 16) for n=2 for better memory access pattern in the next kernels.
     ms = mean(x^2, dim=-1): (M,)
 
-    Note: the current implementation only supports n=4
+    Note: the current implementation only supports n=4 or n=2
 
     Parameters
     ----------
     x : torch.Tensor
         input tensor of shape (M, K), where M=s*b is the batch size and K=nC is the hidden dimension after expansion.
     phi : torch.Tensor
-        projection matrix of shape (N, K), where N=2n+n*n (=24 for n=4)
+        projection matrix of shape (N, K), where N=2n+n*n (=24 for n=4, or =8 for n=2)
     use_tf32 : bool
         whether to use TF32 precision for matmul operations. If False, it will use ieee for better precision.
         This is mainly used by our unittests since TF32 precision will introduce some errors and cause tests to fail.
@@ -226,8 +226,8 @@ def mhc_fused_projection(x: torch.Tensor, phi: torch.Tensor, use_tf32: bool = Tr
         Mean square of shape (M,), which is used for RMSNorm in the next kernel.
     """
     assert (
-        phi.shape[0] == 24
-    ), "Currently only n=4 is supported, which means phi should have 24 in its first dimension"
+        phi.shape[0] in [24, 8]
+    ), "Currently only n=4 or n=2 is supported, which means phi should have 24 or 8 in its first dimension"
     check_deterministic("mhc_fused_projection")
     H, ms = mHCProjectionOp.apply(x, phi, use_tf32)
     return H, ms
@@ -247,7 +247,7 @@ class mHCProjectionOp(torch.autograd.Function):
         Parameters:
         ctx : The context object.
         x (tensor): The input tensor of shape (M, K), where M=s*b is the flattened batch dimension and K=nC is the hidden dimension after expansion.
-        phi (tensor): The projection matrix of shape (N, K), where N=2n+n*n (=24 for n=4).
+        phi (tensor): The projection matrix of shape (N, K), where N=2n+n*n (=24 for n=4, or =8 for n=2).
         use_tf32 (bool): Whether to use TF32 precision for matmul operations. If False, uses IEEE for better precision.
 
         Returns:
@@ -263,9 +263,10 @@ class mHCProjectionOp(torch.autograd.Function):
         device = x.device
 
         N = phi.shape[0]
+        N_padded = 32 if N == 24 else 16  # Pad to 32 for n=4, or 16 for n=2
 
-        # Pad H to (s, b, 32) for better memory access pattern in the kernel, but only the first N elements in the last dimension are valid
-        H = torch.zeros((M, 32), device=device, dtype=torch.float32)
+        # Pad H to (s, b, N_padded) for better memory access pattern in the kernel, but only the first N elements in the last dimension are valid
+        H = torch.zeros((M, N_padded), device=device, dtype=torch.float32)
         ms = torch.zeros(
             (M,), device=device, dtype=torch.float32
         )  # Mean square for x, used to compute RMSNorm in the next kernel
@@ -284,14 +285,15 @@ class mHCProjectionOp(torch.autograd.Function):
             M=M,
             N=N,
             K=K,
+            N_padded=N_padded,
             stride_xm=K,
             stride_xk=1,
             stride_phin=K,
             stride_phik=1,
-            stride_hm=32,
+            stride_hm=N_padded,
             stride_hn=1,
             stride_ms=1,
-            BLOCK_SIZE_N=32,
+            BLOCK_SIZE_N=N_padded,
             precision="tf32" if use_tf32 else "ieee",
         )
 
@@ -322,6 +324,7 @@ class mHCProjectionOp(torch.autograd.Function):
         device = x.device
 
         N = phi.shape[0]
+        N_padded = 32 if N == 24 else 16  # Pad to 32 for n=4, or 16 for n=2
 
         grad_H = grad_H.contiguous().view(M, -1)
         grad_ms = grad_ms.contiguous().view(
@@ -334,7 +337,7 @@ class mHCProjectionOp(torch.autograd.Function):
         grad_x = torch.empty((M, K), device=device, dtype=x.dtype)
         grad_phi = (grad_H.T @ x)[:N, :].to(
             ctx.phi_dtype
-        )  # (2n + n^2, M) @ (M, nC) = (2n + n^2, nC), note that the last dimension of grad_H is already padded to 32
+        )  # (2n + n^2, M) @ (M, nC) = (2n + n^2, nC), note that the last dimension of grad_H is already padded
 
         # pylint: disable=unnecessary-lambda-assignment
         grid = lambda META: (
@@ -351,6 +354,7 @@ class mHCProjectionOp(torch.autograd.Function):
             M=M,
             N=N,
             K=K,
+            N_padded=N_padded,
             stride_xm=K,
             stride_xk=1,
             stride_grad_xm=K,
@@ -359,10 +363,10 @@ class mHCProjectionOp(torch.autograd.Function):
             stride_phik=1,
             stride_grad_phin=K,
             stride_grad_phik=1,
-            stride_grad_hm=32,
+            stride_grad_hm=N_padded,
             stride_grad_hn=1,
             stride_grad_ms=1,
-            BLOCK_SIZE_N=32,
+            BLOCK_SIZE_N=N_padded,
             precision="tf32" if ctx.use_tf32 else "ieee",
         )
 
@@ -403,13 +407,14 @@ class mHCScaleFusedOp(torch.autograd.Function):
         ms = ms.to(torch.float32)
 
         M, _ = H.shape
+        N_padded = 32 if n == 4 else 16  # Pad to 32 for n=4, or 16 for n=2
 
         H = H.contiguous()
         beta = beta.contiguous()
         ms = ms.contiguous()
 
         out = torch.empty(
-            (M, 32), device=H.device, dtype=H.dtype
+            (M, N_padded), device=H.device, dtype=H.dtype
         )  # Pad the output to 32 in the last dimension
 
         # pylint: disable=unnecessary-lambda-assignment
@@ -423,14 +428,15 @@ class mHCScaleFusedOp(torch.autograd.Function):
             out_ptr=out,  # (M, N), which is padded to (M, 32)
             M=M,
             n=n,
-            stride_hm=32,
+            N_padded=N_padded,
+            stride_hm=N_padded,
             stride_hn=1,
             stride_a=1,
             stride_b=1,
             stride_ms=1,
-            stride_out_m=32,
+            stride_out_m=N_padded,
             stride_out_n=1,  # strides for out, which is padded to 32 in the last dimension
-            BLOCK_SIZE_N=32,
+            BLOCK_SIZE_N=N_padded,
             eps=torch.finfo(ms.dtype).eps,
         )
 
@@ -460,12 +466,13 @@ class mHCScaleFusedOp(torch.autograd.Function):
 
         M, _ = grad_out.shape
         N = 2 * n + n * n
+        N_padded = 32 if n == 4 else 16  # Pad to 32 for n=4, or 16 for n=2
 
         grad_h = torch.zeros(
-            (M, 32), device=grad_out.device, dtype=grad_out.dtype
-        )  # Pad the grad_h to 32 in the last dimension
+            (M, N_padded), device=grad_out.device, dtype=grad_out.dtype
+        )  # Pad the grad_h to N_padded in the last dimension
         grad_alpha = torch.zeros((3,), device=grad_out.device, dtype=grad_out.dtype)
-        grad_beta_padded = torch.zeros((1, 32), device=grad_out.device, dtype=grad_out.dtype)
+        grad_beta_padded = torch.zeros((1, N_padded), device=grad_out.device, dtype=grad_out.dtype)
         grad_beta = grad_beta_padded[
             :, :N
         ]  # Use only the first N elements for grad_beta, the rest are just padding
@@ -486,20 +493,21 @@ class mHCScaleFusedOp(torch.autograd.Function):
             ms_ptr=ms,
             M=M,
             n=n,
-            stride_grad_out_m=32,
+            N_padded=N_padded,
+            stride_grad_out_m=N_padded,
             stride_grad_out_n=1,
-            stride_out_m=32,
+            stride_out_m=N_padded,
             stride_out_n=1,
-            stride_grad_hm=32,
+            stride_grad_hm=N_padded,
             stride_grad_hn=1,
-            stride_hm=32,
+            stride_hm=N_padded,
             stride_hn=1,
             stride_grad_a=1,
             stride_a=1,
             stride_grad_b=1,
             stride_grad_ms=1,
             stride_ms=1,
-            BLOCK_SIZE_N=32,
+            BLOCK_SIZE_N=N_padded,
             eps=torch.finfo(ms.dtype).eps,
         )
 
