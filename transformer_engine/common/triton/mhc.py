@@ -60,7 +60,6 @@ def _mhc_projection_fwd_fused(
     M,
     N: tl.constexpr,
     K,
-    N_padded: tl.constexpr,
     stride_xm,
     stride_xk: tl.constexpr,
     stride_phin,
@@ -84,13 +83,11 @@ def _mhc_projection_fwd_fused(
     tl.assume(stride_xk == 1)
     tl.assume(stride_phin == K)
     tl.assume(stride_phik == 1)
-    tl.assume(stride_hm == N_padded)
     tl.assume(stride_hn == 1)
     tl.assume(stride_ms == 1)
 
     tl.assume(BLOCK_SIZE_M % 32 == 0)
     tl.assume(BLOCK_SIZE_K % 32 == 0)
-    tl.assume(BLOCK_SIZE_N == N_padded)
 
     offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
     offs_n_full = tl.arange(0, BLOCK_SIZE_N)
@@ -144,7 +141,6 @@ def _mhc_projection_bwd_fused(
     M,
     N: tl.constexpr,
     K,
-    N_padded: tl.constexpr,
     stride_xm,
     stride_xk: tl.constexpr,
     stride_grad_xm,
@@ -169,7 +165,6 @@ def _mhc_projection_bwd_fused(
     tl.assume(pid_k >= 0)
     tl.assume(stride_xm > 0)
     tl.assume(stride_xk == 1)
-    tl.assume(stride_grad_hm == N_padded)
     tl.assume(stride_grad_hn == 1)
     tl.assume(stride_phin == K)
     tl.assume(stride_phik == 1)
@@ -179,7 +174,6 @@ def _mhc_projection_bwd_fused(
 
     tl.assume(BLOCK_SIZE_M % 32 == 0)
     tl.assume(BLOCK_SIZE_K % 32 == 0)
-    tl.assume(BLOCK_SIZE_N == N_padded)
 
     offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
     offs_k = pid_k * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
@@ -239,14 +233,13 @@ def scale_config():
 )
 @triton.jit
 def _mhc_scale_fwd_fused(
-    h_ptr,  # (M, 2n + n^2), which is padded to (M, N_padded) in the last dimension
+    h_ptr,  # (M, 2n + n^2), which might be padded in the last dimension
     a_ptr,  # (3,)
     b_ptr,  # (2n + n^2)
     ms_ptr,  # (M,)
-    out_ptr,  # (M, 2n + n^2), which is padded to (M, N_padded) in the last dimension
+    out_ptr,  # (M, 2n + n^2), which might be padded in the last dimension
     M,
     n: tl.constexpr,
-    N_padded: tl.constexpr,
     stride_hm: tl.constexpr,
     stride_hn: tl.constexpr,
     stride_a: tl.constexpr,
@@ -262,14 +255,11 @@ def _mhc_scale_fwd_fused(
     pid = tl.program_id(0)
 
     tl.assume(M > 0)
-    tl.assume(stride_hm == N_padded)
     tl.assume(stride_hn == 1)
-    tl.assume(stride_out_m == N_padded)
     tl.assume(stride_out_n == 1)
     tl.assume(stride_a == 1)
     tl.assume(stride_b == 1)
     tl.assume(stride_ms == 1)
-    tl.assume(BLOCK_SIZE_N == N_padded)
 
     N = 2 * n + n * n
 
@@ -325,9 +315,9 @@ def _mhc_scale_fwd_fused(
 @triton.jit
 def _mhc_scale_bwd_fused(
     grad_out_ptr,
-    out_ptr,  # (M, 2n + n^2), which is padded to (M, N_padded) in the last dimension
+    out_ptr,  # (M, 2n + n^2), which might be padded in the last dimension
     grad_h_ptr,
-    h_ptr,  # (M, 2n + n^2), which is padded to (M, N_padded) in the last dimension
+    h_ptr,  # (M, 2n + n^2), which might be padded in the last dimension
     grad_a_ptr,
     a_ptr,  # (3,)
     grad_b_ptr,  # (2n + n^2,)
@@ -335,7 +325,6 @@ def _mhc_scale_bwd_fused(
     ms_ptr,  # (M,)
     M,
     n: tl.constexpr,
-    N_padded: tl.constexpr,
     stride_grad_out_m: tl.constexpr,
     stride_grad_out_n: tl.constexpr,
     stride_out_m: tl.constexpr,
@@ -356,20 +345,15 @@ def _mhc_scale_bwd_fused(
     pid = tl.program_id(0)
 
     tl.assume(M > 0)
-    tl.assume(stride_grad_out_m == N_padded)
     tl.assume(stride_grad_out_n == 1)
-    tl.assume(stride_out_m == N_padded)
     tl.assume(stride_out_n == 1)
-    tl.assume(stride_grad_hm == N_padded)
     tl.assume(stride_grad_hn == 1)
-    tl.assume(stride_hm == N_padded)
     tl.assume(stride_hn == 1)
     tl.assume(stride_grad_a == 1)
     tl.assume(stride_a == 1)
     tl.assume(stride_grad_b == 1)
     tl.assume(stride_grad_ms == 1)
     tl.assume(stride_ms == 1)
-    tl.assume(BLOCK_SIZE_N == N_padded)
 
     N = 2 * n + n * n
 

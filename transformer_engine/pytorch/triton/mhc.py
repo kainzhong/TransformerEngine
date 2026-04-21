@@ -268,7 +268,8 @@ class mHCProjectionOp(torch.autograd.Function):
         device = x.device
 
         N = phi.shape[0]
-        N_padded = 32 if N == 24 else 16  # Pad to 32 for n=4, or 16 for n=2
+        N_padded = 32 if N == 24 else 8  # Pad to 32 for n=4, or 8 for n=2
+        BLOCK_SIZE_N = 32 if N == 24 else 8
 
         # Pad H to (s, b, N_padded) for better memory access pattern in the kernel, but only the first N elements in the last dimension are valid
         H = torch.zeros((M, N_padded), device=device, dtype=torch.float32)
@@ -290,7 +291,6 @@ class mHCProjectionOp(torch.autograd.Function):
             M=M,
             N=N,
             K=K,
-            N_padded=N_padded,
             stride_xm=K,
             stride_xk=1,
             stride_phin=K,
@@ -298,7 +298,7 @@ class mHCProjectionOp(torch.autograd.Function):
             stride_hm=N_padded,
             stride_hn=1,
             stride_ms=1,
-            BLOCK_SIZE_N=N_padded,
+            BLOCK_SIZE_N=BLOCK_SIZE_N,
             precision="tf32" if use_tf32 else "ieee",
         )
 
@@ -329,7 +329,7 @@ class mHCProjectionOp(torch.autograd.Function):
         device = x.device
 
         N = phi.shape[0]
-        N_padded = 32 if N == 24 else 16  # Pad to 32 for n=4, or 16 for n=2
+        N_padded = 32 if N == 24 else 8  # Pad to 32 for n=4, or 8 for n=2
 
         grad_H = grad_H.contiguous().view(M, -1)
         grad_ms = grad_ms.contiguous().view(
@@ -359,7 +359,6 @@ class mHCProjectionOp(torch.autograd.Function):
             M=M,
             N=N,
             K=K,
-            N_padded=N_padded,
             stride_xm=K,
             stride_xk=1,
             stride_grad_xm=K,
@@ -371,7 +370,7 @@ class mHCProjectionOp(torch.autograd.Function):
             stride_grad_hm=N_padded,
             stride_grad_hn=1,
             stride_grad_ms=1,
-            BLOCK_SIZE_N=N_padded,
+            BLOCK_SIZE_N=32 if N == 24 else 16, # This is the inner dimension of tl.dot so it has to >=16
             precision="tf32" if ctx.use_tf32 else "ieee",
         )
 
@@ -412,7 +411,7 @@ class mHCScaleFusedOp(torch.autograd.Function):
         ms = ms.to(torch.float32)
 
         M, _ = H.shape
-        N_padded = 32 if n == 4 else 16  # Pad to 32 for n=4, or 16 for n=2
+        N_padded = 32 if n == 4 else 8  # Pad to 32 for n=4, or 8 for n=2
 
         H = H.contiguous()
         beta = beta.contiguous()
@@ -433,7 +432,6 @@ class mHCScaleFusedOp(torch.autograd.Function):
             out_ptr=out,  # (M, N), which is padded to (M, 32)
             M=M,
             n=n,
-            N_padded=N_padded,
             stride_hm=N_padded,
             stride_hn=1,
             stride_a=1,
@@ -471,7 +469,7 @@ class mHCScaleFusedOp(torch.autograd.Function):
 
         M, _ = grad_out.shape
         N = 2 * n + n * n
-        N_padded = 32 if n == 4 else 16  # Pad to 32 for n=4, or 16 for n=2
+        N_padded = 32 if n == 4 else 8  # Pad to 32 for n=4, or 8 for n=2
 
         grad_h = torch.zeros(
             (M, N_padded), device=grad_out.device, dtype=grad_out.dtype
@@ -498,7 +496,6 @@ class mHCScaleFusedOp(torch.autograd.Function):
             ms_ptr=ms,
             M=M,
             n=n,
-            N_padded=N_padded,
             stride_grad_out_m=N_padded,
             stride_grad_out_n=1,
             stride_out_m=N_padded,

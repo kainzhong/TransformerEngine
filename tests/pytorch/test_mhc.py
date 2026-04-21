@@ -268,7 +268,7 @@ def test_mhc_scale(cfg: MHCConfig, dtype):
 
     s, b, C, n = cfg.s, cfg.b, cfg.C, cfg.n
     N = 2 * n + n * n
-    N_padded = 32 if n == 4 else 16  # Pad to 32 for n=4, or 16 for n=2
+    N_padded = 32 if n == 4 else 8  # Pad to 32 for n=4, or 8 for n=2
 
     tols = get_tols(dtype)
 
