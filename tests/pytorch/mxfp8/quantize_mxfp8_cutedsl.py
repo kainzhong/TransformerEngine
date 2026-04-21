@@ -308,7 +308,7 @@ class MXFP8QuantizeSmemKernel:
         print(f"tiler: {tiler}")
         gX_s0 = cute.local_tile(mX, tiler, (bidy * 2, bidx))
         gX_s1 = cute.local_tile(mX, tiler, (bidy * 2 + 1, bidx))
-        print(f"gX_s0: {gX_s0}, gX_s1: {gX_s1}\n")
+        print(f"mx: {mX}\ngX_s0: {gX_s0}\ngX_s1: {gX_s1}\n")
 
         # Partition global and smem for each stage
         tXgX_s0 = thr_copy.partition_S(gX_s0)
@@ -332,12 +332,18 @@ class MXFP8QuantizeSmemKernel:
         cute.arch.barrier()
 
         base_row_0 = block_off_Y
-        self._compute_stage(
-            sX0, sO_row_ref, sO_col_ref, mS_row, mS_col,
-            base_row_0, block_off_X, bidx,
-            tid_Y_row, tid_X_row, g_col_cw,
-            bank_group, max_norm_rcp,
-        )
+        if cutlass.const_expr(cfg.colwise):
+            self._compute_stage_colwise(
+                sX0, sO_col_ref, mS_col,
+                base_row_0, block_off_X, g_col_cw,
+                max_norm_rcp,
+            )
+        if cutlass.const_expr(cfg.rowwise):
+            self._compute_stage_rowwise(
+                sX0, sO_row_ref, mS_row,
+                base_row_0, bidx, tid_Y_row, tid_X_row,
+                bank_group, max_norm_rcp,
+            )
         # Flush output smem → global (coalesced cooperative store)
         cute.arch.barrier()
         self._flush_output_smem(
@@ -350,12 +356,18 @@ class MXFP8QuantizeSmemKernel:
         cute.arch.barrier()
 
         base_row_1 = block_off_Y + BUFF_DIM_Y
-        self._compute_stage(
-            sX1, sO_row_ref, sO_col_ref, mS_row, mS_col,
-            base_row_1, block_off_X, bidx,
-            tid_Y_row, tid_X_row, g_col_cw,
-            bank_group, max_norm_rcp,
-        )
+        if cutlass.const_expr(cfg.colwise):
+            self._compute_stage_colwise(
+                sX1, sO_col_ref, mS_col,
+                base_row_1, block_off_X, g_col_cw,
+                max_norm_rcp,
+            )
+        if cutlass.const_expr(cfg.rowwise):
+            self._compute_stage_rowwise(
+                sX1, sO_row_ref, mS_row,
+                base_row_1, bidx, tid_Y_row, tid_X_row,
+                bank_group, max_norm_rcp,
+            )
         cute.arch.barrier()
         self._flush_output_smem(
             sO_row_ref, sO_col_ref, mO_row, mO_col,
@@ -363,73 +375,89 @@ class MXFP8QuantizeSmemKernel:
         )
 
     @cute.jit
-    def _compute_stage(
-        self, sX, sO_row, sO_col, mS_row, mS_col,
-        base_row, block_off_X, bidx,
-        tid_Y_row, tid_X_row, g_col_cw,
+    def _compute_stage_colwise(
+        self, sX, sO_col, mS_col,
+        base_row, block_off_X, g_col_cw,
+        max_norm_rcp,
+    ):
+        """Colwise pass: thread `tidx` owns one column of the 32×64 tile.
+
+        Reads 32 elements down the column, computes the MXFP8 E8M0 scale,
+        scales + casts to FP8, stores to output smem and the scale to gmem.
+        """
+        cfg = self.cfg
+        tidx_local = g_col_cw - block_off_X
+        scale_row = base_row // SCALE_DIM
+
+        # 1. Amax over the 32-element column
+        amax_c = Float32(0.0)
+        for i in cutlass.range_constexpr(SCALE_DIM):
+            val = Float32(sX[i, tidx_local])
+            amax_c = cute.arch.fmax(amax_c, fabs_f32(val))
+
+        # 2. E8M0 scale → gmem (scalar, scattered)
+        biased_exp_c = float_to_e8m0(amax_c * max_norm_rcp)
+        if cutlass.const_expr(cfg.with_gemm_swizzled_scales):
+            num_row_tiles = (cfg.M + 127) // 128
+            sw_idx = gemm_swizzled_scale_idx(g_col_cw, Int32(scale_row),
+                                              Int32(num_row_tiles))
+            mS_col[sw_idx] = Uint8(biased_exp_c)
+        else:
+            mS_col[scale_row, g_col_cw] = Uint8(biased_exp_c)
+
+        # 3. Scale + FP8 cast → output smem
+        inv_scale_c = exp2f_rcp(biased_exp_c)
+        for i in cutlass.range_constexpr(SCALE_DIM):
+            val = Float32(sX[i, tidx_local])
+            sO_col[i, tidx_local] = Uint8(cvt_f32_to_fp8e4m3(val * inv_scale_c))
+
+    @cute.jit
+    def _compute_stage_rowwise(
+        self, sX, sO_row, mS_row,
+        base_row, bidx, tid_Y_row, tid_X_row,
         bank_group, max_norm_rcp,
     ):
-        """Compute one 32×64 stage: write FP8 output to smem (not global)."""
+        """Rowwise pass: thread (tid_Y, tid_X) owns one 32-element scale block.
+
+        Reads 8 waves × 4 elements with bank-group swizzle to avoid smem bank
+        conflicts.  Uses 2-wide FP8 conversion (cvt.rn.satfinite.e4m3x2.f32).
+        """
         cfg = self.cfg
+        g_row_rw  = base_row + tid_Y_row
+        scale_col = bidx * THREADS_X + tid_X_row
+        col_start = tid_X_row * SCALE_DIM
 
-        # --- Colwise pass → output to sO_col ---
-        if cutlass.const_expr(cfg.colwise):
-            tidx_local = g_col_cw - block_off_X
-            scale_row = base_row // SCALE_DIM
+        # 1. Amax over 8 waves × 4 elements (bank-conflict-free order)
+        amax_r = Float32(0.0)
+        for w in cutlass.range_constexpr(WAVES):
+            swizzled_grp = ((w + bank_group) * PACK_SIZE) % SCALE_DIM
+            for e in cutlass.range_constexpr(PACK_SIZE):
+                val = Float32(sX[tid_Y_row, col_start + swizzled_grp + e])
+                amax_r = cute.arch.fmax(amax_r, fabs_f32(val))
 
-            amax_c = Float32(0.0)
-            for i in cutlass.range_constexpr(SCALE_DIM):
-                val = Float32(sX[i, tidx_local])
-                amax_c = cute.arch.fmax(amax_c, fabs_f32(val))
+        # 2. E8M0 scale → gmem
+        biased_exp_r = float_to_e8m0(amax_r * max_norm_rcp)
+        if cutlass.const_expr(cfg.with_gemm_swizzled_scales):
+            num_col_tiles = (cfg.N + 127) // 128
+            sw_idx = gemm_swizzled_scale_idx(g_row_rw, scale_col,
+                                              Int32(num_col_tiles))
+            mS_row[sw_idx] = Uint8(biased_exp_r)
+        else:
+            mS_row[g_row_rw, scale_col] = Uint8(biased_exp_r)
 
-            biased_exp_c = float_to_e8m0(amax_c * max_norm_rcp)
-            if cutlass.const_expr(cfg.with_gemm_swizzled_scales):
-                num_row_tiles = (cfg.M + 127) // 128
-                sw_idx = gemm_swizzled_scale_idx(g_col_cw, Int32(scale_row),
-                                                  Int32(num_row_tiles))
-                mS_col[sw_idx] = Uint8(biased_exp_c)
-            else:
-                mS_col[scale_row, g_col_cw] = Uint8(biased_exp_c)
-
-            inv_scale_c = exp2f_rcp(biased_exp_c)
-            for i in cutlass.range_constexpr(SCALE_DIM):
-                val = Float32(sX[i, tidx_local])
-                sO_col[i, tidx_local] = Uint8(cvt_f32_to_fp8e4m3(val * inv_scale_c))
-
-        # --- Rowwise pass → output to sO_row (bank-conflict-free writes) ---
-        if cutlass.const_expr(cfg.rowwise):
-            g_row_rw = base_row + tid_Y_row
-            scale_col = bidx * THREADS_X + tid_X_row
-            col_start = tid_X_row * SCALE_DIM
-
-            amax_r = Float32(0.0)
-            for w in cutlass.range_constexpr(WAVES):
-                swizzled_grp = ((w + bank_group) * PACK_SIZE) % SCALE_DIM
-                for e in cutlass.range_constexpr(PACK_SIZE):
-                    val = Float32(sX[tid_Y_row, col_start + swizzled_grp + e])
-                    amax_r = cute.arch.fmax(amax_r, fabs_f32(val))
-
-            biased_exp_r = float_to_e8m0(amax_r * max_norm_rcp)
-            if cutlass.const_expr(cfg.with_gemm_swizzled_scales):
-                num_col_tiles = (cfg.N + 127) // 128
-                sw_idx = gemm_swizzled_scale_idx(g_row_rw, scale_col,
-                                                  Int32(num_col_tiles))
-                mS_row[sw_idx] = Uint8(biased_exp_r)
-            else:
-                mS_row[g_row_rw, scale_col] = Uint8(biased_exp_r)
-
-            inv_scale_r = exp2f_rcp(biased_exp_r)
-            for w in cutlass.range_constexpr(WAVES):
-                swizzled_grp = ((w + bank_group) * PACK_SIZE) % SCALE_DIM
-                for e in cutlass.range_constexpr(PACK_SIZE // 2):
-                    v0 = Float32(sX[tid_Y_row, col_start + swizzled_grp + 2 * e])
-                    v1 = Float32(sX[tid_Y_row, col_start + swizzled_grp + 2 * e + 1])
-                    packed = cvt_f32x2_to_fp8e4m3x2(v0 * inv_scale_r,
-                                                     v1 * inv_scale_r)
-                    sO_row[tid_Y_row, col_start + swizzled_grp + 2 * e] = Uint8(
-                        packed >> Int32(8))
-                    sO_row[tid_Y_row, col_start + swizzled_grp + 2 * e + 1] = Uint8(
-                        packed & Int32(0xFF))
+        # 3. Scale + 2-wide FP8 cast → output smem (swizzled writes)
+        inv_scale_r = exp2f_rcp(biased_exp_r)
+        for w in cutlass.range_constexpr(WAVES):
+            swizzled_grp = ((w + bank_group) * PACK_SIZE) % SCALE_DIM
+            for e in cutlass.range_constexpr(PACK_SIZE // 2):
+                v0 = Float32(sX[tid_Y_row, col_start + swizzled_grp + 2 * e])
+                v1 = Float32(sX[tid_Y_row, col_start + swizzled_grp + 2 * e + 1])
+                packed = cvt_f32x2_to_fp8e4m3x2(v0 * inv_scale_r,
+                                                 v1 * inv_scale_r)
+                sO_row[tid_Y_row, col_start + swizzled_grp + 2 * e] = Uint8(
+                    packed >> Int32(8))
+                sO_row[tid_Y_row, col_start + swizzled_grp + 2 * e + 1] = Uint8(
+                    packed & Int32(0xFF))
 
     @cute.jit
     def _flush_output_smem(
