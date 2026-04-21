@@ -16,8 +16,8 @@ import triton.language as tl
 def projection_config_fwd():
     block_m = [64, 128]
     block_k = [1024]
-    step_k = [32, 64]
-    warps = [4]
+    step_k = [32, 64, 128]
+    warps = [4, 8]
     stages = [3, 4]
 
     configs = []
