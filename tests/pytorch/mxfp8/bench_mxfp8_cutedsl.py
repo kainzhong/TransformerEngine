@@ -16,7 +16,7 @@ import transformer_engine.pytorch as te
 import transformer_engine_torch as tex
 from transformer_engine.pytorch import MXFP8Quantizer
 
-from quantize_mxfp8_cutedsl import quantize_mxfp8_cutedsl
+from quantize_mxfp8_cutedsl_alt import quantize_mxfp8_cutedsl
 
 
 # Shape presets — names map to lists of (M, N) pairs.
