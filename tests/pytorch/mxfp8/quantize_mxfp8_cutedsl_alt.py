@@ -17,6 +17,11 @@ Each block processes a 64x64 chunk in 2 stages of 32x64 tiles loaded into
 shared memory.
 """
 
+import os
+# Pin CuTeDSL compile target to Blackwell. Must be set before cutlass imports
+# so env detection in base_dsl picks it up; also passed explicitly below.
+os.environ.setdefault("CUTE_DSL_ARCH", "sm_100a")
+
 from typing import Type
 
 import cuda.bindings.driver as cuda
@@ -26,9 +31,10 @@ import cutlass
 import cutlass.cute as cute
 import cutlass.utils as utils
 import cutlass.pipeline as pipeline
-from cutlass import Float32, Int32, Int16, Uint8
+from cutlass import Float32, Int32, Int16, Uint8, Uint32
 from cutlass._mlir.dialects import arith as mlir_arith
 from cutlass._mlir.dialects import llvm
+from cutlass.base_dsl.compiler import GPUArch
 from cutlass.cute.runtime import make_ptr
 from cutlass.cutlass_dsl import T, dsl_user_op
 
@@ -43,8 +49,8 @@ BUFFER_NUM = 2
 PACK_SIZE = 4                              # Elements per vector load
 WAVES = SCALE_DIM // PACK_SIZE             # 8 waves of 4 elements
 THREADS_PER_WARP = 32
-TOTAL_BANKS_WIDTH = (32 * 4) / 1 # 32 banks, with 4 bytes each, divided by 1 byte per element (uint8)
-THREADS_PER_BANK = TOTAL_BANKS_WIDTH // SCALE_DIM # (32 * 4) // 32 = 4 threads per bank
+TOTAL_BANKS_WIDTH = (32 * 4) // 1  # 32 banks × 4 bytes, in bytes (uint8 stride)
+THREADS_PER_BANK = TOTAL_BANKS_WIDTH // SCALE_DIM  # 4 threads per bank
 
 NUM_STAGES = 2
 NUM_TILES = 2
@@ -247,32 +253,41 @@ class MXFP8QuantizeSmemKernel:
                 scale_col_ptr,
                 cute.make_layout((num_scale_rows, cfg.N), stride=(cfg.N, 1)))
             
-        print(f"mX: {mX}\nmO_row: {mO_row}, mS_row: {mS_row}\nmO_col: {mO_col}, mS_col: {mS_col}\n")
+        # print(f"mX: {mX}\nmO_row: {mO_row}, mS_row: {mS_row}\nmO_col: {mO_col}, mS_col: {mS_col}\n")
 
-        # Declare TMA descriptors on the host side
-        op = cute.nvgpu.cpasync.CopyBulkTensorTileG2SOp()
+        # Declare TMA descriptors on the host side.
+        # make_tiled_tma_atom returns the UNTILED gmem tensor with basis strides.
+        # Tile it inside the kernel with zipped_divide so each coord selects
+        # one (TILE_Y, TILE_X) tile.
         smem_tile_layout = cute.make_ordered_layout((TILE_Y, TILE_X), order=(1, 0))
         cta_tiler = (TILE_Y, TILE_X)
-        gX = cute.zipped_divide(mX, cta_tiler)
+
+        # Input: TMA G2S (bf16/fp16 → smem).
+        op_load = cute.nvgpu.cpasync.CopyBulkTensorTileG2SOp()
         tma_atom, tma_src = cute.nvgpu.cpasync.make_tiled_tma_atom(
-            op,
-            gX,
-            smem_tile_layout,
-            cta_tiler,
-            num_multicast=1,
+            op_load, mX, smem_tile_layout, cta_tiler, num_multicast=1,
         )
-        print(f"tma_atom: {tma_atom}\ntma_src: {tma_src}\n")
+
+        # Rowwise output: TMA S2G (uint8 smem → gmem). Creating this
+        # unconditionally — if rowwise is disabled the kernel simply won't
+        # dispatch it, and the atom cost is negligible.
+        op_store = cute.nvgpu.cpasync.CopyBulkTensorTileS2GOp()
+        out_smem_layout = cute.make_ordered_layout((TILE_Y, TILE_X), order=(1, 0))
+        tma_atom_out_row, tma_dst_out_row = cute.nvgpu.cpasync.make_tiled_tma_atom(
+            op_store, mO_row, out_smem_layout, cta_tiler, num_multicast=1,
+        )
 
         grid = [
             cute.ceil_div(Int32(cfg.N), TILE_X),
-            cute.ceil_div(M, TILE_Y * NUM_TILES), 
+            cute.ceil_div(M, TILE_Y * NUM_TILES),
         ]
         block = [THREADS_PER_CHUNK,]
 
         self.kernel(
-            mX, mO_row, mS_row, mO_col, mS_col, 
+            mX, mO_row, mS_row, mO_col, mS_col,
             max_norm_rcp, mX.element_type,
             tma_atom, tma_src,
+            tma_atom_out_row, tma_dst_out_row,
         ).launch(
             grid=grid,
             block=block,
@@ -280,7 +295,7 @@ class MXFP8QuantizeSmemKernel:
 
     @cute.kernel
     def kernel(
-        self, 
+        self,
         mX, # (M, N):(N, 1), the tensor to quantize
         mO_row, # (M, N):(N, 1), rowwise quantized output tensor (uint8)
         mS_row, # (M, N // 32):(N // 32, 1), rowwise scale tensor (uint8)
@@ -289,28 +304,63 @@ class MXFP8QuantizeSmemKernel:
         max_norm_rcp,
         dtype: cutlass.Constexpr[Type[cutlass.Numeric]],
         tma_atom, tma_src,
+        tma_atom_out_row, tma_dst_out_row,
     ):
-
         @cute.struct
         class SharedStorage:
             mbar_storage: cute.struct.MemRange[cute.Int64, 2 * NUM_STAGES]
             sX: cute.struct.Align[
-                cute.struct.MemRange[Float32, 32 * 64 * NUM_STAGES], 128
+                cute.struct.MemRange[dtype, TILE_Y * TILE_X * NUM_STAGES], 128
+            ]
+            # Rowwise FP8 output smem (one 32×64 tile per stage). Writing the
+            # rowwise pass into smem here and flushing via TMA S2G avoids the
+            # 32-way-scattered gmem store pattern that direct writes hit
+            # because each thread owns a different row.
+            sO_row: cute.struct.Align[
+                cute.struct.MemRange[Uint8, TILE_Y * TILE_X * NUM_STAGES], 128
             ]
         smem = cutlass.utils.SmemAllocator()
         storage = smem.allocate(SharedStorage)
 
-        sX = storage.sX.get_tensor(cute.make_layout((32 * 64, NUM_STAGES,)))
-        print(f"Shared memory buffer sX: {sX}\n")
+        # Per-stage shmem tile is 2D (TILE_Y, TILE_X); stages laid out back-to-back.
+        # Mode 0 is hierarchical ((TILE_Y, TILE_X),) so it matches the rank/shape
+        # of gX_tiled[(None, (ty, tx))] produced by zipped_divide.
+        # sX[(None, stage)] selects one (TILE_Y, TILE_X) tile.
+        sX = storage.sX.get_tensor(
+            cute.make_layout(
+                ((TILE_Y, TILE_X), NUM_STAGES),
+                stride=((TILE_X, 1), TILE_Y * TILE_X),
+            )
+        )
+        sO_row = storage.sO_row.get_tensor(
+            cute.make_layout(
+                ((TILE_Y, TILE_X), NUM_STAGES),
+                stride=((TILE_X, 1), TILE_Y * TILE_X),
+            )
+        )
 
-        # 1 thread issues TMA to load the tile
+        warp_idx = cute.arch.warp_idx()
+        warp_idx = cute.arch.make_warp_uniform(warp_idx)
+
+        # Prefetch TMA descriptor (one-time; warp-0 only).
+        if warp_idx == 0:
+            cute.nvgpu.cpasync.prefetch_descriptor(tma_atom)
+
+        tidx, _, _ = cute.arch.thread_idx()
+        bidx, bidy, _ = cute.arch.block_idx()
+
+        # Producer: `arrive_and_expect_tx` is wrapped in `elect_one`, so only
+        # one lane of warp 0 arrives on the full barrier per stage → arrive_count=1.
         producer_group = pipeline.CooperativeGroup(pipeline.Agent.Thread, 1)
-        # 64 threads consumes the tile to quantize
-        consumer_group = pipeline.CooperativeGroup(pipeline.Agent.Thread, THREADS_PER_CHUNK)
+        # Consumer: `consumer_release` arrives only on the `is_signalling_thread`
+        # (lane 0 of each warp), so arrive_count = num_warps per stage.
+        num_warps = THREADS_PER_CHUNK // 32
+        consumer_group = pipeline.CooperativeGroup(pipeline.Agent.Thread, num_warps)
 
-        tx_count = TILE_SIZE * dtype.width // 8
+        # Bytes transferred per TMA copy: one (TILE_Y, TILE_X) tile of dtype.
+        tx_count = TILE_Y * TILE_X * dtype.width // 8
 
-        tma_pipe = pipeline.PipelineTmaAsync.create(
+        mainloop_pipeline = pipeline.PipelineTmaAsync.create(
             barrier_storage=storage.mbar_storage.data_ptr(),
             num_stages=NUM_STAGES,
             producer_group=producer_group,
@@ -327,296 +377,250 @@ class MXFP8QuantizeSmemKernel:
         )
 
         cfg = self.cfg
-        tidx, _, _ = cute.arch.thread_idx()
-        bidx, bidy, _ = cute.arch.block_idx()
-        warp_idx = cute.arch.make_warp_uniform(tidx // 32)
-        bidx, bidy, _ = cute.arch.block_idx()
-
         M = mX.shape[0]
-        N = cfg.N
+        N = mX.shape[1]
 
-        num_tiles = cutlass.min(NUM_TILES, cute.ceil_div(M - bidy * TILE_Y * NUM_TILES, TILE_Y) )
+        num_tiles = cutlass.min(
+            NUM_TILES,
+            cute.ceil_div(M - bidy * TILE_Y * NUM_TILES, TILE_Y),
+        )
 
-        # Prologue: warp 0 prefetches the first NUM_STAGES-1 tiles.
-        if warp_idx == 0: # In CuTeDSL the leader election is performed inside the atom
-            prefetch_count = NUM_STAGES - 1
-            for k in cutlass.range(prefetch_count, unroll=1):
-                tma_pipe.producer_acquire(prod_state)
+        # Tile the TMA gmem view: ((TILE_Y, TILE_X), (M/TILE_Y, N/TILE_X)).
+        gX_tiled = cute.zipped_divide(tma_src, (TILE_Y, TILE_X))
+
+        # Partition sX/gX for the TMA atom (single-CTA, no cluster/multicast).
+        # tXsX: (TMA, NUM_STAGES)
+        # tXgX: (TMA, (M/TILE_Y, N/TILE_X))
+        tXsX, tXgX = cute.nvgpu.cpasync.tma_partition(
+            tma_atom,
+            0,
+            cute.make_layout(1),
+            sX,
+            gX_tiled,
+        )
+
+        # Same partitioning for rowwise S2G output: sO_row → mO_row.
+        gO_row_tiled = cute.zipped_divide(tma_dst_out_row, (TILE_Y, TILE_X))
+        tXsO_row, tXgO_row = cute.nvgpu.cpasync.tma_partition(
+            tma_atom_out_row,
+            0,
+            cute.make_layout(1),
+            sO_row,
+            gO_row_tiled,
+        )
+
+        # print(f"sX: {sX}\n")
+        # print(f"gX_tiled: {gX_tiled}\n")
+        # print(f"tXsX: {tXsX}\n")
+        # print(f"tXgX: {tXgX}\n")
+
+        # Ensure barrier init is visible to all threads before the pipeline is used.
+        cute.arch.sync_threads()
+
+        # ---- Producer: warp 0 issues one TMA copy per tile. ----
+        if warp_idx == 0:
+            for stage in cutlass.range(num_tiles, unroll=1):
+                mainloop_pipeline.producer_acquire(prod_state)
+                tile_y = bidy * NUM_TILES + stage
                 cute.copy(
                     tma_atom,
-                    tma_src[(None, k)],
-                    sX[(None, prod_state.index)],
-                    tma_bar_ptr=tma_pipe.producer_get_barrier(prod_state),
+                    tXgX[(None, (tile_y, bidx))],
+                    tXsX[(None, prod_state.index)],
+                    tma_bar_ptr=mainloop_pipeline.producer_get_barrier(prod_state),
                 )
+                mainloop_pipeline.producer_commit(prod_state)
                 prod_state.advance()
 
-        # Consumers reads from SMEM
-        for k in cutlass.range(num_tiles, unroll=1):
-            tma_pipe.consumer_wait(cons_state)
+        # ---- Consumer: all threads quantize each completed tile. ----
+        for stage in cutlass.range(num_tiles, unroll=1):
+            mainloop_pipeline.consumer_wait(cons_state)
+            sX_tile = sX[(None, cons_state.index)]          # (TILE_Y, TILE_X) bf16
+            base_row = (bidy * NUM_TILES + stage) * TILE_Y
 
-            sX_tile = sX[(None, cons_state.index)]
-            
-            self._process_tile(sX_tile, mO_row, mS_row, mO_col, mS_col, max_norm_rcp)
+            if cutlass.const_expr(cfg.colwise):
+                self._process_colwise(
+                    sX_tile, base_row, bidx, tidx,
+                    mO_col, mS_col, max_norm_rcp,
+                )
+            if cutlass.const_expr(cfg.rowwise):
+                sO_row_tile = sO_row[(None, cons_state.index)]
+                self._process_rowwise(
+                    sX_tile, sO_row_tile, base_row, bidx, tidx,
+                    mS_row, max_norm_rcp,
+                )
 
-            tma_pipe.consumer_release(cons_state)
+            # All threads must finish reading sX[stage] and writing sO_row[stage]
+            # before (a) the signalling lane releases sX to the producer, and
+            # (b) warp 0 launches the TMA store of sO_row[stage].
+            cute.arch.sync_threads()
+
+            if cutlass.const_expr(cfg.rowwise):
+                # Flush generic smem stores to the async proxy so the TMA
+                # engine observes them, then block-sync so warp 0 sees the
+                # fences from all warps before issuing the bulk store.
+                cute.arch.fence_proxy(
+                    cute.arch.ProxyKind.async_shared,
+                    space=cute.arch.SharedSpace.shared_cta,
+                )
+                cute.arch.sync_threads()
+                if warp_idx == 0:
+                    tile_y = bidy * NUM_TILES + stage
+                    cute.copy(
+                        tma_atom_out_row,
+                        tXsO_row[(None, cons_state.index)],
+                        tXgO_row[(None, (tile_y, bidx))],
+                    )
+                    cute.arch.cp_async_bulk_commit_group()
+
+            mainloop_pipeline.consumer_release(cons_state)
             cons_state.advance()
 
-            if tidx == 0:
-                k_prefetch = k + (NUM_STAGES - 1)
-                if k_prefetch < num_tiles:
-                    tma_pipe.producer_acquire(prod_state)
-                    cute.copy(
-                        tma_atom,
-                        tma_src[(None, k_prefetch)],
-                        sX[(None, prod_state.index)],
-                        tma_bar_ptr=tma_pipe.producer_get_barrier(prod_state),
-                    )
-                    prod_state.advance()
+        # Wait for in-flight TMA stores so the data is visible to the host
+        # before the kernel returns. No-op for threads that issued nothing.
+        if cutlass.const_expr(cfg.rowwise):
+            cute.arch.cp_async_bulk_wait_group(0, read=False)
 
 
     @cute.jit
-    def _process_tile(
+    def _process_colwise(
         self,
-        sX_tile,
-        mO_row, # Quantized output tensor for rowwise pass (uint8)
-        mS_row, # Scale tensor for rowwise pass (uint8)
-        mO_col, # Quantized output tensor for colwise pass (uint8)
-        mS_col, # Scale tensor for colwise pass (uint8)
+        sX_tile,        # (TILE_Y, TILE_X) bf16/fp16 smem view, post-TMA
+        base_row,       # Int32: global Y offset of this tile's first row
+        bidx,           # Int32: block X index (column tile)
+        tidx,           # Int32: thread index within the CTA
+        mO_col,         # (M, N): colwise FP8 output
+        mS_col,         # colwise scale tensor (1D swizzled, or 2D linear)
         max_norm_rcp,
     ):
-        print(f"sX_tile: {sX_tile}")
-        # block_off_Y = bidy * CHUNK_DIM_Y
-        # block_off_X = bidx * CHUNK_DIM_X
-
-        # # Thread mappings
-        # tid_Y_row = tidx // THREADS_X
-        # tid_X_row = tidx % THREADS_X
-        # g_col_cw = block_off_X + tidx
-
-        # # Bank-conflict constants (used by rowwise pass)
-        # thread_lane = tidx % THREADS_PER_WARP
-        # bank_group = thread_lane // THREADS_PER_BANK
-
-        # # Output smem buffers (FP8 = uint8, 32×64 = 2KB each)
-        # out_smem_layout = cute.make_ordered_layout(
-        #     (BUFF_DIM_Y, BUFF_DIM_X), order=(1, 0))
-        # if cutlass.const_expr(cfg.rowwise):
-        #     sO_row = smem.allocate_tensor(Uint8, out_smem_layout, byte_alignment=128)
-        # if cutlass.const_expr(cfg.colwise):
-        #     sO_col = smem.allocate_tensor(Uint8, out_smem_layout, byte_alignment=128)
-
-        # # --- cp.async TiledCopy: 64 threads, 128-bit (8-element) vectorised ---
-        # # thr (8,8): 8 thread-rows × 8 thread-cols = 64 threads
-        # # val (4,8): 4 rows × 8 elements per thread = 32 elements/thread
-        # # → tile = (32, 64)
-        # thr_layout = cute.make_layout((2,32), stride=(32,1))
-        # val_layout = cute.make_layout((16,2), stride=(2,1))
-        # # https://kainzhong.github.io/CuTe-Layout-Visualizer/?key=tv-2-%288%2C8%29%3A%288%2C1%29-%284%2C8%29%3A%288%2C1%29
-        # print(f"thr_layout: {thr_layout}, val_layout: {val_layout}, make_layout_tv: {cute.make_layout_tv(thr_layout, val_layout)}\n")
-        # copy_atom_async = cute.make_copy_atom(
-        #     cute.nvgpu.cpasync.CopyG2SOp(), mX.element_type,
-        #     num_bits_per_copy=32,
-        # )
-        # tiled_copy = cute.make_tiled_copy_tv(
-        #     copy_atom_async, thr_layout, val_layout)
-        # print(f"copy_atom_async: {copy_atom_async}\ntiled_copy: {tiled_copy}\n")
-        # thr_copy = tiled_copy.get_slice(tidx)
-        # print(f"thr_copy: {thr_copy}")
-
-        # # Per-stage global tiles: local_tile with (32, 64) tiler
-        # tiler = (BUFF_DIM_Y, BUFF_DIM_X)
-        # print(f"tiler: {tiler}")
-        # gX_s0 = cute.local_tile(mX, tiler, (bidy * 2, bidx))
-        # gX_s1 = cute.local_tile(mX, tiler, (bidy * 2 + 1, bidx))
-        # print(f"mx: {mX}\ngX_s0: {gX_s0}\ngX_s1: {gX_s1}\n")
-
-        # # Partition global and smem for each stage
-        # tXgX_s0 = thr_copy.partition_S(gX_s0)
-        # tXsX_s0 = thr_copy.partition_D(sX0)
-        # tXgX_s1 = thr_copy.partition_S(gX_s1)
-        # tXsX_s1 = thr_copy.partition_D(sX1)
-        # print(f"tXgX_s0: {tXgX_s0}, tXsX_s0: {tXsX_s0}, tXgX_s1: {tXgX_s1}, tXsX_s1: {tXsX_s1}\n")
-
-        # # --- Issue both cp.async loads upfront for maximum overlap ---
-        # cute.copy(copy_atom_async, tXgX_s0, tXsX_s0)
-        # cute.arch.cp_async_commit_group()
-        # cute.copy(copy_atom_async, tXgX_s1, tXsX_s1)
-        # cute.arch.cp_async_commit_group()
-
-        # # Output smem refs (use sO_row / sO_col allocated above; None when disabled)
-        # sO_row_ref = sO_row if cutlass.const_expr(cfg.rowwise) else None
-        # sO_col_ref = sO_col if cutlass.const_expr(cfg.colwise) else None
-
-        # # --- Stage 0: wait for buf 0, compute (stage 1 loads in background) ---
-        # cute.arch.cp_async_wait_group(1)
-        # cute.arch.barrier()
-
-        # base_row_0 = block_off_Y
-        # if cutlass.const_expr(cfg.colwise):
-        #     self._compute_stage_colwise(
-        #         sX0, sO_col_ref, mS_col,
-        #         base_row_0, block_off_X, g_col_cw,
-        #         max_norm_rcp,
-        #     )
-        # if cutlass.const_expr(cfg.rowwise):
-        #     self._compute_stage_rowwise(
-        #         sX0, sO_row_ref, mS_row,
-        #         base_row_0, bidx, tid_Y_row, tid_X_row,
-        #         bank_group, max_norm_rcp,
-        #     )
-        # # Flush output smem → global (coalesced cooperative store)
-        # cute.arch.barrier()
-        # self._flush_output_smem(
-        #     sO_row_ref, sO_col_ref, mO_row, mO_col,
-        #     base_row_0, block_off_X, tidx,
-        # )
-
-        # # --- Stage 1: wait for buf 1, compute ---
-        # cute.arch.cp_async_wait_group(0)
-        # cute.arch.barrier()
-
-        # base_row_1 = block_off_Y + BUFF_DIM_Y
-        # if cutlass.const_expr(cfg.colwise):
-        #     self._compute_stage_colwise(
-        #         sX1, sO_col_ref, mS_col,
-        #         base_row_1, block_off_X, g_col_cw,
-        #         max_norm_rcp,
-        #     )
-        # if cutlass.const_expr(cfg.rowwise):
-        #     self._compute_stage_rowwise(
-        #         sX1, sO_row_ref, mS_row,
-        #         base_row_1, bidx, tid_Y_row, tid_X_row,
-        #         bank_group, max_norm_rcp,
-        #     )
-        # cute.arch.barrier()
-        # self._flush_output_smem(
-        #     sO_row_ref, sO_col_ref, mO_row, mO_col,
-        #     base_row_1, block_off_X, tidx,
-        # )
-
-    @cute.jit
-    def _compute_stage_colwise(
-        self, sX, sO_col, mS_col,
-        base_row, block_off_X, g_col_cw,
-        max_norm_rcp,
-    ):
-        """Colwise pass: thread `tidx` owns one column of the 32×64 tile.
-
-        Reads 32 elements down the column, computes the MXFP8 E8M0 scale,
-        scales + casts to FP8, stores to output smem and the scale to gmem.
+        """Colwise MXFP8 pass: thread `tidx` owns column `tidx` of the (32, 64)
+        smem tile — 32 elements down. Writes fp8 bytes directly to gmem; per-warp
+        stores are already coalesced since lanes have consecutive `col_global`.
         """
         cfg = self.cfg
-        tidx_local = g_col_cw - block_off_X
-        scale_row = base_row // SCALE_DIM
+        block_off_X = bidx * TILE_X
+        col_global = block_off_X + tidx
 
-        # 1. Amax over the 32-element column
+        # Flat view (sX[(None, stage)] has nested shape ((TILE_Y, TILE_X),)).
+        sX_flat = cute.make_tensor(
+            sX_tile.iterator,
+            cute.make_layout((TILE_Y, TILE_X), stride=(TILE_X, 1)),
+        )
+
+        # 1. amax over the 32-element column.
         amax_c = Float32(0.0)
         for i in cutlass.range_constexpr(SCALE_DIM):
-            val = Float32(sX[i, tidx_local])
-            amax_c = cute.arch.fmax(amax_c, fabs_f32(val))
+            v = Float32(sX_flat[i, tidx])
+            amax_c = cute.arch.fmax(amax_c, fabs_f32(v))
 
-        # 2. E8M0 scale → gmem (scalar, scattered)
+        # 2. E8M0 scale → gmem.
         biased_exp_c = float_to_e8m0(amax_c * max_norm_rcp)
+        scale_row = base_row // SCALE_DIM
         if cutlass.const_expr(cfg.with_gemm_swizzled_scales):
             num_row_tiles = (cfg.M + 127) // 128
-            sw_idx = gemm_swizzled_scale_idx(g_col_cw, Int32(scale_row),
-                                              Int32(num_row_tiles))
+            sw_idx = gemm_swizzled_scale_idx(
+                Int32(col_global), Int32(scale_row), Int32(num_row_tiles),
+            )
             mS_col[sw_idx] = Uint8(biased_exp_c)
         else:
-            mS_col[scale_row, g_col_cw] = Uint8(biased_exp_c)
+            mS_col[scale_row, col_global] = Uint8(biased_exp_c)
 
-        # 3. Scale + FP8 cast → output smem
+        # 3. scale + FP8 cast → gmem (one byte per (row, tidx)).
         inv_scale_c = exp2f_rcp(biased_exp_c)
         for i in cutlass.range_constexpr(SCALE_DIM):
-            val = Float32(sX[i, tidx_local])
-            sO_col[i, tidx_local] = Uint8(cvt_f32_to_fp8e4m3(val * inv_scale_c))
+            v = Float32(sX_flat[i, tidx])
+            mO_col[base_row + i, col_global] = Uint8(
+                cvt_f32_to_fp8e4m3(v * inv_scale_c)
+            )
 
     @cute.jit
-    def _compute_stage_rowwise(
-        self, sX, sO_row, mS_row,
-        base_row, bidx, tid_Y_row, tid_X_row,
-        bank_group, max_norm_rcp,
+    def _process_rowwise(
+        self,
+        sX_tile,        # (TILE_Y, TILE_X) bf16/fp16 smem view, post-TMA
+        sO_row_tile,    # (TILE_Y, TILE_X) uint8 smem view (rowwise FP8 output)
+        base_row,       # Int32: global Y offset of this tile's first row
+        bidx,           # Int32: block X index (column tile)
+        tidx,           # Int32: thread index within the CTA
+        mS_row,         # rowwise scale tensor (1D swizzled, or 2D linear)
+        max_norm_rcp,
     ):
-        """Rowwise pass: thread (tid_Y, tid_X) owns one 32-element scale block.
+        """Rowwise MXFP8 pass: thread `(tid_Y, tid_X) = (tidx % 32, tidx // 32)`
+        owns one 32-element scale block (row `tid_Y`, columns `tid_X*32 .. +32`).
 
-        Reads 8 waves × 4 elements with bank-group swizzle to avoid smem bank
-        conflicts.  Uses 2-wide FP8 conversion (cvt.rn.satfinite.e4m3x2.f32).
+        The bank-group swizzle `((w + bank_group) * PACK_SIZE) % SCALE_DIM`
+        staggers each 4-thread group's starting wave, which otherwise would
+        collide on smem banks since all lanes in a warp read different rows
+        at the same column offset.
+
+        Writes quantized bytes into `sO_row_tile` as u32s (one per wave);
+        caller is responsible for the TMA S2G flush.
         """
         cfg = self.cfg
-        g_row_rw  = base_row + tid_Y_row
-        scale_col = bidx * THREADS_X + tid_X_row
-        col_start = tid_X_row * SCALE_DIM
 
-        # 1. Amax over 8 waves × 4 elements (bank-conflict-free order)
+        # Reinterpret (32,64) bf16 input as (32, 2, 32) so thread (tid_Y, tid_X)
+        # slices sX_rw[tid_Y, tid_X, :] for its 32-element scaling block.
+        sX_rw = cute.make_tensor(
+            sX_tile.iterator,
+            cute.make_layout(
+                (TILE_Y, 2, SCALE_DIM),
+                stride=(TILE_X, SCALE_DIM, 1),
+            ),
+        )
+
+        tid_Y = tidx % 32
+        tid_X = tidx // 32
+        bank_group = tid_Y // THREADS_PER_BANK
+
+        global_row = base_row + tid_Y
+        scale_col = bidx * 2 + tid_X
+        col_base_local = tid_X * SCALE_DIM
+
+        # Uint32 view of the rowwise output smem tile. Each wave (4 fp8
+        # bytes) gets written as ONE st.shared.u32 instead of four u8
+        # stores — matches the C++ reference's `Vec<OType2, 2>::store_to`.
+        sO_u32_ptr = cute.recast_ptr(sO_row_tile.iterator, dtype=Uint32)
+        sO_u32 = cute.make_tensor(
+            sO_u32_ptr,
+            cute.make_layout(
+                (TILE_Y, TILE_X // 4), stride=(TILE_X // 4, 1),
+            ),
+        )
+
+        # 1. amax over 8 waves × 4 elements with bank-group swizzle.
         amax_r = Float32(0.0)
         for w in cutlass.range_constexpr(WAVES):
-            swizzled_grp = ((w + bank_group) * PACK_SIZE) % SCALE_DIM
+            swz = ((w + bank_group) * PACK_SIZE) % SCALE_DIM
             for e in cutlass.range_constexpr(PACK_SIZE):
-                val = Float32(sX[tid_Y_row, col_start + swizzled_grp + e])
-                amax_r = cute.arch.fmax(amax_r, fabs_f32(val))
+                v = Float32(sX_rw[tid_Y, tid_X, swz + e])
+                amax_r = cute.arch.fmax(amax_r, fabs_f32(v))
 
-        # 2. E8M0 scale → gmem
+        # 2. E8M0 scale → gmem.
         biased_exp_r = float_to_e8m0(amax_r * max_norm_rcp)
         if cutlass.const_expr(cfg.with_gemm_swizzled_scales):
             num_col_tiles = (cfg.N + 127) // 128
-            sw_idx = gemm_swizzled_scale_idx(g_row_rw, scale_col,
-                                              Int32(num_col_tiles))
+            sw_idx = gemm_swizzled_scale_idx(
+                Int32(global_row), Int32(scale_col), Int32(num_col_tiles),
+            )
             mS_row[sw_idx] = Uint8(biased_exp_r)
         else:
-            mS_row[g_row_rw, scale_col] = Uint8(biased_exp_r)
+            mS_row[global_row, scale_col] = Uint8(biased_exp_r)
 
-        # 3. Scale + 2-wide FP8 cast → output smem (swizzled writes)
+        # 3. scale + packed fp8 cast → smem as one u32 per wave.
+        # cvt PTX semantics: `cvt.rn.satfinite.e4m3x2.f32 d, a, b` gives
+        # d[15:8]=fp8(a), d[7:0]=fp8(b). We want little-endian bytes
+        # [fp8(v0), fp8(v1), fp8(v2), fp8(v3)] for a contiguous 4-byte store,
+        # so pass (v1, v0) → low u16 has byte[0]=fp8(v0), byte[1]=fp8(v1);
+        # similarly (v3, v2) for the high u16.
         inv_scale_r = exp2f_rcp(biased_exp_r)
         for w in cutlass.range_constexpr(WAVES):
-            swizzled_grp = ((w + bank_group) * PACK_SIZE) % SCALE_DIM
-            for e in cutlass.range_constexpr(PACK_SIZE // 2):
-                v0 = Float32(sX[tid_Y_row, col_start + swizzled_grp + 2 * e])
-                v1 = Float32(sX[tid_Y_row, col_start + swizzled_grp + 2 * e + 1])
-                packed = cvt_f32x2_to_fp8e4m3x2(v0 * inv_scale_r,
-                                                 v1 * inv_scale_r)
-                sO_row[tid_Y_row, col_start + swizzled_grp + 2 * e] = Uint8(
-                    packed >> Int32(8))
-                sO_row[tid_Y_row, col_start + swizzled_grp + 2 * e + 1] = Uint8(
-                    packed & Int32(0xFF))
-
-    @cute.jit
-    def _flush_output_smem(
-        self, sO_row, sO_col, mO_row, mO_col,
-        base_row, block_off_X, tidx,
-    ):
-        """Coalesced smem→gmem flush via 128-bit vectorized stores.
-
-        Lowers to `st.global.v4.b32` (STG.E.128): 16 B/thread per atom.
-        Tile = 32×64 uint8 = 2048 B; 64 threads × 32 B = 2 atoms/thread.
-        Thread grid (16,4), val (2,16) → each thread writes 16 contiguous
-        bytes in each of 2 rows.
-        """
-        cfg = self.cfg
-
-        thr_layout = cute.make_layout((16, 4), stride=(4, 1))
-        val_layout = cute.make_layout((2, 16), stride=(16, 1))
-        copy_atom = cute.make_copy_atom(
-            cute.nvgpu.CopyUniversalOp(), Uint8,
-            num_bits_per_copy=128,
-        )
-        tiled_copy = cute.make_tiled_copy_tv(copy_atom, thr_layout, val_layout)
-        thr_copy = tiled_copy.get_slice(tidx)
-
-        tiler = (BUFF_DIM_Y, BUFF_DIM_X)
-        tile_y = base_row // BUFF_DIM_Y
-        tile_x = block_off_X // BUFF_DIM_X
-
-        if cutlass.const_expr(cfg.rowwise):
-            gO_row = cute.local_tile(mO_row, tiler, (tile_y, tile_x))
-            cute.copy(copy_atom,
-                      thr_copy.partition_S(sO_row),
-                      thr_copy.partition_D(gO_row))
-
-        if cutlass.const_expr(cfg.colwise):
-            gO_col = cute.local_tile(mO_col, tiler, (tile_y, tile_x))
-            cute.copy(copy_atom,
-                      thr_copy.partition_S(sO_col),
-                      thr_copy.partition_D(gO_col))
+            swz = ((w + bank_group) * PACK_SIZE) % SCALE_DIM
+            v0 = Float32(sX_rw[tid_Y, tid_X, swz + 0]) * inv_scale_r
+            v1 = Float32(sX_rw[tid_Y, tid_X, swz + 1]) * inv_scale_r
+            v2 = Float32(sX_rw[tid_Y, tid_X, swz + 2]) * inv_scale_r
+            v3 = Float32(sX_rw[tid_Y, tid_X, swz + 3]) * inv_scale_r
+            p01 = cvt_f32x2_to_fp8e4m3x2(v1, v0)  # u16 little-endian: v0,v1
+            p23 = cvt_f32x2_to_fp8e4m3x2(v3, v2)  # u16 little-endian: v2,v3
+            quad = (p23 << Int32(16)) | p01
+            sO_u32[tid_Y, (col_base_local + swz) // 4] = Uint32(quad)
 
 
 # ---------------------------------------------------------------------------
@@ -631,7 +635,7 @@ def _get_compiled_kernel(cfg, stream):
     if key not in _compile_cache:
         kernel_obj = MXFP8QuantizeSmemKernel(cfg)
         u8_ptr = make_ptr(Uint8, 16, cute.AddressSpace.gmem, assumed_align=16)
-        compiled = cute.compile(
+        compiled = cute.compile[(GPUArch("sm_100a"),)](
             kernel_obj,
             make_ptr(cfg.dtype, 16, cute.AddressSpace.gmem, assumed_align=16),
             u8_ptr, u8_ptr,   # rowwise data, scale
@@ -660,11 +664,12 @@ def quantize_mxfp8_cutedsl(
     with_gemm_swizzled_scales: bool = False,
 ) -> dict:
     """Quantize a 2D tensor to MXFP8 format using CuTeDSL kernels with smem tiling."""
+    # print(f"Input tensor: shape={x.shape}, dtype={x.dtype}, device={x.device}")
     assert x.is_cuda and x.is_contiguous() and x.ndim == 2
     M, N = x.shape
     assert rowwise or colwise
-    # assert M % CHUNK_DIM_Y == 0, f"M={M} must be a multiple of {CHUNK_DIM_Y}"
-    # assert N % CHUNK_DIM_X == 0, f"N={N} must be a multiple of {CHUNK_DIM_X}"
+    assert M % TILE_Y == 0, f"M={M} must be a multiple of {TILE_Y}"
+    assert N % TILE_X == 0, f"N={N} must be a multiple of {TILE_X}"
 
     cutlass_dtype = _torch_to_cutlass_dtype[x.dtype]
     max_norm_rcp = FP8E4M3_MAX_NORM_RCP if fp8_dtype == "e4m3" else FP8E5M2_MAX_NORM_RCP
