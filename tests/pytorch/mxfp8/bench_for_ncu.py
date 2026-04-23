@@ -16,7 +16,7 @@ import transformer_engine.pytorch as te  # noqa: F401  (import registers the ext
 import transformer_engine_torch as tex
 from transformer_engine.pytorch import MXFP8Quantizer
 
-from quantize_mxfp8_cutedsl_alt_swizzling import quantize_mxfp8_cutedsl
+from quantize_mxfp8_cutedsl_alt import quantize_mxfp8_cutedsl
 from bench_mxfp8_cutedsl import parse_shapes
 
 
