@@ -506,11 +506,14 @@ class MXFP8QuantizeSmemKernel:
             cute.make_layout((TILE_Y, TILE_X), stride=(TILE_X, 1)),
         )
 
+        # 0. Load the 32-element column from smem into registers once (matches
+        # C++'s `in_colwise_IType[i]` cache). Amax and cast both reuse these.
+        in_c = [Float32(sX_flat[i, tidx]) for i in range(SCALE_DIM)]
+
         # 1. amax over the 32-element column.
         amax_c = Float32(0.0)
         for i in cutlass.range_constexpr(SCALE_DIM):
-            v = Float32(sX_flat[i, tidx])
-            amax_c = cute.arch.fmax(amax_c, fabs_f32(v))
+            amax_c = cute.arch.fmax(amax_c, fabs_f32(in_c[i]))
 
         # 2. E8M0 scale → gmem.
         biased_exp_c = float_to_e8m0(amax_c * max_norm_rcp)
@@ -527,9 +530,8 @@ class MXFP8QuantizeSmemKernel:
         # 3. scale + FP8 cast → gmem (one byte per (row, tidx)).
         inv_scale_c = exp2f_rcp(biased_exp_c)
         for i in cutlass.range_constexpr(SCALE_DIM):
-            v = Float32(sX_flat[i, tidx])
             mO_col[base_row + i, col_global] = Uint8(
-                cvt_f32_to_fp8e4m3(v * inv_scale_c)
+                cvt_f32_to_fp8e4m3(in_c[i] * inv_scale_c)
             )
 
     @cute.jit
@@ -585,13 +587,20 @@ class MXFP8QuantizeSmemKernel:
             ),
         )
 
-        # 1. amax over 8 waves × 4 elements with bank-group swizzle.
-        amax_r = Float32(0.0)
+        # 0. Load this thread's 32 bf16 elements from smem into registers once
+        # (matches C++'s `in_IType[w]` cache). Amax and cast both reuse these.
+        # in_r[w][e] corresponds to sX_rw[tid_Y, tid_X, swz(w) + e].
+        in_r = [[None] * PACK_SIZE for _ in range(WAVES)]
         for w in cutlass.range_constexpr(WAVES):
             swz = ((w + bank_group) * PACK_SIZE) % SCALE_DIM
             for e in cutlass.range_constexpr(PACK_SIZE):
-                v = Float32(sX_rw[tid_Y, tid_X, swz + e])
-                amax_r = cute.arch.fmax(amax_r, fabs_f32(v))
+                in_r[w][e] = Float32(sX_rw[tid_Y, tid_X, swz + e])
+
+        # 1. amax over 8 waves × 4 elements with bank-group swizzle.
+        amax_r = Float32(0.0)
+        for w in cutlass.range_constexpr(WAVES):
+            for e in cutlass.range_constexpr(PACK_SIZE):
+                amax_r = cute.arch.fmax(amax_r, fabs_f32(in_r[w][e]))
 
         # 2. E8M0 scale → gmem.
         biased_exp_r = float_to_e8m0(amax_r * max_norm_rcp)
@@ -613,10 +622,10 @@ class MXFP8QuantizeSmemKernel:
         inv_scale_r = exp2f_rcp(biased_exp_r)
         for w in cutlass.range_constexpr(WAVES):
             swz = ((w + bank_group) * PACK_SIZE) % SCALE_DIM
-            v0 = Float32(sX_rw[tid_Y, tid_X, swz + 0]) * inv_scale_r
-            v1 = Float32(sX_rw[tid_Y, tid_X, swz + 1]) * inv_scale_r
-            v2 = Float32(sX_rw[tid_Y, tid_X, swz + 2]) * inv_scale_r
-            v3 = Float32(sX_rw[tid_Y, tid_X, swz + 3]) * inv_scale_r
+            v0 = in_r[w][0] * inv_scale_r
+            v1 = in_r[w][1] * inv_scale_r
+            v2 = in_r[w][2] * inv_scale_r
+            v3 = in_r[w][3] * inv_scale_r
             p01 = cvt_f32x2_to_fp8e4m3x2(v1, v0)  # u16 little-endian: v0,v1
             p23 = cvt_f32x2_to_fp8e4m3x2(v3, v2)  # u16 little-endian: v2,v3
             quad = (p23 << Int32(16)) | p01
