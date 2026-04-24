@@ -684,9 +684,14 @@ class MXFP8QuantizeSmemKernel:
         """
         cfg = self.cfg
 
-        tid_Y = tidx % 32
-        tid_X = tidx // 32
-        bank_group = tid_Y // THREADS_PER_BANK
+        # Match the C++ reference's thread layout: pairs of adjacent lanes
+        # share a row (lanes 2k / 2k+1 both own row k), each pair covering
+        # the two 32-element scale blocks of that row. `bank_group` still
+        # keys on the raw warp lane, not on tid_Y.
+        thread_lane = tidx % THREADS_PER_WARP
+        tid_Y = tidx // 2
+        tid_X = tidx % 2
+        bank_group = thread_lane // THREADS_PER_BANK
 
         global_row = base_row + tid_Y
         scale_col = bidx * 2 + tid_X
