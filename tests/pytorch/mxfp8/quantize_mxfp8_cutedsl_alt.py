@@ -31,7 +31,7 @@ import cutlass
 import cutlass.cute as cute
 import cutlass.utils as utils
 import cutlass.pipeline as pipeline
-from cutlass import Float32, Int32, Int16, Uint8, Uint32
+from cutlass import Float32, Int64, Int32, Int16, Uint8, Uint32
 from cutlass._mlir.dialects import arith as mlir_arith
 from cutlass._mlir.dialects import llvm
 from cutlass.base_dsl.compiler import GPUArch
@@ -184,6 +184,57 @@ def bf16x2_hi_to_f32(bits: Int32, *, loc=None, ip=None) -> Float32:
     return _bitcast_i32_to_f32(
         (bits >> Int32(16)) << Int32(16), loc=loc, ip=ip,
     )
+
+
+@dsl_user_op
+def pack_f32x2(lo: Float32, hi: Float32, *, loc=None, ip=None) -> Int64:
+    """Pack two f32 scalars into a single 64-bit register (`floatx2` layout).
+
+    Low 32 bits = `lo`, high 32 bits = `hi`. Uses `mov.b64 %dst, {%lo, %hi};`
+    which lowers to a single register move — no actual memory traffic.
+    """
+    return Int64(llvm.inline_asm(
+        T.i64(),
+        [lo.ir_value(loc=loc, ip=ip), hi.ir_value(loc=loc, ip=ip)],
+        "mov.b64 $0, {$1, $2};",
+        "=l,f,f", has_side_effects=False, is_align_stack=False,
+        asm_dialect=llvm.AsmDialect.AD_ATT))
+
+
+@dsl_user_op
+def mul_cvt_bf16x2_to_fp8e4m3x2(val_2x: Int32, scale_2x: Int64,
+                                 *, loc=None, ip=None) -> Int32:
+    """Fused `bf16x2 * f32x2 → fp8e4m3x2` — matches `ptx::mul_cvt_2x` in
+    `transformer_engine/common/util/ptx.cuh`.
+
+    - `val_2x`: packed bf16x2 (Int32), low 16 bits = element A, high = B.
+    - `scale_2x`: packed f32x2 (Int64), low 32 = s_A, high 32 = s_B.
+    - Returns Int32 whose low 16 bits are an fp8x2 in little-endian byte
+      order: byte[0] = fp8(A * s_A), byte[1] = fp8(B * s_B). High 16 = 0.
+
+    Internally unpacks the bf16x2, widens each half to f32, does a `mul.f32x2`
+    with the scale pair, then a 2-wide satfinite cvt to e4m3x2 — all in one
+    inline-asm block so the compiler keeps the intermediate values in regs.
+    """
+    result_i16 = Int16(llvm.inline_asm(
+        T.i16(),
+        [val_2x.ir_value(loc=loc, ip=ip), scale_2x.ir_value(loc=loc, ip=ip)],
+        "{\n"
+        ".reg.b64 vp0; .reg.b64 vp1;\n\t"
+        ".reg.b32 v1;  .reg.b32 v2;\n\t"
+        ".reg.b16 vb1; .reg.b16 vb2;\n\t"
+        "mov.b32 {vb1, vb2}, $1;\n\t"
+        "cvt.f32.bf16 v1, vb1;\n\t"
+        "cvt.f32.bf16 v2, vb2;\n\t"
+        "mov.b64 vp0, {v1, v2};\n\t"
+        "mul.f32x2 vp1, vp0, $2;\n\t"
+        "mov.b64 {v2, v1}, vp1;\n\t"
+        "cvt.rn.satfinite.e4m3x2.f32 $0, v1, v2;\n\t"
+        "}",
+        "=h,r,l", has_side_effects=False, is_align_stack=False,
+        asm_dialect=llvm.AsmDialect.AD_ATT))
+    return Int32(mlir_arith.extui(
+        T.i32(), result_i16.ir_value(loc=loc, ip=ip), loc=loc, ip=ip))
 
 
 @dsl_user_op
@@ -711,28 +762,29 @@ class MXFP8QuantizeSmemKernel:
             mS_row[global_row, scale_col] = Uint8(biased_exp_r)
 
         # 3. scale + packed fp8 cast → smem as one u32 per wave.
-        # cvt PTX semantics: `cvt.rn.satfinite.e4m3x2.f32 d, a, b` gives
-        # d[15:8]=fp8(a), d[7:0]=fp8(b). We want little-endian bytes
-        # [fp8(v0), fp8(v1), fp8(v2), fp8(v3)] for a contiguous 4-byte store,
-        # so pass (v1, v0) → low u16 has byte[0]=fp8(v0), byte[1]=fp8(v1);
-        # similarly (v3, v2) for the high u16.
         inv_scale_r = exp2f_rcp(biased_exp_r)
+        if cutlass.const_expr(cfg.dtype is cutlass.BFloat16):
+            # Pack `(inv_scale_r, inv_scale_r)` as a single 64-bit f32x2 once;
+            # the per-wave mul_cvt consumes this directly.
+            scale_2x = pack_f32x2(inv_scale_r, inv_scale_r)
+
         for w in cutlass.range_constexpr(WAVES):
             swz = ((w + bank_group) * PACK_SIZE) % SCALE_DIM
             if cutlass.const_expr(cfg.dtype is cutlass.BFloat16):
-                # Unpack bf16x2 cache → 4 f32 lanes. Step 3 will replace this
-                # with a fused bf16x2 × f32x2 → fp8x2 intrinsic (`mul_cvt_2x`).
-                v0 = bf16x2_lo_to_f32(in_r[w][0]) * inv_scale_r
-                v1 = bf16x2_hi_to_f32(in_r[w][0]) * inv_scale_r
-                v2 = bf16x2_lo_to_f32(in_r[w][1]) * inv_scale_r
-                v3 = bf16x2_hi_to_f32(in_r[w][1]) * inv_scale_r
+                # One fused PTX per bf16x2 pair: bf16x2 × f32x2 → fp8x2.
+                # Byte layout: byte[0]=fp8(lo_bf16 * s), byte[1]=fp8(hi_bf16 * s).
+                p01 = mul_cvt_bf16x2_to_fp8e4m3x2(in_r[w][0], scale_2x)
+                p23 = mul_cvt_bf16x2_to_fp8e4m3x2(in_r[w][1], scale_2x)
             else:
+                # cvt PTX semantics: `cvt.rn.satfinite.e4m3x2.f32 d, a, b` gives
+                # d[15:8]=fp8(a), d[7:0]=fp8(b). Pass (v1, v0) so the u16 low
+                # byte ends up as fp8(v0) and the high byte as fp8(v1).
                 v0 = in_r[w][0] * inv_scale_r
                 v1 = in_r[w][1] * inv_scale_r
                 v2 = in_r[w][2] * inv_scale_r
                 v3 = in_r[w][3] * inv_scale_r
-            p01 = cvt_f32x2_to_fp8e4m3x2(v1, v0)  # u16 little-endian: v0,v1
-            p23 = cvt_f32x2_to_fp8e4m3x2(v3, v2)  # u16 little-endian: v2,v3
+                p01 = cvt_f32x2_to_fp8e4m3x2(v1, v0)  # u16 little-endian: v0,v1
+                p23 = cvt_f32x2_to_fp8e4m3x2(v3, v2)  # u16 little-endian: v2,v3
             quad = (p23 << Int32(16)) | p01
             sO_u32[tid_Y, (col_base_local + swz) // 4] = Uint32(quad)
 
