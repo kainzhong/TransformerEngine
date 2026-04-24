@@ -133,6 +133,60 @@ def cvt_f32_to_fp8e4m3(val: Float32, *, loc=None, ip=None) -> Int32:
 
 
 @dsl_user_op
+def abs_max_bf16x2(a: Int32, b: Int32, *, loc=None, ip=None) -> Int32:
+    """`max.xorsign.abs.bf16x2` — fused abs+max across two packed bf16 pairs.
+
+    Takes two Int32s holding bf16x2 (low 16 bits = first bf16, high 16 bits =
+    second), returns Int32 where each lane is max(|a|, |b|) in bf16. The sign
+    of each output lane is `sign(a) XOR sign(b)` (the "xorsign" semantics) —
+    callers must abs the final accumulator before interpreting the magnitude.
+    """
+    return Int32(llvm.inline_asm(
+        T.i32(),
+        [a.ir_value(loc=loc, ip=ip), b.ir_value(loc=loc, ip=ip)],
+        "max.xorsign.abs.bf16x2 $0, $1, $2;",
+        "=r,r,r", has_side_effects=False, is_align_stack=False,
+        asm_dialect=llvm.AsmDialect.AD_ATT))
+
+
+@dsl_user_op
+def abs_max_bf16(a: Int16, b: Int16, *, loc=None, ip=None) -> Int16:
+    """`max.xorsign.abs.bf16` — scalar-bf16 variant of the above."""
+    return Int16(llvm.inline_asm(
+        T.i16(),
+        [a.ir_value(loc=loc, ip=ip), b.ir_value(loc=loc, ip=ip)],
+        "max.xorsign.abs.bf16 $0, $1, $2;",
+        "=h,h,h", has_side_effects=False, is_align_stack=False,
+        asm_dialect=llvm.AsmDialect.AD_ATT))
+
+
+@dsl_user_op
+def bf16_bits_to_f32(bits: Int16, *, loc=None, ip=None) -> Float32:
+    """Interpret 16 raw bits as bf16 and widen to f32 (place in top 16 of f32)."""
+    i32 = Int32(mlir_arith.extui(
+        T.i32(), bits.ir_value(loc=loc, ip=ip), loc=loc, ip=ip))
+    return _bitcast_i32_to_f32(i32 << Int32(16), loc=loc, ip=ip)
+
+
+@dsl_user_op
+def bf16x2_lo_to_f32(bits: Int32, *, loc=None, ip=None) -> Float32:
+    """Extract the low bf16 lane of a packed bf16x2 Int32 and widen to f32."""
+    return _bitcast_i32_to_f32(
+        (bits & Int32(0xFFFF)) << Int32(16), loc=loc, ip=ip,
+    )
+
+
+@dsl_user_op
+def bf16x2_hi_to_f32(bits: Int32, *, loc=None, ip=None) -> Float32:
+    """Extract the high bf16 lane of a packed bf16x2 Int32 and widen to f32."""
+    # (x >> 16) << 16 is equivalent to `x & 0xFFFF0000` and sidesteps signed
+    # literal issues. Arithmetic-right sign bits get zeroed by the left shift.
+    return _bitcast_i32_to_f32(
+        (bits >> Int32(16)) << Int32(16), loc=loc, ip=ip,
+    )
+
+
+@dsl_user_op
 def cvt_f32x2_to_fp8e4m3x2(val_hi: Float32, val_lo: Float32,
                              *, loc=None, ip=None) -> Int32:
     """Convert two float32 values to two packed fp8e4m3fn bytes in one instruction.
@@ -508,12 +562,26 @@ class MXFP8QuantizeSmemKernel:
 
         # 0. Load the 32-element column from smem into registers once (matches
         # C++'s `in_colwise_IType[i]` cache). Amax and cast both reuse these.
-        in_c = [Float32(sX_flat[i, tidx]) for i in range(SCALE_DIM)]
+        # For bf16 input we stash raw bf16 bits and run amax in bf16 via
+        # `max.xorsign.abs.bf16`; otherwise fall back to the f32 path.
+        if cutlass.const_expr(cfg.dtype is cutlass.BFloat16):
+            sX_i16 = cute.make_tensor(
+                cute.recast_ptr(sX_tile.iterator, dtype=Int16),
+                cute.make_layout((TILE_Y, TILE_X), stride=(TILE_X, 1)),
+            )
+            in_c = [sX_i16[i, tidx] for i in range(SCALE_DIM)]
 
-        # 1. amax over the 32-element column.
-        amax_c = Float32(0.0)
-        for i in cutlass.range_constexpr(SCALE_DIM):
-            amax_c = cute.arch.fmax(amax_c, fabs_f32(in_c[i]))
+            # 1. bf16 amax — one PTX per element. Sign drifts (xorsign); take
+            # fabs once at the end to recover the magnitude in f32.
+            amax_bf16 = Int16(0)
+            for i in cutlass.range_constexpr(SCALE_DIM):
+                amax_bf16 = abs_max_bf16(amax_bf16, in_c[i])
+            amax_c = fabs_f32(bf16_bits_to_f32(amax_bf16))
+        else:
+            in_c = [Float32(sX_flat[i, tidx]) for i in range(SCALE_DIM)]
+            amax_c = Float32(0.0)
+            for i in cutlass.range_constexpr(SCALE_DIM):
+                amax_c = cute.arch.fmax(amax_c, fabs_f32(in_c[i]))
 
         # 2. E8M0 scale → gmem.
         biased_exp_c = float_to_e8m0(amax_c * max_norm_rcp)
@@ -529,10 +597,17 @@ class MXFP8QuantizeSmemKernel:
 
         # 3. scale + FP8 cast → gmem (one byte per (row, tidx)).
         inv_scale_c = exp2f_rcp(biased_exp_c)
-        for i in cutlass.range_constexpr(SCALE_DIM):
-            mO_col[base_row + i, col_global] = Uint8(
-                cvt_f32_to_fp8e4m3(in_c[i] * inv_scale_c)
-            )
+        if cutlass.const_expr(cfg.dtype is cutlass.BFloat16):
+            for i in cutlass.range_constexpr(SCALE_DIM):
+                v_f32 = bf16_bits_to_f32(in_c[i])
+                mO_col[base_row + i, col_global] = Uint8(
+                    cvt_f32_to_fp8e4m3(v_f32 * inv_scale_c)
+                )
+        else:
+            for i in cutlass.range_constexpr(SCALE_DIM):
+                mO_col[base_row + i, col_global] = Uint8(
+                    cvt_f32_to_fp8e4m3(in_c[i] * inv_scale_c)
+                )
 
     @cute.jit
     def _process_rowwise(
@@ -558,16 +633,6 @@ class MXFP8QuantizeSmemKernel:
         """
         cfg = self.cfg
 
-        # Reinterpret (32,64) bf16 input as (32, 2, 32) so thread (tid_Y, tid_X)
-        # slices sX_rw[tid_Y, tid_X, :] for its 32-element scaling block.
-        sX_rw = cute.make_tensor(
-            sX_tile.iterator,
-            cute.make_layout(
-                (TILE_Y, 2, SCALE_DIM),
-                stride=(TILE_X, SCALE_DIM, 1),
-            ),
-        )
-
         tid_Y = tidx % 32
         tid_X = tidx // 32
         bank_group = tid_Y // THREADS_PER_BANK
@@ -587,20 +652,52 @@ class MXFP8QuantizeSmemKernel:
             ),
         )
 
-        # 0. Load this thread's 32 bf16 elements from smem into registers once
-        # (matches C++'s `in_IType[w]` cache). Amax and cast both reuse these.
-        # in_r[w][e] corresponds to sX_rw[tid_Y, tid_X, swz(w) + e].
-        in_r = [[None] * PACK_SIZE for _ in range(WAVES)]
-        for w in cutlass.range_constexpr(WAVES):
-            swz = ((w + bank_group) * PACK_SIZE) % SCALE_DIM
-            for e in cutlass.range_constexpr(PACK_SIZE):
-                in_r[w][e] = Float32(sX_rw[tid_Y, tid_X, swz + e])
+        if cutlass.const_expr(cfg.dtype is cutlass.BFloat16):
+            # Read 4 consecutive bf16s per wave as TWO packed bf16x2 Int32s;
+            # each ld.shared.b32 covers 2 bf16 elements. The cache `in_r[w][k]`
+            # is an Int32 where low-half = element 2k, high-half = element 2k+1.
+            sX_rw_i32 = cute.make_tensor(
+                cute.recast_ptr(sX_tile.iterator, dtype=Int32),
+                cute.make_layout(
+                    (TILE_Y, 2, SCALE_DIM // 2),
+                    stride=(TILE_X // 2, SCALE_DIM // 2, 1),
+                ),
+            )
+            # 0. Load bf16x2 cache.
+            in_r = [[None, None] for _ in range(WAVES)]
+            for w in cutlass.range_constexpr(WAVES):
+                swz = ((w + bank_group) * PACK_SIZE) % SCALE_DIM
+                in_r[w][0] = sX_rw_i32[tid_Y, tid_X, swz // 2 + 0]
+                in_r[w][1] = sX_rw_i32[tid_Y, tid_X, swz // 2 + 1]
 
-        # 1. amax over 8 waves × 4 elements with bank-group swizzle.
-        amax_r = Float32(0.0)
-        for w in cutlass.range_constexpr(WAVES):
-            for e in cutlass.range_constexpr(PACK_SIZE):
-                amax_r = cute.arch.fmax(amax_r, fabs_f32(in_r[w][e]))
+            # 1. bf16x2 amax — 2 PTX per wave, 16 total per thread. Accumulates
+            # `|elt|` in both lanes (with xorsign-drifted signs); final
+            # horizontal max reduces the two bf16 lanes to a single f32.
+            amax_2x = Int32(0)
+            for w in cutlass.range_constexpr(WAVES):
+                amax_2x = abs_max_bf16x2(amax_2x, in_r[w][0])
+                amax_2x = abs_max_bf16x2(amax_2x, in_r[w][1])
+            amax_r = cute.arch.fmax(
+                fabs_f32(bf16x2_lo_to_f32(amax_2x)),
+                fabs_f32(bf16x2_hi_to_f32(amax_2x)),
+            )
+        else:
+            sX_rw = cute.make_tensor(
+                sX_tile.iterator,
+                cute.make_layout(
+                    (TILE_Y, 2, SCALE_DIM),
+                    stride=(TILE_X, SCALE_DIM, 1),
+                ),
+            )
+            in_r = [[None] * PACK_SIZE for _ in range(WAVES)]
+            for w in cutlass.range_constexpr(WAVES):
+                swz = ((w + bank_group) * PACK_SIZE) % SCALE_DIM
+                for e in cutlass.range_constexpr(PACK_SIZE):
+                    in_r[w][e] = Float32(sX_rw[tid_Y, tid_X, swz + e])
+            amax_r = Float32(0.0)
+            for w in cutlass.range_constexpr(WAVES):
+                for e in cutlass.range_constexpr(PACK_SIZE):
+                    amax_r = cute.arch.fmax(amax_r, fabs_f32(in_r[w][e]))
 
         # 2. E8M0 scale → gmem.
         biased_exp_r = float_to_e8m0(amax_r * max_norm_rcp)
@@ -622,10 +719,18 @@ class MXFP8QuantizeSmemKernel:
         inv_scale_r = exp2f_rcp(biased_exp_r)
         for w in cutlass.range_constexpr(WAVES):
             swz = ((w + bank_group) * PACK_SIZE) % SCALE_DIM
-            v0 = in_r[w][0] * inv_scale_r
-            v1 = in_r[w][1] * inv_scale_r
-            v2 = in_r[w][2] * inv_scale_r
-            v3 = in_r[w][3] * inv_scale_r
+            if cutlass.const_expr(cfg.dtype is cutlass.BFloat16):
+                # Unpack bf16x2 cache → 4 f32 lanes. Step 3 will replace this
+                # with a fused bf16x2 × f32x2 → fp8x2 intrinsic (`mul_cvt_2x`).
+                v0 = bf16x2_lo_to_f32(in_r[w][0]) * inv_scale_r
+                v1 = bf16x2_hi_to_f32(in_r[w][0]) * inv_scale_r
+                v2 = bf16x2_lo_to_f32(in_r[w][1]) * inv_scale_r
+                v3 = bf16x2_hi_to_f32(in_r[w][1]) * inv_scale_r
+            else:
+                v0 = in_r[w][0] * inv_scale_r
+                v1 = in_r[w][1] * inv_scale_r
+                v2 = in_r[w][2] * inv_scale_r
+                v3 = in_r[w][3] * inv_scale_r
             p01 = cvt_f32x2_to_fp8e4m3x2(v1, v0)  # u16 little-endian: v0,v1
             p23 = cvt_f32x2_to_fp8e4m3x2(v3, v2)  # u16 little-endian: v2,v3
             quad = (p23 << Int32(16)) | p01
