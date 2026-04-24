@@ -554,15 +554,16 @@ class MXFP8QuantizeSmemKernel:
                     mS_row, max_norm_rcp,
                 )
 
-            # All threads must finish reading sX[stage] and writing sO_row[stage]
-            # before (a) the signalling lane releases sX to the producer, and
-            # (b) warp 0 launches the TMA store of sO_row[stage].
-            cute.arch.sync_threads()
-
+            # The old post-compute `sync_threads` is unnecessary here:
+            #   * For rowwise, the fence_proxy + sync_threads below already
+            #     guarantees all warps finished their sO_row writes before
+            #     warp 0 issues the TMA store.
+            #   * For the consumer_release hazard, NUM_TILES == NUM_STAGES
+            #     means the producer fires all its TMAs in the prologue and
+            #     never reuses a stage, so an early empty-barrier signal from
+            #     one warp can't cause a stale read in another.
+            # Matches the C++ reference's single-barrier pattern.
             if cutlass.const_expr(cfg.rowwise):
-                # Flush generic smem stores to the async proxy so the TMA
-                # engine observes them, then block-sync so warp 0 sees the
-                # fences from all warps before issuing the bulk store.
                 cute.arch.fence_proxy(
                     cute.arch.ProxyKind.async_shared,
                     space=cute.arch.SharedSpace.shared_cta,
@@ -576,6 +577,11 @@ class MXFP8QuantizeSmemKernel:
                         tXgO_row[(None, (tile_y, bidx))],
                     )
                     cute.arch.cp_async_bulk_commit_group()
+            else:
+                # Colwise-only still needs a single block-wide sync before
+                # release so other warps finish their gmem stores while the
+                # signalling lane hasn't moved past the release point.
+                cute.arch.sync_threads()
 
             mainloop_pipeline.consumer_release(cons_state)
             cons_state.advance()
