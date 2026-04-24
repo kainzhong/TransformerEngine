@@ -744,12 +744,17 @@ class MXFP8QuantizeSmemKernel:
 
         # Match the C++ reference's thread layout: pairs of adjacent lanes
         # share a row (lanes 2k / 2k+1 both own row k), each pair covering
-        # the two 32-element scale blocks of that row. `bank_group` still
-        # keys on the raw warp lane, not on tid_Y.
-        thread_lane = tidx % THREADS_PER_WARP
-        tid_Y = tidx // 2
-        tid_X = tidx % 2
-        bank_group = thread_lane // THREADS_PER_BANK
+        # the two 32-element scale blocks of that row. Express as a cute
+        # layout mapping `(tid_Y, tid_X) -> tidx` with stride (2, 1):
+        # linear(tidx) = tid_Y*2 + tid_X, so `get_flat_coord` inverts to
+        # `(tidx // 2, tidx % 2)` — semantically clearer than the raw
+        # divmod, and readily reusable if we later partition via TiledCopy.
+        rowwise_thread_layout = cute.make_layout((TILE_Y, 2), stride=(2, 1))
+        tid_Y, tid_X = rowwise_thread_layout.get_flat_coord(tidx)
+
+        # `bank_group` still has to key on the raw warp lane — each 4-thread
+        # group shares a bank, independent of which rows those lanes own.
+        bank_group = (tidx % THREADS_PER_WARP) // THREADS_PER_BANK
 
         global_row = base_row + tid_Y
         scale_col = bidx * 2 + tid_X
