@@ -373,13 +373,16 @@ class MXFP8QuantizeSmemKernel:
             op_load, mX, smem_tile_layout, cta_tiler, num_multicast=1,
         )
 
-        # Rowwise output: TMA S2G (uint8 smem → gmem). Creating this
-        # unconditionally — if rowwise is disabled the kernel simply won't
-        # dispatch it, and the atom cost is negligible.
+        # Output: TMA S2G (uint8 smem → gmem) for both directions. Creating
+        # both atoms unconditionally — if a direction is disabled the kernel
+        # simply won't dispatch its copy, and the atom cost is negligible.
         op_store = cute.nvgpu.cpasync.CopyBulkTensorTileS2GOp()
         out_smem_layout = cute.make_ordered_layout((TILE_Y, TILE_X), order=(1, 0))
         tma_atom_out_row, tma_dst_out_row = cute.nvgpu.cpasync.make_tiled_tma_atom(
             op_store, mO_row, out_smem_layout, cta_tiler, num_multicast=1,
+        )
+        tma_atom_out_col, tma_dst_out_col = cute.nvgpu.cpasync.make_tiled_tma_atom(
+            op_store, mO_col, out_smem_layout, cta_tiler, num_multicast=1,
         )
 
         grid = [
@@ -393,6 +396,7 @@ class MXFP8QuantizeSmemKernel:
             max_norm_rcp, mX.element_type,
             tma_atom, tma_src,
             tma_atom_out_row, tma_dst_out_row,
+            tma_atom_out_col, tma_dst_out_col,
         ).launch(
             grid=grid,
             block=block,
@@ -410,20 +414,48 @@ class MXFP8QuantizeSmemKernel:
         dtype: cutlass.Constexpr[Type[cutlass.Numeric]],
         tma_atom, tma_src,
         tma_atom_out_row, tma_dst_out_row,
+        tma_atom_out_col, tma_dst_out_col,
     ):
-        @cute.struct
-        class SharedStorage:
-            mbar_storage: cute.struct.MemRange[cute.Int64, 2 * NUM_STAGES]
-            sX: cute.struct.Align[
-                cute.struct.MemRange[dtype, TILE_Y * TILE_X * NUM_STAGES], 128
-            ]
-            # Rowwise FP8 output smem (one 32×64 tile per stage). Writing the
-            # rowwise pass into smem here and flushing via TMA S2G avoids the
-            # 32-way-scattered gmem store pattern that direct writes hit
-            # because each thread owns a different row.
-            sO_row: cute.struct.Align[
-                cute.struct.MemRange[Uint8, TILE_Y * TILE_X * NUM_STAGES], 128
-            ]
+        cfg = self.cfg
+
+        # FP8 output smem, one 32×64 tile per stage per enabled direction.
+        # Allocating a dead sO_col in rowwise-only (or sO_row in colwise-only)
+        # bumps per-CTA smem from 12 KB to 16 KB, which drops occupancy and
+        # regresses the single-direction path by ~8-10% at 16384^2. Match
+        # C++ and only allocate what the active pass actually uses.
+        if cutlass.const_expr(cfg.rowwise and cfg.colwise):
+            @cute.struct
+            class SharedStorage:
+                mbar_storage: cute.struct.MemRange[cute.Int64, 2 * NUM_STAGES]
+                sX: cute.struct.Align[
+                    cute.struct.MemRange[dtype, TILE_Y * TILE_X * NUM_STAGES], 128
+                ]
+                sO_row: cute.struct.Align[
+                    cute.struct.MemRange[Uint8, TILE_Y * TILE_X * NUM_STAGES], 128
+                ]
+                sO_col: cute.struct.Align[
+                    cute.struct.MemRange[Uint8, TILE_Y * TILE_X * NUM_STAGES], 128
+                ]
+        elif cutlass.const_expr(cfg.rowwise):
+            @cute.struct
+            class SharedStorage:
+                mbar_storage: cute.struct.MemRange[cute.Int64, 2 * NUM_STAGES]
+                sX: cute.struct.Align[
+                    cute.struct.MemRange[dtype, TILE_Y * TILE_X * NUM_STAGES], 128
+                ]
+                sO_row: cute.struct.Align[
+                    cute.struct.MemRange[Uint8, TILE_Y * TILE_X * NUM_STAGES], 128
+                ]
+        else:
+            @cute.struct
+            class SharedStorage:
+                mbar_storage: cute.struct.MemRange[cute.Int64, 2 * NUM_STAGES]
+                sX: cute.struct.Align[
+                    cute.struct.MemRange[dtype, TILE_Y * TILE_X * NUM_STAGES], 128
+                ]
+                sO_col: cute.struct.Align[
+                    cute.struct.MemRange[Uint8, TILE_Y * TILE_X * NUM_STAGES], 128
+                ]
         smem = cutlass.utils.SmemAllocator()
         storage = smem.allocate(SharedStorage)
 
@@ -437,12 +469,20 @@ class MXFP8QuantizeSmemKernel:
                 stride=((TILE_X, 1), TILE_Y * TILE_X),
             )
         )
-        sO_row = storage.sO_row.get_tensor(
-            cute.make_layout(
-                ((TILE_Y, TILE_X), NUM_STAGES),
-                stride=((TILE_X, 1), TILE_Y * TILE_X),
+        if cutlass.const_expr(cfg.rowwise):
+            sO_row = storage.sO_row.get_tensor(
+                cute.make_layout(
+                    ((TILE_Y, TILE_X), NUM_STAGES),
+                    stride=((TILE_X, 1), TILE_Y * TILE_X),
+                )
             )
-        )
+        if cutlass.const_expr(cfg.colwise):
+            sO_col = storage.sO_col.get_tensor(
+                cute.make_layout(
+                    ((TILE_Y, TILE_X), NUM_STAGES),
+                    stride=((TILE_X, 1), TILE_Y * TILE_X),
+                )
+            )
 
         warp_idx = cute.arch.warp_idx()
         warp_idx = cute.arch.make_warp_uniform(warp_idx)
@@ -481,7 +521,6 @@ class MXFP8QuantizeSmemKernel:
             pipeline.PipelineUserType.Consumer, NUM_STAGES
         )
 
-        cfg = self.cfg
         M = mX.shape[0]
         N = mX.shape[1]
 
@@ -504,15 +543,25 @@ class MXFP8QuantizeSmemKernel:
             gX_tiled,
         )
 
-        # Same partitioning for rowwise S2G output: sO_row → mO_row.
-        gO_row_tiled = cute.zipped_divide(tma_dst_out_row, (TILE_Y, TILE_X))
-        tXsO_row, tXgO_row = cute.nvgpu.cpasync.tma_partition(
-            tma_atom_out_row,
-            0,
-            cute.make_layout(1),
-            sO_row,
-            gO_row_tiled,
-        )
+        # Same partitioning for S2G outputs: sO_row → mO_row and sO_col → mO_col.
+        if cutlass.const_expr(cfg.rowwise):
+            gO_row_tiled = cute.zipped_divide(tma_dst_out_row, (TILE_Y, TILE_X))
+            tXsO_row, tXgO_row = cute.nvgpu.cpasync.tma_partition(
+                tma_atom_out_row,
+                0,
+                cute.make_layout(1),
+                sO_row,
+                gO_row_tiled,
+            )
+        if cutlass.const_expr(cfg.colwise):
+            gO_col_tiled = cute.zipped_divide(tma_dst_out_col, (TILE_Y, TILE_X))
+            tXsO_col, tXgO_col = cute.nvgpu.cpasync.tma_partition(
+                tma_atom_out_col,
+                0,
+                cute.make_layout(1),
+                sO_col,
+                gO_col_tiled,
+            )
 
         # print(f"sX: {sX}\n")
         # print(f"gX_tiled: {gX_tiled}\n")
@@ -543,9 +592,10 @@ class MXFP8QuantizeSmemKernel:
             base_row = (bidy * NUM_TILES + stage) * TILE_Y
 
             if cutlass.const_expr(cfg.colwise):
+                sO_col_tile = sO_col[(None, cons_state.index)]
                 self._process_colwise(
-                    sX_tile, base_row, bidx, tidx,
-                    mO_col, mS_col, max_norm_rcp,
+                    sX_tile, sO_col_tile, base_row, bidx, tidx,
+                    mS_col, max_norm_rcp,
                 )
             if cutlass.const_expr(cfg.rowwise):
                 sO_row_tile = sO_row[(None, cons_state.index)]
@@ -554,66 +604,67 @@ class MXFP8QuantizeSmemKernel:
                     mS_row, max_norm_rcp,
                 )
 
-            # The old post-compute `sync_threads` is unnecessary here:
-            #   * For rowwise, the fence_proxy + sync_threads below already
-            #     guarantees all warps finished their sO_row writes before
-            #     warp 0 issues the TMA store.
-            #   * For the consumer_release hazard, NUM_TILES == NUM_STAGES
-            #     means the producer fires all its TMAs in the prologue and
-            #     never reuses a stage, so an early empty-barrier signal from
-            #     one warp can't cause a stale read in another.
-            # Matches the C++ reference's single-barrier pattern.
-            if cutlass.const_expr(cfg.rowwise):
-                cute.arch.fence_proxy(
-                    cute.arch.ProxyKind.async_shared,
-                    space=cute.arch.SharedSpace.shared_cta,
-                )
-                cute.arch.sync_threads()
-                if warp_idx == 0:
-                    tile_y = bidy * NUM_TILES + stage
+            # Make all smem stores (sO_row and/or sO_col) visible to the TMA
+            # async proxy, then block-sync so warp 0 sees the fences from all
+            # warps before issuing the bulk store(s). Matches the C++
+            # reference's fence_proxy + __syncthreads pattern.
+            cute.arch.fence_proxy(
+                cute.arch.ProxyKind.async_shared,
+                space=cute.arch.SharedSpace.shared_cta,
+            )
+            cute.arch.sync_threads()
+
+            if warp_idx == 0:
+                tile_y = bidy * NUM_TILES + stage
+                if cutlass.const_expr(cfg.rowwise):
                     cute.copy(
                         tma_atom_out_row,
                         tXsO_row[(None, cons_state.index)],
                         tXgO_row[(None, (tile_y, bidx))],
                     )
-                    cute.arch.cp_async_bulk_commit_group()
-            else:
-                # Colwise-only still needs a single block-wide sync before
-                # release so other warps finish their gmem stores while the
-                # signalling lane hasn't moved past the release point.
-                cute.arch.sync_threads()
+                if cutlass.const_expr(cfg.colwise):
+                    cute.copy(
+                        tma_atom_out_col,
+                        tXsO_col[(None, cons_state.index)],
+                        tXgO_col[(None, (tile_y, bidx))],
+                    )
+                cute.arch.cp_async_bulk_commit_group()
 
             mainloop_pipeline.consumer_release(cons_state)
             cons_state.advance()
 
-        # Wait for in-flight TMA stores so the data is visible to the host
-        # before the kernel returns. No-op for threads that issued nothing.
-        if cutlass.const_expr(cfg.rowwise):
-            cute.arch.cp_async_bulk_wait_group(0, read=False)
+        # Wait for in-flight TMA stores so data is visible to the host
+        # before the kernel returns.
+        cute.arch.cp_async_bulk_wait_group(0, read=False)
 
 
     @cute.jit
     def _process_colwise(
         self,
         sX_tile,        # (TILE_Y, TILE_X) bf16/fp16 smem view, post-TMA
+        sO_col_tile,    # (TILE_Y, TILE_X) uint8 smem view (colwise FP8 output)
         base_row,       # Int32: global Y offset of this tile's first row
         bidx,           # Int32: block X index (column tile)
         tidx,           # Int32: thread index within the CTA
-        mO_col,         # (M, N): colwise FP8 output
         mS_col,         # colwise scale tensor (1D swizzled, or 2D linear)
         max_norm_rcp,
     ):
         """Colwise MXFP8 pass: thread `tidx` owns column `tidx` of the (32, 64)
-        smem tile — 32 elements down. Writes fp8 bytes directly to gmem; per-warp
-        stores are already coalesced since lanes have consecutive `col_global`.
+        smem tile — 32 elements down. Writes quantized bytes into `sO_col_tile`
+        so the caller can flush with a TMA S2G — matches C++'s
+        `out_colwise_data_sh` + `cp.async.bulk.tensor.2d.shared_to_global`.
         """
         cfg = self.cfg
         block_off_X = bidx * TILE_X
         col_global = block_off_X + tidx
 
-        # Flat view (sX[(None, stage)] has nested shape ((TILE_Y, TILE_X),)).
+        # Flat views (sX[(None, stage)] has nested shape ((TILE_Y, TILE_X),)).
         sX_flat = cute.make_tensor(
             sX_tile.iterator,
+            cute.make_layout((TILE_Y, TILE_X), stride=(TILE_X, 1)),
+        )
+        sO_col_flat = cute.make_tensor(
+            sO_col_tile.iterator,
             cute.make_layout((TILE_Y, TILE_X), stride=(TILE_X, 1)),
         )
 
@@ -652,17 +703,18 @@ class MXFP8QuantizeSmemKernel:
         else:
             mS_col[scale_row, col_global] = Uint8(biased_exp_c)
 
-        # 3. scale + FP8 cast → gmem (one byte per (row, tidx)).
+        # 3. scale + FP8 cast → smem (one byte per (row, tidx)). Caller
+        # flushes the whole (TILE_Y, TILE_X) tile with a TMA S2G.
         inv_scale_c = exp2f_rcp(biased_exp_c)
         if cutlass.const_expr(cfg.dtype is cutlass.BFloat16):
             for i in cutlass.range_constexpr(SCALE_DIM):
                 v_f32 = bf16_bits_to_f32(in_c[i])
-                mO_col[base_row + i, col_global] = Uint8(
+                sO_col_flat[i, tidx] = Uint8(
                     cvt_f32_to_fp8e4m3(v_f32 * inv_scale_c)
                 )
         else:
             for i in cutlass.range_constexpr(SCALE_DIM):
-                mO_col[base_row + i, col_global] = Uint8(
+                sO_col_flat[i, tidx] = Uint8(
                     cvt_f32_to_fp8e4m3(in_c[i] * inv_scale_c)
                 )
 
