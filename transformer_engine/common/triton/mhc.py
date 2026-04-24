@@ -16,8 +16,8 @@ import triton.language as tl
 def projection_config_fwd():
     block_m = [64, 128]
     block_k = [1024]
-    step_k = [32, 64]
-    warps = [4]
+    step_k = [32, 64, 128]
+    warps = [4, 8]
     stages = [3, 4]
 
     configs = []
@@ -55,10 +55,10 @@ def projection_config_bwd():
 def _mhc_projection_fwd_fused(
     x_ptr,  # (M, K)
     phi_ptr,  # (N, K)
-    h_ptr,  # (M, 32)
+    h_ptr,  # (M, N_padded)
     ms_ptr,  # (M,)
     M,
-    N,
+    N: tl.constexpr,
     K,
     stride_xm,
     stride_xk: tl.constexpr,
@@ -83,13 +83,11 @@ def _mhc_projection_fwd_fused(
     tl.assume(stride_xk == 1)
     tl.assume(stride_phin == K)
     tl.assume(stride_phik == 1)
-    tl.assume(stride_hm == 32)
     tl.assume(stride_hn == 1)
     tl.assume(stride_ms == 1)
 
     tl.assume(BLOCK_SIZE_M % 32 == 0)
     tl.assume(BLOCK_SIZE_K % 32 == 0)
-    tl.assume(BLOCK_SIZE_N == 32)
 
     offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
     offs_n_full = tl.arange(0, BLOCK_SIZE_N)
@@ -141,7 +139,7 @@ def _mhc_projection_bwd_fused(
     grad_h_ptr,  # (M, N)
     grad_ms_ptr,  # (M,)
     M,
-    N,
+    N: tl.constexpr,
     K,
     stride_xm,
     stride_xk: tl.constexpr,
@@ -167,7 +165,6 @@ def _mhc_projection_bwd_fused(
     tl.assume(pid_k >= 0)
     tl.assume(stride_xm > 0)
     tl.assume(stride_xk == 1)
-    tl.assume(stride_grad_hm == 32)
     tl.assume(stride_grad_hn == 1)
     tl.assume(stride_phin == K)
     tl.assume(stride_phik == 1)
@@ -177,7 +174,6 @@ def _mhc_projection_bwd_fused(
 
     tl.assume(BLOCK_SIZE_M % 32 == 0)
     tl.assume(BLOCK_SIZE_K % 32 == 0)
-    tl.assume(BLOCK_SIZE_N == 32)
 
     offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
     offs_k = pid_k * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
@@ -237,20 +233,20 @@ def scale_config():
 )
 @triton.jit
 def _mhc_scale_fwd_fused(
-    h_ptr,  # (M, 2n + n^2), which is padded to (M, 32) in the last dimension
+    h_ptr,  # (M, 2n + n^2), which might be padded in the last dimension
     a_ptr,  # (3,)
     b_ptr,  # (2n + n^2)
     ms_ptr,  # (M,)
-    out_ptr,  # (M, 2n + n^2), which is padded to (M, 32) in the last dimension
+    out_ptr,  # (M, 2n + n^2), which might be padded in the last dimension
     M,
-    n,
-    stride_hm,
-    stride_hn,
-    stride_a,
-    stride_b,
-    stride_ms,
-    stride_out_m,
-    stride_out_n,
+    n: tl.constexpr,
+    stride_hm: tl.constexpr,
+    stride_hn: tl.constexpr,
+    stride_a: tl.constexpr,
+    stride_b: tl.constexpr,
+    stride_ms: tl.constexpr,
+    stride_out_m: tl.constexpr,
+    stride_out_n: tl.constexpr,
     # Meta-parameters
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
@@ -259,15 +255,11 @@ def _mhc_scale_fwd_fused(
     pid = tl.program_id(0)
 
     tl.assume(M > 0)
-    tl.assume(n == 4)
-    tl.assume(stride_hm == 32)
     tl.assume(stride_hn == 1)
-    tl.assume(stride_out_m == 32)
     tl.assume(stride_out_n == 1)
     tl.assume(stride_a == 1)
     tl.assume(stride_b == 1)
     tl.assume(stride_ms == 1)
-    tl.assume(BLOCK_SIZE_N == 32)
 
     N = 2 * n + n * n
 
@@ -323,29 +315,29 @@ def _mhc_scale_fwd_fused(
 @triton.jit
 def _mhc_scale_bwd_fused(
     grad_out_ptr,
-    out_ptr,  # (M, 2n + n^2), which is padded to (M, 32) in the last dimension
+    out_ptr,  # (M, 2n + n^2), which might be padded in the last dimension
     grad_h_ptr,
-    h_ptr,  # (M, 2n + n^2), which is padded to (M, 32) in the last dimension
+    h_ptr,  # (M, 2n + n^2), which might be padded in the last dimension
     grad_a_ptr,
     a_ptr,  # (3,)
     grad_b_ptr,  # (2n + n^2,)
     grad_ms_ptr,
     ms_ptr,  # (M,)
     M,
-    n,
-    stride_grad_out_m,
-    stride_grad_out_n,
-    stride_out_m,
-    stride_out_n,
-    stride_grad_hm,
-    stride_grad_hn,
-    stride_hm,
-    stride_hn,
-    stride_grad_a,
-    stride_a,
-    stride_grad_b,
-    stride_grad_ms,
-    stride_ms,
+    n: tl.constexpr,
+    stride_grad_out_m: tl.constexpr,
+    stride_grad_out_n: tl.constexpr,
+    stride_out_m: tl.constexpr,
+    stride_out_n: tl.constexpr,
+    stride_grad_hm: tl.constexpr,
+    stride_grad_hn: tl.constexpr,
+    stride_hm: tl.constexpr,
+    stride_hn: tl.constexpr,
+    stride_grad_a: tl.constexpr,
+    stride_a: tl.constexpr,
+    stride_grad_b: tl.constexpr,
+    stride_grad_ms: tl.constexpr,
+    stride_ms: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     eps: tl.constexpr,
@@ -353,21 +345,15 @@ def _mhc_scale_bwd_fused(
     pid = tl.program_id(0)
 
     tl.assume(M > 0)
-    tl.assume(n == 4)
-    tl.assume(stride_grad_out_m == 32)
     tl.assume(stride_grad_out_n == 1)
-    tl.assume(stride_out_m == 32)
     tl.assume(stride_out_n == 1)
-    tl.assume(stride_grad_hm == 32)
     tl.assume(stride_grad_hn == 1)
-    tl.assume(stride_hm == 32)
     tl.assume(stride_hn == 1)
     tl.assume(stride_grad_a == 1)
     tl.assume(stride_a == 1)
     tl.assume(stride_grad_b == 1)
     tl.assume(stride_grad_ms == 1)
     tl.assume(stride_ms == 1)
-    tl.assume(BLOCK_SIZE_N == 32)
 
     N = 2 * n + n * n
 
@@ -477,7 +463,6 @@ def _mhc_sinkhorn_fwd_fused_recompute(
 
     tl.static_assert(BLOCK_SIZE % (n * n) == 0, "BLOCK_SIZE must be divisible by n*n")
     tl.assume(M > 0 and iters > 0)
-    tl.assume(n == 4)
 
     BATCH_SIZE: tl.constexpr = BLOCK_SIZE // (n * n)
 
@@ -551,7 +536,6 @@ def _mhc_sinkhorn_bwd_fused_recompute(
 
     tl.static_assert(BLOCK_SIZE % (n * n) == 0, "BLOCK_SIZE must be divisible by n*n")
     tl.assume(M > 0 and iters > 0)
-    tl.assume(n == 4)
 
     BATCH_SIZE: tl.constexpr = BLOCK_SIZE // (n * n)  # Assume there's no remainder for simplicity
 
@@ -685,7 +669,6 @@ def _mhc_sinkhorn_fwd_fused(
 
     tl.static_assert(BLOCK_SIZE % (n * n) == 0, "BLOCK_SIZE must be divisible by n*n")
     tl.assume(M > 0 and iters > 0)
-    tl.assume(n == 4)
 
     BATCH_SIZE: tl.constexpr = BLOCK_SIZE // (n * n)  # Assume there's no remainder for simplicity
 
@@ -778,7 +761,6 @@ def _mhc_sinkhorn_bwd_fused(
 
     tl.static_assert(BLOCK_SIZE % (n * n) == 0, "BLOCK_SIZE must be divisible by n*n")
     tl.assume(M > 0 and iters > 0)
-    tl.assume(n == 4)
 
     BATCH_SIZE: tl.constexpr = BLOCK_SIZE // (n * n)  # Assume there's no remainder for simplicity
 
@@ -875,7 +857,7 @@ def aggregate_config():
     key=["M", "C"],
 )
 @triton.jit
-def _mhc_aggregate_fwd(
+def _mhc_aggregate_fwd_n4(
     x_ptr,  # # (M, C, n)
     H_pre_ptr,  # (M, n)
     output_ptr,  # (M, C)
@@ -948,6 +930,76 @@ def _mhc_aggregate_fwd(
     output_ptrs = output_ptr + offs_m[:, None] * stride_output_m + offs_c[None, :] * stride_output_c
     tl.store(output_ptrs, out, mask=mask_m[:, None] & mask_c[None, :])
 
+@triton.autotune(
+    configs=aggregate_config(),
+    key=["M", "C"],
+)
+@triton.jit
+def _mhc_aggregate_fwd_n2(
+    x_ptr,  # # (M, C, n)
+    H_pre_ptr,  # (M, n)
+    output_ptr,  # (M, C)
+    M,
+    C,
+    n: tl.constexpr,
+    stride_xm,
+    stride_xCn,
+    stride_output_m,
+    stride_output_c,
+    # Meta-parameters
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_C: tl.constexpr,
+):
+    """
+    output = x @ H_pre: (M, C, n) @ (M, n, 1) = (M, C, 1)
+    """
+    pid_m = tl.program_id(1)
+    pid_c = tl.program_id(0)
+
+    tl.static_assert(n == 2)
+    tl.assume(M > 0)
+    tl.assume(C > 0)
+    tl.assume(n == 2)
+    tl.assume(stride_xm > 0 and stride_xCn == 1)
+    tl.assume(stride_output_m > 0 and stride_output_c == 1)
+
+    tl.assume(BLOCK_SIZE_C % 32 == 0)
+
+    offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+    offs_c = pid_c * BLOCK_SIZE_C + tl.arange(0, BLOCK_SIZE_C)
+    offs_cn = pid_c * BLOCK_SIZE_C * n + tl.arange(0, BLOCK_SIZE_C * n)
+    mask_m = offs_m < M
+    mask_c = offs_c < C
+    mask_cn = offs_cn < C * n
+
+    offs_H_pre = pid_m * BLOCK_SIZE_M * n + tl.arange(0, BLOCK_SIZE_M * n)
+    H_pre = tl.load(
+        H_pre_ptr + offs_H_pre, mask=offs_H_pre < M * n, other=0.0, cache_modifier=".ca"
+    )  # (BLOCK_SIZE_M * n)
+    H_pre = tl.reshape(H_pre, (BLOCK_SIZE_M, n))  # (BLOCK_SIZE_M, n)
+    H_pre0, H_pre1 = tl.split(H_pre)
+
+    x_ptrs = x_ptr + offs_m[:, None] * stride_xm + offs_cn[None, :] * stride_xCn
+    x = tl.load(
+        x_ptrs, mask=mask_m[:, None] & mask_cn[None, :], other=0.0
+    )  # (BLOCK_SIZE_M, BLOCK_SIZE_C * n)
+
+    x_reshape = tl.reshape(x, (BLOCK_SIZE_M, BLOCK_SIZE_C, 2))
+    x0, x1 = tl.split(x_reshape) # (BLOCK_SIZE_M, BLOCK_SIZE_C)
+
+    # x @ H_pre: (BLOCK_SIZE_M, BLOCK_SIZE_C, n) @ (BLOCK_SIZE_M, n, 1)
+    # triton doesn't support dot prod with inner dimension < 16, so we need to manually unroll the computation for n=2:
+    # x @ H_pre = x[:, :, 0] * H_pre[:, 0]
+    #           + x[:, :, 1] * H_pre[:, 1]
+    out_acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_C), dtype=tl.float32)
+    out_acc = tl.fma(x0, H_pre0[:, None], out_acc)
+    out_acc = tl.fma(x1, H_pre1[:, None], out_acc)
+
+    out = out_acc.to(x.dtype)
+
+    output_ptrs = output_ptr + offs_m[:, None] * stride_output_m + offs_c[None, :] * stride_output_c
+    tl.store(output_ptrs, out, mask=mask_m[:, None] & mask_c[None, :])
+
 
 @triton.autotune(configs=aggregate_config(), key=["M", "C"], reset_to_zero=["grad_H_pre_ptr"])
 @triton.jit
@@ -983,10 +1035,8 @@ def _mhc_aggregate_bwd(
     pid_m = tl.program_id(1)
     pid_c = tl.program_id(0)
 
-    tl.static_assert(n == 4)
     tl.assume(M > 0)
     tl.assume(C > 0)
-    tl.assume(n == 4)
     tl.assume(stride_xm > 0 and stride_xCn == 1)
     tl.assume(stride_grad_xm > 0 and stride_grad_xCn == 1)
     tl.assume(stride_grad_output_m > 0 and stride_grad_output_c == 1)
@@ -1064,7 +1114,7 @@ def expand_combine_config():
     key=["M", "C"],
 )
 @triton.jit
-def _mhc_expand_combine_fwd(
+def _mhc_expand_combine_fwd_n4(
     f_ptr,  # (M, C)
     H_post_ptr,  # (M, n)
     x_ptr,  # (M, C, n)
@@ -1173,7 +1223,7 @@ def _mhc_expand_combine_fwd(
     reset_to_zero=["grad_H_post_ptr", "grad_H_res_ptr"],
 )
 @triton.jit
-def _mhc_expand_combine_bwd(
+def _mhc_expand_combine_bwd_n4(
     grad_output_ptr,  # (M, C, n)
     f_ptr,  # (M, C)
     H_post_ptr,  # (M, n)
@@ -1202,18 +1252,6 @@ def _mhc_expand_combine_bwd(
     precision: tl.constexpr,
 ):
     """
-    Each block
-    It reads
-    - (BLOCK_SIZE_M, BLOCK_SIZE_C) of f, which is the output of the attention / FFN module
-    - (BLOCK_SIZE_M, n) of H_post, which is applied for the transformation of the attention / FFN output
-    - (BLOCK_SIZE_M, BLOCK_SIZE_C, n) of x, which is the skip connection's input
-    - (BLOCK_SIZE_M, n*n) of H_res, which is applied for the transformation of the skip connection
-    and writes
-    - (BLOCK_SIZE_M, n) of grad_H_post
-    - (BLOCK_SIZE_M, BLOCK_SIZE_C) of grad_f
-    - (BLOCK_SIZE_M, n, n) of grad_H_res
-    - (BLOCK_SIZE_M, BLOCK_SIZE_C, n) of grad_x
-
     Forward:
         out = f @ H_post + x @ H_res
     Backward:
@@ -1369,7 +1407,7 @@ def _mhc_expand_combine_bwd(
     key=["M", "C"],
 )
 @triton.jit
-def _mhc_expand_combine_with_bias_fwd(
+def _mhc_expand_combine_with_bias_fwd_n4(
     f_ptr,  # (M, C)
     bias_ptr,  # (C,)
     H_post_ptr,  # (M, n)
@@ -1483,7 +1521,7 @@ def _mhc_expand_combine_with_bias_fwd(
     reset_to_zero=["grad_H_post_ptr", "grad_H_res_ptr", "grad_bias_ptr"],
 )
 @triton.jit
-def _mhc_expand_combine_with_bias_bwd(
+def _mhc_expand_combine_with_bias_bwd_n4(
     grad_output_ptr,  # (M, C, n)
     f_ptr,  # (M, C)
     bias_ptr,  # (C,)
@@ -1516,18 +1554,6 @@ def _mhc_expand_combine_with_bias_bwd(
     precision: tl.constexpr,
 ):
     """
-    Each block
-    It reads
-    - (BLOCK_SIZE_M, BLOCK_SIZE_C) of f, which is the output of the attention / FFN module
-    - (BLOCK_SIZE_M, n) of H_post, which is applied for the transformation of the attention / FFN output
-    - (BLOCK_SIZE_M, BLOCK_SIZE_C, n) of x, which is the skip connection's input
-    - (BLOCK_SIZE_M, n*n) of H_res, which is applied for the transformation of the skip connection
-    and writes
-    - (BLOCK_SIZE_M, n) of grad_H_post
-    - (BLOCK_SIZE_M, BLOCK_SIZE_C) of grad_f
-    - (BLOCK_SIZE_M, n, n) of grad_H_res
-    - (BLOCK_SIZE_M, BLOCK_SIZE_C, n) of grad_x
-
     Forward:
         out = f @ H_post + x @ H_res
     Backward:
@@ -1685,6 +1711,549 @@ def _mhc_expand_combine_with_bias_bwd(
     grad_x_acc = tl.fma(grad_out1[:, :, None], H_res1[:, None, :], grad_x_acc)
     grad_x_acc = tl.fma(grad_out2[:, :, None], H_res2[:, None, :], grad_x_acc)
     grad_x_acc = tl.fma(grad_out3[:, :, None], H_res3[:, None, :], grad_x_acc)
+
+    grad_x = grad_x_acc.to(x.dtype)
+    grad_x = tl.reshape(grad_x, (BLOCK_SIZE_M, BLOCK_SIZE_C * n))  # (BLOCK_SIZE_M, BLOCK_SIZE_C*n)
+
+    grad_x_ptrs = grad_x_ptr + offs_m[:, None] * stride_grad_xm + offs_cn[None, :] * stride_grad_xCn
+    tl.store(grad_x_ptrs, grad_x, mask=mask_m[:, None] & mask_cn[None, :])
+
+@triton.autotune(
+    configs=expand_combine_config(),
+    key=["M", "C"],
+)
+@triton.jit
+def _mhc_expand_combine_fwd_n2(
+    f_ptr,  # (M, C)
+    H_post_ptr,  # (M, n)
+    x_ptr,  # (M, C, n)
+    H_res_ptr,  # (M, n, n)
+    output_ptr,  # # (M, C, n)
+    M,
+    C,
+    n: tl.constexpr,
+    stride_fm,
+    stride_fc,
+    stride_xm,
+    stride_xCn,
+    stride_output_m,
+    stride_output_Cn,
+    # Meta-parameters
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_C: tl.constexpr,
+):
+    """
+    output = f @ H_post: (BLOCK_SIZE_M, BLOCK_SIZE_C, 1) @ (BLOCK_SIZE_M, 1, n)  = (BLOCK_SIZE_M, BLOCK_SIZE_C, n)
+           + x @ H_res: (BLOCK_SIZE_M, BLOCK_SIZE_C, n) @ (BLOCK_SIZE_M, n, n) = (BLOCK_SIZE_M, BLOCK_SIZE_C, n)
+    """
+    pid_m = tl.program_id(1)
+    pid_c = tl.program_id(0)
+
+    tl.static_assert(n == 2)
+    tl.assume(M > 0)
+    tl.assume(C > 0)
+    tl.assume(n == 2)
+    tl.assume(stride_fm > 0 and stride_fc == 1)
+    tl.assume(stride_xm > 0 and stride_xCn == 1)
+    tl.assume(stride_output_m > 0 and stride_output_Cn == 1)
+
+    tl.assume(BLOCK_SIZE_C % 32 == 0)
+
+    offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+    offs_c = pid_c * BLOCK_SIZE_C + tl.arange(0, BLOCK_SIZE_C)
+    offs_cn = pid_c * BLOCK_SIZE_C * n + tl.arange(0, BLOCK_SIZE_C * n)
+    mask_m = offs_m < M
+    mask_c = offs_c < C
+    mask_cn = offs_cn < C * n
+
+    f_ptrs = f_ptr + offs_m[:, None] * stride_fm + offs_c[None, :] * stride_fc
+    f = tl.load(f_ptrs, mask=mask_m[:, None] & mask_c[None, :], other=0.0)
+
+    offs_H_post = pid_m * BLOCK_SIZE_M * n + tl.arange(0, BLOCK_SIZE_M * n)
+    H_post = tl.load(
+        H_post_ptr + offs_H_post, mask=offs_H_post < M * n, other=0.0, cache_modifier=".ca"
+    )
+    H_post = tl.reshape(H_post, (BLOCK_SIZE_M, n))  # (BLOCK_SIZE_M, n)
+
+    # Residual connection path: res_out = f @ H_post:
+    # (BLOCK_SIZE_M, BLOCK_SIZE_C, 1) @ (BLOCK_SIZE_M, 1, n)  = (BLOCK_SIZE_M, n, BLOCK_SIZE_C)
+    # Due to broadcasting, it's equivalent to a multiplicaiton
+    out_acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_C, n), dtype=tl.float32)
+    out_acc = tl.fma(f[:, :, None], H_post[:, None, :], out_acc)
+
+    H_res_offs = pid_m * BLOCK_SIZE_M * n * n + tl.arange(0, BLOCK_SIZE_M * n * n)
+    H_res = tl.load(
+        H_res_ptr + H_res_offs, mask=H_res_offs < M * n * n, other=0.0, cache_modifier=".ca"
+    )
+    H_res = tl.reshape(H_res, (BLOCK_SIZE_M, n, n))  # (BLOCK_SIZE_M, n, n)
+
+    x_ptrs = x_ptr + offs_m[:, None] * stride_xm + offs_cn[None, :] * stride_xCn
+    x = tl.load(
+        x_ptrs, mask=mask_m[:, None] & mask_cn[None, :], other=0.0
+    )  # (BLOCK_SIZE_M, BLOCK_SIZE_C, n)
+
+    # Manifold connection path: manifold_out = H_res @ x:
+    # (BLOCK_SIZE_M, BLOCK_SIZE_C, n) @ (BLOCK_SIZE_M, n, n) = (BLOCK_SIZE_M, BLOCK_SIZE_C, n)
+    # triton doesn't support dot prod with inner dimension < 16, so we need to manually unroll the computation for n=2:
+    # x @ H_res = x[:, :, 0] @ H_res[:, 0, :]
+    #           + x[:, :, 1] @ H_res[:, 1, :]
+
+    x_reshape = tl.reshape(x, (BLOCK_SIZE_M, BLOCK_SIZE_C, 2))
+    x0, x1 = tl.split(x_reshape)  # (BLOCK_SIZE_M, BLOCK_SIZE_C), (BLOCK_SIZE_M, BLOCK_SIZE_C)
+
+    H_resT = tl.trans(H_res, (0, 2, 1))
+    H_res0, H_res1 = tl.split(H_resT)  # (BLOCK_SIZE_M, n), (BLOCK_SIZE_M, n)
+
+    out_acc = tl.fma(x0[:, :, None], H_res0[:, None, :], out_acc)
+    out_acc = tl.fma(x1[:, :, None], H_res1[:, None, :], out_acc)
+
+    out = out_acc.to(x.dtype)
+    out = tl.reshape(out, (BLOCK_SIZE_M, BLOCK_SIZE_C * n))  # (BLOCK_SIZE_M, BLOCK_SIZE_C*n)
+
+    output_ptrs = (
+        output_ptr + offs_m[:, None] * stride_output_m + offs_cn[None, :] * stride_output_Cn
+    )
+    tl.store(output_ptrs, out, mask=mask_m[:, None] & mask_cn[None, :])
+
+
+@triton.autotune(
+    configs=expand_combine_config(),
+    key=["M", "C"],
+    reset_to_zero=["grad_H_post_ptr", "grad_H_res_ptr"],
+)
+@triton.jit
+def _mhc_expand_combine_bwd_n2(
+    grad_output_ptr,  # (M, C, n)
+    f_ptr,  # (M, C)
+    H_post_ptr,  # (M, n)
+    x_ptr,  # (M, C, n)
+    H_res_ptr,  # (M, n, n)
+    grad_H_post_ptr,  # (M, n)
+    grad_f_ptr,  # (M, C)
+    grad_H_res_ptr,  # (M, n, n)
+    grad_x_ptr,  # (M, C, n)
+    M,
+    C,
+    n: tl.constexpr,
+    stride_grad_output_m,
+    stride_grad_output_Cn,
+    stride_fm,
+    stride_fc,
+    stride_xm,
+    stride_xCn,
+    stride_grad_fm,
+    stride_grad_fc,
+    stride_grad_xm,
+    stride_grad_xCn,
+    # Meta-parameters
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_C: tl.constexpr,
+    precision: tl.constexpr,
+):
+    """
+    Forward:
+        out = f @ H_post + x @ H_res
+    Backward:
+        GEMM:
+        grad_H_post = f.T @ grad_output: (BLOCK_SIZE_M, 1, BLOCK_SIZE_C) @ (BLOCK_SIZE_M, BLOCK_SIZE_C, n) = (BLOCK_SIZE_M, 1, n)
+        grad_H_res = x.T @ grad_output: (BLOCK_SIZE_M, n, BLOCK_SIZE_C) @ (BLOCK_SIZE_M, BLOCK_SIZE_C, n) = (BLOCK_SIZE_M, n, n)
+        Not GEMM:
+        grad_f = grad_output @ H_post.T: (BLOCK_SIZE_M, BLOCK_SIZE_C, n) @ (BLOCK_SIZE_M, n, 1) = (BLOCK_SIZE_M, BLOCK_SIZE_C, 1)
+        grad_x = grad_output @ H_res.T: (BLOCK_SIZE_M, BLOCK_SIZE_C, n) @ (BLOCK_SIZE_M, n, n) = (BLOCK_SIZE_M, BLOCK_SIZE_C, n)
+    """
+
+    pid_m = tl.program_id(1)
+    pid_c = tl.program_id(0)
+
+    tl.static_assert(n == 2)
+    tl.assume(M > 0)
+    tl.assume(C > 0)
+    tl.assume(n == 2)
+    tl.assume(stride_fm > 0 and stride_fc == 1)
+    tl.assume(stride_xm > 0 and stride_xCn == 1)
+    tl.assume(stride_grad_output_m > 0 and stride_grad_output_Cn == 1)
+    tl.assume(stride_grad_fm > 0 and stride_grad_fc == 1)
+    tl.assume(stride_grad_xm > 0 and stride_grad_xCn == 1)
+
+    tl.assume(BLOCK_SIZE_C % 32 == 0)
+
+    offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+    offs_c = pid_c * BLOCK_SIZE_C + tl.arange(0, BLOCK_SIZE_C)
+    offs_cn = pid_c * BLOCK_SIZE_C * n + tl.arange(0, BLOCK_SIZE_C * n)
+    mask_m = offs_m < M
+    mask_c = offs_c < C
+    mask_cn = offs_cn < C * n
+
+    f_ptrs = f_ptr + offs_m[:, None] * stride_fm + offs_c[None, :] * stride_fc
+    f = tl.load(f_ptrs, mask=mask_m[:, None] & mask_c[None, :], other=0.0)
+
+    H_post_offs = pid_m * BLOCK_SIZE_M * n + tl.arange(0, BLOCK_SIZE_M * n)
+    H_post = tl.load(H_post_ptr + H_post_offs, mask=H_post_offs < M * n, other=0.0)
+    H_post = tl.reshape(H_post, (BLOCK_SIZE_M, n))  # (BLOCK_SIZE_M, n)
+
+    H_res_offs = pid_m * BLOCK_SIZE_M * n * n + tl.arange(0, BLOCK_SIZE_M * n * n)
+    H_res = tl.load(
+        H_res_ptr + H_res_offs, mask=H_res_offs < M * n * n, other=0.0
+    )  # (BLOCK_SIZE_M, n, n)
+    H_res = tl.reshape(H_res, (BLOCK_SIZE_M, n, n))  # (BLOCK_SIZE_M, n, n)
+
+    grad_out_ptrs = (
+        grad_output_ptr
+        + offs_m[:, None] * stride_grad_output_m
+        + offs_cn[None, :] * stride_grad_output_Cn
+    )
+    grad_out = tl.load(
+        grad_out_ptrs, mask=mask_m[:, None] & mask_cn[None, :], other=0.0
+    )  # (BLOCK_SIZE_M, BLOCK_SIZE_C * n)
+    grad_out = tl.reshape(
+        grad_out, (BLOCK_SIZE_M, BLOCK_SIZE_C, n)
+    )  # (BLOCK_SIZE_M, BLOCK_SIZE_C, n)
+
+    # grad_H_post =  f.T @ grad_output # (BLOCK_SIZE_M, 1, BLOCK_SIZE_C) @ (BLOCK_SIZE_M, BLOCK_SIZE_C, n) = (BLOCK_SIZE_M, 1, n)
+    grad_H_post = tl.dot(
+        tl.reshape(f, (BLOCK_SIZE_M, 1, BLOCK_SIZE_C)),
+        tl.reshape(grad_out, (BLOCK_SIZE_M, BLOCK_SIZE_C, n)),
+        input_precision=precision,
+        out_dtype=tl.float32,
+    )  # (BLOCK_SIZE_M, 1, n)
+    grad_H_post = tl.reshape(grad_H_post, (BLOCK_SIZE_M * n,))  # (BLOCK_SIZE_M * n)
+    offs_grad_H_post = pid_m * BLOCK_SIZE_M * n + tl.arange(0, BLOCK_SIZE_M * n)
+    grad_H_post_ptrs = grad_H_post_ptr + offs_grad_H_post
+    tl.atomic_add(grad_H_post_ptrs, grad_H_post, mask=offs_grad_H_post < M * n, sem="relaxed")
+
+    x_ptrs = x_ptr + offs_m[:, None] * stride_xm + offs_cn[None, :] * stride_xCn
+    x = tl.load(
+        x_ptrs, mask=mask_m[:, None] & mask_cn[None, :], other=0.0
+    )  # (BLOCK_SIZE_M, BLOCK_SIZE_C*n)
+    x = tl.reshape(x, (BLOCK_SIZE_M, BLOCK_SIZE_C, n))  # (BLOCK_SIZE_M, BLOCK_SIZE_C, n)
+
+    # grad_H_res = x.T @ grad_output: (BLOCK_SIZE_M, n, BLOCK_SIZE_C) @ (BLOCK_SIZE_M, BLOCK_SIZE_C, n) = (BLOCK_SIZE_M, n, n)
+    grad_H_res = tl.dot(
+        tl.trans(x, (0, 2, 1)), grad_out, input_precision=precision, out_dtype=tl.float32
+    )  # (BLOCK_SIZE_M, n, n)
+    grad_H_res = tl.reshape(grad_H_res, (BLOCK_SIZE_M * n * n,))  # (BLOCK_SIZE_M * n * n)
+    offs_grad_H_res = pid_m * BLOCK_SIZE_M * n * n + tl.arange(0, BLOCK_SIZE_M * n * n)
+    grad_H_res_ptrs = grad_H_res_ptr + offs_grad_H_res
+    tl.atomic_add(
+        grad_H_res_ptrs, grad_H_res.to(tl.float32), mask=offs_grad_H_res < M * n * n, sem="relaxed"
+    )
+
+    grad_out0, grad_out1 = tl.split(
+        grad_out
+    )  # (BLOCK_SIZE_M, BLOCK_SIZE_C), (BLOCK_SIZE_M, BLOCK_SIZE_C)
+
+    # grad_f = grad_output @ H_post.T: (BLOCK_SIZE_M, 1, n) @ (BLOCK_SIZE_M, n, BLOCK_SIZE_C) = (BLOCK_SIZE_M, 1, BLOCK_SIZE_C)
+    # Triton doesn't support dot prod with inner dimension < 16, so we need to hack this:
+    # grad_f = grad_out[:, :, 0] @ H_post.T[:, 0, :] (BLOCK_SIZE_M, BLOCK_SIZE_C, 1) @ (BLOCK_SIZE_M, 1, 1)
+    #        + grad_out[:, :, 1] @ H_post.T[:, 1, :]
+    # where H_post.T[:, i, :] = H_post[:, :, i]
+    H_post0, H_post1 = tl.split(H_post)  # (BLOCK_SIZE_M,), (BLOCK_SIZE_M,)
+
+    grad_f_acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_C), dtype=tl.float32)
+    # (BLOCK_SIZE_M, BLOCK_SIZE_C) * (BLOCK_SIZE_M, 1) -> (BLOCK_SIZE_M, BLOCK_SIZE_C)
+    grad_f_acc = tl.fma(grad_out0, H_post0[:, None], grad_f_acc)
+    grad_f_acc = tl.fma(grad_out1, H_post1[:, None], grad_f_acc)
+    grad_f = grad_f_acc.to(f.dtype)
+
+    grad_f_ptrs = grad_f_ptr + offs_m[:, None] * stride_grad_fm + offs_c[None, :] * stride_grad_fc
+    tl.store(grad_f_ptrs, grad_f, mask=mask_m[:, None] & mask_c[None, :])
+
+    # grad_x = grad_output @ H_res.T: (BLOCK_SIZE_M, BLOCK_SIZE_C, n) @ (BLOCK_SIZE_M, n, n) = (BLOCK_SIZE_M, n, BLOCK_SIZE_C)
+    # The inner dim is n=2 which is too small for triton, so we will manually unroll the matmul
+    # grad_x = grad_out[:, :, 0] @ H_res.T[:, 0, :]
+    #        + grad_out[:, :, 1] @ H_res.T[:, 1, :]
+    # where H_res.T[:, i, :] = H_res[:, :, i]
+    # Due to broadcasting, it's equivalent to multiplying each H_res[:, i, :].T with grad_out[:, i, :]
+
+    H_res0, H_res1 = tl.split(H_res)  # (BLOCK_SIZE_M, n), (BLOCK_SIZE_M, n)
+
+    grad_x_acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_C, n), dtype=tl.float32)
+    grad_x_acc = tl.fma(grad_out0[:, :, None], H_res0[:, None, :], grad_x_acc)
+    grad_x_acc = tl.fma(grad_out1[:, :, None], H_res1[:, None, :], grad_x_acc)
+
+    grad_x = grad_x_acc.to(x.dtype)
+    grad_x = tl.reshape(grad_x, (BLOCK_SIZE_M, BLOCK_SIZE_C * n))  # (BLOCK_SIZE_M, BLOCK_SIZE_C*n)
+
+    grad_x_ptrs = grad_x_ptr + offs_m[:, None] * stride_grad_xm + offs_cn[None, :] * stride_grad_xCn
+    tl.store(grad_x_ptrs, grad_x, mask=mask_m[:, None] & mask_cn[None, :])
+
+
+@triton.autotune(
+    configs=expand_combine_config(),
+    key=["M", "C"],
+)
+@triton.jit
+def _mhc_expand_combine_with_bias_fwd_n2(
+    f_ptr,  # (M, C)
+    bias_ptr,  # (C,)
+    H_post_ptr,  # (M, n)
+    x_ptr,  # (M, C, n)
+    H_res_ptr,  # (M, n, n)
+    output_ptr,  # # (M, C, n)
+    M,
+    C,
+    n: tl.constexpr,
+    stride_fm,
+    stride_fc,
+    stride_bias,
+    stride_xm,
+    stride_xCn,
+    stride_output_m,
+    stride_output_Cn,
+    # Meta-parameters
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_C: tl.constexpr,
+):
+    """
+    output = (f + bias[None, :, None]) @ H_post: (BLOCK_SIZE_M, BLOCK_SIZE_C, 1) @ (BLOCK_SIZE_M, 1, n)  = (BLOCK_SIZE_M, BLOCK_SIZE_C, n)
+           + x @ H_res: (BLOCK_SIZE_M, BLOCK_SIZE_C, n) @ (BLOCK_SIZE_M, n, n) = (BLOCK_SIZE_M, BLOCK_SIZE_C, n)
+    """
+    pid_m = tl.program_id(1)
+    pid_c = tl.program_id(0)
+
+    tl.static_assert(n == 2)
+    tl.assume(M > 0)
+    tl.assume(C > 0)
+    tl.assume(n == 2)
+    tl.assume(stride_fm > 0 and stride_fc == 1)
+    tl.assume(stride_bias == 1)
+    tl.assume(stride_xm > 0 and stride_xCn == 1)
+    tl.assume(stride_output_m > 0 and stride_output_Cn == 1)
+
+    tl.assume(BLOCK_SIZE_C % 32 == 0)
+
+    offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+    offs_c = pid_c * BLOCK_SIZE_C + tl.arange(0, BLOCK_SIZE_C)
+    offs_cn = pid_c * BLOCK_SIZE_C * n + tl.arange(0, BLOCK_SIZE_C * n)
+    mask_m = offs_m < M
+    mask_c = offs_c < C
+    mask_cn = offs_cn < C * n
+
+    f_ptrs = f_ptr + offs_m[:, None] * stride_fm + offs_c[None, :] * stride_fc
+    f = tl.load(f_ptrs, mask=mask_m[:, None] & mask_c[None, :], other=0.0)
+    bias = tl.load(bias_ptr + offs_c * stride_bias, mask=mask_c, other=0.0)  # (BLOCK_SIZE_C,)
+
+    offs_H_post = pid_m * BLOCK_SIZE_M * n + tl.arange(0, BLOCK_SIZE_M * n)
+    H_post = tl.load(
+        H_post_ptr + offs_H_post, mask=offs_H_post < M * n, other=0.0, cache_modifier=".ca"
+    )
+    H_post = tl.reshape(H_post, (BLOCK_SIZE_M, n))  # (BLOCK_SIZE_M, n)
+
+    # Residual connection path: res_out = f @ H_post + bias @ H_post:
+    # (BLOCK_SIZE_M, BLOCK_SIZE_C, 1) @ (BLOCK_SIZE_M, 1, n)  = (BLOCK_SIZE_M, n, BLOCK_SIZE_C)
+    # Due to broadcasting, it's equivalent to a multiplicaiton
+    out_acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_C, n), dtype=tl.float32)
+    out_acc = tl.fma(bias[None, :, None], H_post[:, None, :], out_acc)
+    out_acc = tl.fma(f[:, :, None], H_post[:, None, :], out_acc)
+
+    H_res_offs = pid_m * BLOCK_SIZE_M * n * n + tl.arange(0, BLOCK_SIZE_M * n * n)
+    H_res = tl.load(
+        H_res_ptr + H_res_offs, mask=H_res_offs < M * n * n, other=0.0, cache_modifier=".ca"
+    )
+    H_res = tl.reshape(H_res, (BLOCK_SIZE_M, n, n))  # (BLOCK_SIZE_M, n, n)
+
+    x_ptrs = x_ptr + offs_m[:, None] * stride_xm + offs_cn[None, :] * stride_xCn
+    x = tl.load(
+        x_ptrs, mask=mask_m[:, None] & mask_cn[None, :], other=0.0
+    )  # (BLOCK_SIZE_M, BLOCK_SIZE_C, n)
+
+    # Manifold connection path: manifold_out = H_res @ x:
+    # (BLOCK_SIZE_M, BLOCK_SIZE_C, n) @ (BLOCK_SIZE_M, n, n) = (BLOCK_SIZE_M, BLOCK_SIZE_C, n)
+    # triton doesn't support dot prod with inner dimension < 16, so we need to manually unroll the computation for n=2:
+    # x @ H_res = x[:, :, 0] @ H_res[:, 0, :]
+    #           + x[:, :, 1] @ H_res[:, 1, :]
+
+    x_reshape = tl.reshape(x, (BLOCK_SIZE_M, BLOCK_SIZE_C, 2))
+    x0, x1 = tl.split(x_reshape) # (BLOCK_SIZE_M, BLOCK_SIZE_C)
+
+    H_resT = tl.trans(H_res, (0, 2, 1))
+    H_res0, H_res1 = tl.split(H_resT)  # (BLOCK_SIZE_M, n), (BLOCK_SIZE_M, n)
+
+    out_acc = tl.fma(x0[:, :, None], H_res0[:, None, :], out_acc)
+    out_acc = tl.fma(x1[:, :, None], H_res1[:, None, :], out_acc)
+
+    out = out_acc.to(x.dtype)
+    out = tl.reshape(out, (BLOCK_SIZE_M, BLOCK_SIZE_C * n))  # (BLOCK_SIZE_M, BLOCK_SIZE_C*n)
+
+    output_ptrs = (
+        output_ptr + offs_m[:, None] * stride_output_m + offs_cn[None, :] * stride_output_Cn
+    )
+    tl.store(output_ptrs, out, mask=mask_m[:, None] & mask_cn[None, :])
+
+
+@triton.autotune(
+    configs=expand_combine_config(),
+    key=["M", "C"],
+    reset_to_zero=["grad_H_post_ptr", "grad_H_res_ptr", "grad_bias_ptr"],
+)
+@triton.jit
+def _mhc_expand_combine_with_bias_bwd_n2(
+    grad_output_ptr,  # (M, C, n)
+    f_ptr,  # (M, C)
+    bias_ptr,  # (C,)
+    H_post_ptr,  # (M, n)
+    x_ptr,  # (M, C, n)
+    H_res_ptr,  # (M, n, n)
+    grad_H_post_ptr,  # (M, n)
+    grad_f_ptr,  # (M, C)
+    grad_bias_ptr,  # (C,)
+    grad_H_res_ptr,  # (M, n, n)
+    grad_x_ptr,  # (M, C, n)
+    M,
+    C,
+    n: tl.constexpr,
+    stride_grad_output_m,
+    stride_grad_output_Cn,
+    stride_fm,
+    stride_fc,
+    stride_bias,
+    stride_xm,
+    stride_xCn,
+    stride_grad_fm,
+    stride_grad_fc,
+    stride_grad_bias,
+    stride_grad_xm,
+    stride_grad_xCn,
+    # Meta-parameters
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_C: tl.constexpr,
+    precision: tl.constexpr,
+):
+    """
+    Forward:
+        out = f @ H_post + x @ H_res
+    Backward:
+        GEMM:
+        grad_H_post = f.T @ grad_output: (BLOCK_SIZE_M, 1, BLOCK_SIZE_C) @ (BLOCK_SIZE_M, BLOCK_SIZE_C, n) = (BLOCK_SIZE_M, 1, n)
+        grad_H_res = x.T @ grad_output: (BLOCK_SIZE_M, n, BLOCK_SIZE_C) @ (BLOCK_SIZE_M, BLOCK_SIZE_C, n) = (BLOCK_SIZE_M, n, n)
+        Not GEMM:
+        grad_f = grad_output @ H_post.T: (BLOCK_SIZE_M, BLOCK_SIZE_C, n) @ (BLOCK_SIZE_M, n, 1) = (BLOCK_SIZE_M, BLOCK_SIZE_C, 1)
+        grad_x = grad_output @ H_res.T: (BLOCK_SIZE_M, BLOCK_SIZE_C, n) @ (BLOCK_SIZE_M, n, n) = (BLOCK_SIZE_M, BLOCK_SIZE_C, n)
+    """
+
+    pid_m = tl.program_id(1)
+    pid_c = tl.program_id(0)
+
+    tl.static_assert(n == 2)
+    tl.assume(M > 0)
+    tl.assume(C > 0)
+    tl.assume(n == 2)
+    tl.assume(stride_fm > 0 and stride_fc == 1)
+    tl.assume(stride_bias == 1)
+    tl.assume(stride_xm > 0 and stride_xCn == 1)
+    tl.assume(stride_grad_output_m > 0 and stride_grad_output_Cn == 1)
+    tl.assume(stride_grad_fm > 0 and stride_grad_fc == 1)
+    tl.assume(stride_grad_bias == 1)
+    tl.assume(stride_grad_xm > 0 and stride_grad_xCn == 1)
+
+    tl.assume(BLOCK_SIZE_C % 32 == 0)
+
+    offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+    offs_c = pid_c * BLOCK_SIZE_C + tl.arange(0, BLOCK_SIZE_C)
+    offs_cn = pid_c * BLOCK_SIZE_C * n + tl.arange(0, BLOCK_SIZE_C * n)
+    mask_m = offs_m < M
+    mask_c = offs_c < C
+    mask_cn = offs_cn < C * n
+
+    f_ptrs = f_ptr + offs_m[:, None] * stride_fm + offs_c[None, :] * stride_fc
+    f = tl.load(f_ptrs, mask=mask_m[:, None] & mask_c[None, :], other=0.0)
+
+    bias = tl.load(bias_ptr + offs_c * stride_bias, mask=mask_c, other=0.0)  # (BLOCK_SIZE_C,)
+
+    H_post_offs = pid_m * BLOCK_SIZE_M * n + tl.arange(0, BLOCK_SIZE_M * n)
+    H_post = tl.load(H_post_ptr + H_post_offs, mask=H_post_offs < M * n, other=0.0)
+    H_post = tl.reshape(H_post, (BLOCK_SIZE_M, n))  # (BLOCK_SIZE_M, n)
+
+    H_res_offs = pid_m * BLOCK_SIZE_M * n * n + tl.arange(0, BLOCK_SIZE_M * n * n)
+    H_res = tl.load(
+        H_res_ptr + H_res_offs, mask=H_res_offs < M * n * n, other=0.0
+    )  # (BLOCK_SIZE_M, n, n)
+    H_res = tl.reshape(H_res, (BLOCK_SIZE_M, n, n))  # (BLOCK_SIZE_M, n, n)
+
+    grad_out_ptrs = (
+        grad_output_ptr
+        + offs_m[:, None] * stride_grad_output_m
+        + offs_cn[None, :] * stride_grad_output_Cn
+    )
+    grad_out = tl.load(
+        grad_out_ptrs, mask=mask_m[:, None] & mask_cn[None, :], other=0.0
+    )  # (BLOCK_SIZE_M, BLOCK_SIZE_C * n)
+    grad_out = tl.reshape(
+        grad_out, (BLOCK_SIZE_M, BLOCK_SIZE_C, n)
+    )  # (BLOCK_SIZE_M, BLOCK_SIZE_C, n)
+
+    # grad_H_post =  f.T @ grad_output # (BLOCK_SIZE_M, 1, BLOCK_SIZE_C) @ (BLOCK_SIZE_M, BLOCK_SIZE_C, n) = (BLOCK_SIZE_M, 1, n)
+    grad_H_post = tl.dot(
+        tl.reshape(f, (BLOCK_SIZE_M, 1, BLOCK_SIZE_C)),
+        tl.reshape(grad_out, (BLOCK_SIZE_M, BLOCK_SIZE_C, n)),
+        input_precision=precision,
+        out_dtype=tl.float32,
+    )  # (BLOCK_SIZE_M, 1, n)
+    grad_H_post = tl.dot(
+        tl.broadcast_to(bias[None, None, :], (BLOCK_SIZE_M, 1, BLOCK_SIZE_C)),
+        tl.reshape(grad_out, (BLOCK_SIZE_M, BLOCK_SIZE_C, n)),
+        acc=grad_H_post,
+        input_precision=precision,
+        out_dtype=tl.float32,
+    )  # (BLOCK_SIZE_M, 1, n)
+    grad_H_post = tl.reshape(grad_H_post, (BLOCK_SIZE_M * n,))  # (BLOCK_SIZE_M * n)
+    offs_grad_H_post = pid_m * BLOCK_SIZE_M * n + tl.arange(0, BLOCK_SIZE_M * n)
+    grad_H_post_ptrs = grad_H_post_ptr + offs_grad_H_post
+    tl.atomic_add(grad_H_post_ptrs, grad_H_post, mask=offs_grad_H_post < M * n, sem="relaxed")
+
+    x_ptrs = x_ptr + offs_m[:, None] * stride_xm + offs_cn[None, :] * stride_xCn
+    x = tl.load(
+        x_ptrs, mask=mask_m[:, None] & mask_cn[None, :], other=0.0
+    )  # (BLOCK_SIZE_M, BLOCK_SIZE_C*n)
+    x = tl.reshape(x, (BLOCK_SIZE_M, BLOCK_SIZE_C, n))  # (BLOCK_SIZE_M, BLOCK_SIZE_C, n)
+
+    # grad_H_res = x.T @ grad_output: (BLOCK_SIZE_M, n, BLOCK_SIZE_C) @ (BLOCK_SIZE_M, BLOCK_SIZE_C, n) = (BLOCK_SIZE_M, n, n)
+    grad_H_res = tl.dot(
+        tl.trans(x, (0, 2, 1)), grad_out, input_precision=precision, out_dtype=tl.float32
+    )  # (BLOCK_SIZE_M, n, n)
+    grad_H_res = tl.reshape(grad_H_res, (BLOCK_SIZE_M * n * n,))  # (BLOCK_SIZE_M * n * n)
+    offs_grad_H_res = pid_m * BLOCK_SIZE_M * n * n + tl.arange(0, BLOCK_SIZE_M * n * n)
+    grad_H_res_ptrs = grad_H_res_ptr + offs_grad_H_res
+    tl.atomic_add(
+        grad_H_res_ptrs, grad_H_res.to(tl.float32), mask=offs_grad_H_res < M * n * n, sem="relaxed"
+    )
+
+    grad_out0, grad_out1 = tl.split(
+        grad_out
+    )  # (BLOCK_SIZE_M, BLOCK_SIZE_C), (BLOCK_SIZE_M, BLOCK_SIZE_C)
+
+    # grad_f = grad_output @ H_post.T: (BLOCK_SIZE_M, 1, n) @ (BLOCK_SIZE_M, n, BLOCK_SIZE_C) = (BLOCK_SIZE_M, 1, BLOCK_SIZE_C)
+    # Triton doesn't support dot prod with inner dimension < 16, so we need to hack this:
+    #        = grad_out[:, :, 0] @ H_post.T[:, 0, :] (BLOCK_SIZE_M, BLOCK_SIZE_C, 1) @ (BLOCK_SIZE_M, 1, 1)
+    #        + grad_out[:, :, 1] @ H_post.T[:, 1, :]
+    # where H_post.T[:, i, :] = H_post[:, :, i]
+    H_post0, H_post1 = tl.split(H_post)  # (BLOCK_SIZE_M,), (BLOCK_SIZE_M,)
+
+    grad_f_acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_C), dtype=tl.float32)
+    # (BLOCK_SIZE_M, BLOCK_SIZE_C) * (BLOCK_SIZE_M, 1) -> (BLOCK_SIZE_M, BLOCK_SIZE_C)
+    grad_f_acc = tl.fma(grad_out0, H_post0[:, None], grad_f_acc)
+    grad_f_acc = tl.fma(grad_out1, H_post1[:, None], grad_f_acc)
+    grad_f = grad_f_acc.to(f.dtype)
+
+    grad_f_ptrs = grad_f_ptr + offs_m[:, None] * stride_grad_fm + offs_c[None, :] * stride_grad_fc
+    tl.store(grad_f_ptrs, grad_f, mask=mask_m[:, None] & mask_c[None, :])
+
+    grad_bias = tl.sum(grad_f_acc, axis=0)  # (BLOCK_SIZE_C,)
+    grad_bias_ptrs = grad_bias_ptr + offs_c * stride_grad_bias
+    tl.atomic_add(grad_bias_ptrs, grad_bias, mask=mask_c, sem="relaxed")
+
+    # grad_x = grad_output @ H_res.T: (BLOCK_SIZE_M, BLOCK_SIZE_C, n) @ (BLOCK_SIZE_M, n, n) = (BLOCK_SIZE_M, n, BLOCK_SIZE_C)
+    # The inner dim is n=2 which is too small for triton, so we will manually unroll the matmul
+    # grad_x = grad_out[:, :, 0] @ H_res.T[:, 0, :]
+    #        + grad_out[:, :, 1] @ H_res.T[:, 1, :]
+    # where H_res.T[:, i, :] = H_res[:, :, i]
+    # Due to broadcasting, it's equivalent to multiplying each H_res[:, i, :].T with grad_out[:, i, :]
+
+    H_res0, H_res1 = tl.split(H_res)  # (BLOCK_SIZE_M, n), (BLOCK_SIZE_M, n)
+
+    grad_x_acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_C, n), dtype=tl.float32)
+    grad_x_acc = tl.fma(grad_out0[:, :, None], H_res0[:, None, :], grad_x_acc)
+    grad_x_acc = tl.fma(grad_out1[:, :, None], H_res1[:, None, :], grad_x_acc)
 
     grad_x = grad_x_acc.to(x.dtype)
     grad_x = tl.reshape(grad_x, (BLOCK_SIZE_M, BLOCK_SIZE_C * n))  # (BLOCK_SIZE_M, BLOCK_SIZE_C*n)

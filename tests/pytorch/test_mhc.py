@@ -18,6 +18,8 @@ from transformer_engine.pytorch.triton.mhc import (
 
 # Disable TF32 for matmul to ensure consistency between the fused and reference implementations
 torch.backends.cuda.matmul.allow_tf32 = False
+# Use FP32 for reduction in bf16 matmul to match triton kernels' implementation which uses FP32 accumulator matmul
+torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False
 
 
 def mhc_projection_ref(x, phi):
@@ -186,11 +188,11 @@ class MHCConfig:
     n: int = 4  # Number of Hyper Connection streams
 
     allow_n = [
-        4,
+        4, 2
     ]
 
     def __init__(self, b, s, C, n=4):
-        assert n in self.allow_n, f"n must be one of {self.allow_n}"
+        assert n in self.allow_n, f"n={n} must be one of {self.allow_n}"
         self.b = b
         self.s = s
         self.C = C
@@ -201,61 +203,23 @@ class MHCConfig:
         return f"b{cfg.b}_s{cfg.s}_C{cfg.C}_n{cfg.n}"
 
 
-mhc_configs = [
-    MHCConfig(8, 32, 32),
-    MHCConfig(8, 128, 16 * 64),
-    MHCConfig(
-        4,
-        128,
-        16 * 64,
-    ),
-    MHCConfig(2, 2048, 24 * 128),
-    MHCConfig(
-        1,
-        2048,
-        24 * 128,
-    ),
-    MHCConfig(
-        13,
-        1,
-        16 * 128,
-    ),
-    MHCConfig(
-        7,
-        1,
-        16 * 256,
-    ),
-    MHCConfig(
-        8,
-        1,
-        16 * 192,
-    ),
-    MHCConfig(
-        8,
-        128,
-        5129,
-    ),
-    MHCConfig(
-        8,
-        512,
-        8000,
-    ),
-    MHCConfig(
-        4,
-        1024,
-        8192,
-    ),
-    MHCConfig(
-        2,
-        4096,
-        8192,
-    ),
-    MHCConfig(
-        8,
-        128,
-        16384,
-    ),
+sbh_configs = [
+    (8, 32, 32),
+    (8, 128, 16 * 64),
+    (4, 128, 16 * 64),
+    (2, 2048, 24 * 128),
+    (1, 2048, 24 * 128),
+    (13, 1, 16 * 128),
+    (7, 1, 16 * 256),
+    (8, 1, 16 * 192),
+    (8, 128, 5129),
+    (8, 512, 8000),
+    (4, 1024, 8192),
+    (2, 4096, 8192),
+    (8, 128, 16384),
 ]
+n_configs = [2, 4]
+mhc_configs = [MHCConfig(b, s, C, n) for b, s, C in sbh_configs for n in n_configs]
 
 
 def get_tols(dtype):
@@ -304,10 +268,11 @@ def test_mhc_scale(cfg: MHCConfig, dtype):
 
     s, b, C, n = cfg.s, cfg.b, cfg.C, cfg.n
     N = 2 * n + n * n
+    N_padded = 32 if n == 4 else 8  # Pad to 32 for n=4, or 8 for n=2
 
     tols = get_tols(dtype)
 
-    H_padded = torch.randn(s * b, 32, device="cuda", requires_grad=True, dtype=dtype)
+    H_padded = torch.randn(s * b, N_padded, device="cuda", requires_grad=True, dtype=dtype)
     H = H_padded[:, :N]
     alpha = torch.randn(3, device="cuda", requires_grad=True, dtype=dtype)
     beta = torch.randn(1, 2 * n + n * n, device="cuda", requires_grad=True, dtype=dtype)
