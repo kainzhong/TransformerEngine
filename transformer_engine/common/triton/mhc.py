@@ -12,8 +12,30 @@ import os
 import triton
 import triton.language as tl
 
+# Choose deterministic algorithms only if non-determinism is **explicitly disallowed** for maximal performance.
+deterministic = os.environ.get("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1") == "0"
 
 def projection_config_fwd():
+    if deterministic:
+        # If deterministic, BLOCK_SIZE_K will be fixed to the nearest power of 2 of K and the tiling strategy will be a bit different
+        block_m = [32, 64, 128]
+        step_k = [16, 32, 64]
+        warps = [2, 4]
+        stages = [2, 3, 4]
+
+        configs = []
+        for m, sk, w, s in itertools.product(block_m, step_k, warps, stages):
+            configs.append(
+                triton.Config(
+                    {"BLOCK_SIZE_M": m, "STEP_SIZE_K": sk},
+                    num_warps=w,
+                    num_stages=s,
+                )
+            )
+        if os.environ.get("NVTE_DISABLE_TRITON_AUTOTUNING", "0") == "1":
+            configs = configs[:1]
+        return configs
+
     block_m = [64, 128]
     block_k = [1024]
     step_k = [32, 64]

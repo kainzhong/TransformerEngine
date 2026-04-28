@@ -271,25 +271,29 @@ class mHCProjectionOp(torch.autograd.Function):
             triton.cdiv(K, META["BLOCK_SIZE_K"]),
         )
 
-        _mhc_projection_fwd_fused[grid](
-            x_ptr=x,  # (M, K)
-            phi_ptr=phi,  # (N, K)
-            h_ptr=H,  # (M, 32)
-            ms_ptr=ms,  # (M,)
-            M=M,
-            N=N,
-            K=K,
-            stride_xm=K,
-            stride_xk=1,
-            stride_phin=K,
-            stride_phik=1,
-            stride_hm=32,
-            stride_hn=1,
-            stride_ms=1,
-            BLOCK_SIZE_N=32,
-            precision="tf32" if use_tf32 else "ieee",
-            DETERMINISTIC=deterministic,
-        )
+        kwargs = {
+            "x_ptr": x,  # (M, K)
+            "phi_ptr": phi,  # (N, K)
+            "h_ptr": H,  # (M, 32)
+            "ms_ptr": ms,  # (M,)
+            "M": M,
+            "N": N,
+            "K": K,
+            "stride_xm": K,
+            "stride_xk": 1,
+            "stride_phin": K,
+            "stride_phik": 1,
+            "stride_hm": 32,
+            "stride_hn": 1,
+            "stride_ms": 1,
+            "BLOCK_SIZE_N": 32,
+            "precision": "tf32" if use_tf32 else "ieee",
+        }
+        kwargs["DETERMINISTIC"] = deterministic
+        if deterministic:
+            # If deterministic, we need to avoid split-K so each block has to process a whole row
+            kwargs["BLOCK_SIZE_K"] = nearest_power_of_2(K)
+        _mhc_projection_fwd_fused[grid](**kwargs)
 
         ctx.save_for_backward(x, phi, ms)
         ctx.phi_dtype = phi.dtype
@@ -333,7 +337,6 @@ class mHCProjectionOp(torch.autograd.Function):
         else:
             grad_x = torch.empty((M, K), device=device, dtype=x.dtype)
 
-        grad_x = torch.empty((M, K), device=device, dtype=x.dtype)
         grad_phi = general_gemm(x, grad_H, out_dtype=torch.float32, layout="NT")[0][:N, :].to(
             phi.dtype
         )  # (2n + n^2, M) @ (M, nC) = (2n + n^2, nC); grad_H's last dim is padded to 32

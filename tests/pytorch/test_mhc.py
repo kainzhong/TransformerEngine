@@ -4,6 +4,7 @@
 
 from dataclasses import dataclass
 import pytest
+import os
 import torch
 import torch.nn.functional as F
 
@@ -19,6 +20,7 @@ from transformer_engine.pytorch.triton.mhc import (
 # Disable TF32 for matmul to ensure consistency between the fused and reference implementations
 torch.backends.cuda.matmul.allow_tf32 = False
 
+deterministic = os.environ.get("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1") == "0"
 
 def mhc_projection_ref(x, phi):
     """
@@ -265,6 +267,7 @@ def get_tols(dtype):
         tols = dict(atol=5e-3, rtol=5e-3)
     return tols
 
+deterministic_tols = dict(atol=0, rtol=0)
 
 @pytest.mark.parametrize("cfg", mhc_configs, ids=MHCConfig.desc)
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
@@ -287,6 +290,38 @@ def test_mhc_projection(cfg: MHCConfig, dtype):
     ref_out_Hs, ref_out_ms = mhc_projection_ref(x_ref, phi_ref)
     fused_out_Hs_padded, fused_out_ms = mhc_fused_projection(x, phi, use_tf32)
     fused_out_Hs = fused_out_Hs_padded[:, :N]
+
+    torch.testing.assert_close(fused_out_Hs, ref_out_Hs, **tols)
+    torch.testing.assert_close(fused_out_ms, ref_out_ms, **tols)
+    (ref_out_Hs.sum() + ref_out_ms.sum()).backward()
+    (fused_out_Hs.sum() + fused_out_ms.sum()).backward()
+
+    torch.testing.assert_close(x.grad, x_ref.grad, **tols)
+    torch.testing.assert_close(phi.grad, phi_ref.grad, **tols)
+
+@pytest.mark.parametrize("cfg", mhc_configs, ids=MHCConfig.desc)
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
+def test_mhc_projection_determinism(cfg: MHCConfig, dtype):
+    reset_rng_states()
+
+    if not deterministic:
+        pytest.skip("Skipping determinism test since non-deterministic algorithms are currently allowed.")
+
+    s, b, C, n = cfg.s, cfg.b, cfg.C, cfg.n
+    nC = n * C
+    N = 2 * n + n * n
+
+    tols = deterministic_tols
+    use_tf32 = False
+
+    x = torch.randn(s * b, nC, device="cuda", requires_grad=True, dtype=dtype)
+    phi = torch.randn(N, nC, dtype=dtype, requires_grad=True, device="cuda")
+
+    x_ref = x.detach().clone().requires_grad_(True)
+    phi_ref = phi.detach().clone().requires_grad_(True)
+
+    ref_out_Hs, ref_out_ms = mhc_fused_projection(x_ref, phi_ref, use_tf32)
+    fused_out_Hs, fused_out_ms = mhc_fused_projection(x, phi, use_tf32)
 
     torch.testing.assert_close(fused_out_Hs, ref_out_Hs, **tols)
     torch.testing.assert_close(fused_out_ms, ref_out_ms, **tols)
