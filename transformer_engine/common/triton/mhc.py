@@ -1152,12 +1152,12 @@ def _mhc_expand_combine_bwd(
     stride_grad_output_Cn,
     stride_fm,
     stride_fc,
-    stride_bias,
+    stride_bias, # Only used when HAS_BIAS is True
     stride_xm,
     stride_xCn,
     stride_grad_fm,
     stride_grad_fc,
-    stride_grad_bias,
+    stride_grad_bias, # Only used when HAS_BIAS is True
     stride_grad_xm,
     stride_grad_xCn,
     # Meta-parameters
@@ -1322,12 +1322,13 @@ def _mhc_expand_combine_bwd(
     grad_f_ptrs = grad_f_ptr + offs_m[:, None] * stride_grad_fm + offs_c[None, :] * stride_grad_fc
     tl.store(grad_f_ptrs, grad_f, mask=mask_m[:, None] & mask_c[None, :])
 
-    grad_bias = tl.sum(grad_f_acc, axis=0)  # (BLOCK_SIZE_C,)
-    grad_bias_ptrs = grad_bias_ptr + offs_c * stride_grad_bias
-    if DETERMINISTIC:
-        tl.store(grad_bias_ptrs, grad_bias, mask=mask_c)
-    else:
-        tl.atomic_add(grad_bias_ptrs, grad_bias, mask=mask_c, sem="relaxed")
+    if HAS_BIAS:
+        grad_bias = tl.sum(grad_f_acc, axis=0)  # (BLOCK_SIZE_C,)
+        grad_bias_ptrs = grad_bias_ptr + offs_c * stride_grad_bias
+        if DETERMINISTIC:
+            tl.store(grad_bias_ptrs, grad_bias, mask=mask_c)
+        else:
+            tl.atomic_add(grad_bias_ptrs, grad_bias, mask=mask_c, sem="relaxed")
 
     # grad_x = grad_output @ H_res.T: (BLOCK_SIZE_M, BLOCK_SIZE_C, n) @ (BLOCK_SIZE_M, n, n) = (BLOCK_SIZE_M, n, BLOCK_SIZE_C)
     # The inner dim is n=4 which is too small for triton, so we will manually unroll the matmul
