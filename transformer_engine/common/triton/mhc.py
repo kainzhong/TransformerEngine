@@ -73,6 +73,7 @@ def _mhc_projection_fwd_fused(
     STEP_SIZE_K: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     precision: tl.constexpr,
+    DETERMINISTIC: tl.constexpr,
 ):
     pid_m = tl.program_id(axis=0)
     pid_k = tl.program_id(axis=1)
@@ -119,14 +120,20 @@ def _mhc_projection_fwd_fused(
         )
 
     h_ptrs = h_ptr + offs_m[:, None] * stride_hm + offs_n_full[None, :] * stride_hn
-    tl.atomic_add(h_ptrs, h_acc, mask=mask_m[:, None], sem="relaxed")
+    if DETERMINISTIC: # If deterministic, each block will process the whole K dimension
+        tl.store(h_ptrs, h_acc, mask=mask_m[:, None])
+    else:
+        tl.atomic_add(h_ptrs, h_acc, mask=mask_m[:, None], sem="relaxed")
 
     offs_ms = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
     masks_ms = offs_ms < M
     offs_ms %= M
     ms_ptrs = ms_ptr + offs_ms * stride_ms
     ms = ms_acc / tl.cast(K, tl.float32)
-    tl.atomic_add(ms_ptrs, ms, mask=masks_ms, sem="relaxed")
+    if DETERMINISTIC: # If deterministic, each block will process the whole K dimension
+        tl.store(ms_ptrs, ms, mask=masks_ms)
+    else:
+        tl.atomic_add(ms_ptrs, ms, mask=masks_ms, sem="relaxed")
 
 
 @triton.autotune(
@@ -338,8 +345,10 @@ def _mhc_scale_bwd_fused(
     grad_b_ptr,  # (2n + n^2,)
     grad_ms_ptr,
     ms_ptr,  # (M,)
+    ws_grad_a_ptr, # Temporary workspace for a with shape (NUM_SMS, 3), or None if DETERMINISTIC is False
+    ws_grad_b_ptr, # Temporary workspace for b with shape (NUM_SMS, 32), or None if DETERMINISTIC is False
     M,
-    n,
+    n: tl.constexpr,
     stride_grad_out_m,
     stride_grad_out_n,
     stride_out_m,
@@ -356,6 +365,8 @@ def _mhc_scale_bwd_fused(
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     eps: tl.constexpr,
+    DETERMINISTIC: tl.constexpr,
+    NUM_SMS: tl.constexpr,
 ):
     pid = tl.program_id(0)
 
@@ -375,80 +386,148 @@ def _mhc_scale_bwd_fused(
     tl.assume(stride_grad_ms == 1)
     tl.assume(stride_ms == 1)
     tl.assume(BLOCK_SIZE_N == 32)
+    tl.assume(NUM_SMS > 0)
 
     N = 2 * n + n * n
 
-    offs_m = pid * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+    num_tiles = tl.cdiv(M, BLOCK_SIZE_M)
+
+    partial_grad_a = tl.zeros((32,), dtype=tl.float32)
+    partial_grad_b = tl.zeros((32,), dtype=tl.float32)
+
     cols = tl.arange(0, BLOCK_SIZE_N)
-    mask_m = offs_m < M
-    mask_n = cols < N
 
-    # Expand a to BLOCK_SIZE_N length
-    offs_a = tl.zeros_like(cols)
-    offs_a = tl.where((cols >= n) & (cols < 2 * n), 1, offs_a)
-    offs_a = tl.where((cols >= 2 * n) & (cols < 2 * n + n * n), 2, offs_a)
-    # Pick a[0] from a for the first 4 columns, a[1] for the next 4 columns, and a[2] for the rest of the columns
-    a = tl.load(
-        a_ptr + offs_a * stride_a, mask=offs_a < 3, other=0.0
-    )  # a[2*n + n*n:] is filled with garbage
-    a = tl.where(cols < N, a, 0.0)  # Mask out the garbage values in a
+    for tile_id in tl.range(pid, num_tiles, NUM_SMS):
+        offs_m = tile_id * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+        mask_m = offs_m < M
+        mask_n = cols < N
 
-    ms_offsets = offs_m
-    ms_mask = mask_m
-    ms = tl.load(ms_ptr + ms_offsets * stride_ms, mask=ms_mask, other=1.0)  # (BLOCK_SIZE_M,)
-    rms = tl.sqrt(ms + eps)
+        # Expand a to BLOCK_SIZE_N length
+        offs_a = tl.zeros_like(cols)
+        offs_a = tl.where((cols >= n) & (cols < 2 * n), 1, offs_a)
+        offs_a = tl.where((cols >= 2 * n) & (cols < 2 * n + n * n), 2, offs_a)
+        # Pick a[0] from a for the first 4 columns, a[1] for the next 4 columns, and a[2] for the rest of the columns
+        a = tl.load(
+            a_ptr + offs_a * stride_a, mask=offs_a < 3, other=0.0
+        )  # a[2*n + n*n:] is filled with garbage
+        a = tl.where(cols < N, a, 0.0)  # Mask out the garbage values in a
 
-    grad_out = tl.load(
-        grad_out_ptr + offs_m[:, None] * stride_grad_out_m + cols[None, :] * stride_grad_out_n,
-        mask=mask_m[:, None] & mask_n[None, :],
-        other=0.0,
-    )  # (BLOCK_SIZE_M, BLOCK_SIZE_N)
-    out = tl.load(
-        out_ptr + offs_m[:, None] * stride_out_m + cols[None, :] * stride_out_n,
-        mask=mask_m[:, None] & mask_n[None, :],
-        other=0.0,
-    )  # (BLOCK_SIZE_M, BLOCK_SIZE_N)
-    h = tl.load(
-        h_ptr + offs_m[:, None] * stride_hm + cols[None, :] * stride_hn,
-        mask=mask_m[:, None] & mask_n[None, :],
-        other=0.0,
-    )  # (BLOCK_SIZE_M, BLOCK_SIZE_N)
+        ms_offsets = offs_m
+        ms_mask = mask_m
+        ms = tl.load(ms_ptr + ms_offsets * stride_ms, mask=ms_mask, other=1.0)  # (BLOCK_SIZE_M,)
+        rms = tl.sqrt(ms + eps)
 
-    # Gradiient of H before H_pre and H_post go through sigmoid
-    grad_out_out = grad_out * out
-    grad_h_pre = grad_out_out * (1 - out)
-    grad_h_post = grad_out_out * 0.5 * (2 - out)
-    grad_h = grad_out
-    grad_h = tl.where(cols[None, :] < n, grad_h_pre, grad_h)
-    grad_h = tl.where((cols[None, :] >= n) & (cols[None, :] < 2 * n), grad_h_post, grad_h)
+        grad_out = tl.load(
+            grad_out_ptr + offs_m[:, None] * stride_grad_out_m + cols[None, :] * stride_grad_out_n,
+            mask=mask_m[:, None] & mask_n[None, :],
+            other=0.0,
+        )  # (BLOCK_SIZE_M, BLOCK_SIZE_N)
+        out = tl.load(
+            out_ptr + offs_m[:, None] * stride_out_m + cols[None, :] * stride_out_n,
+            mask=mask_m[:, None] & mask_n[None, :],
+            other=0.0,
+        )  # (BLOCK_SIZE_M, BLOCK_SIZE_N)
+        h = tl.load(
+            h_ptr + offs_m[:, None] * stride_hm + cols[None, :] * stride_hn,
+            mask=mask_m[:, None] & mask_n[None, :],
+            other=0.0,
+        )  # (BLOCK_SIZE_M, BLOCK_SIZE_N)
 
-    grad_a = tl.sum(h * grad_h / rms[:, None], axis=0).to(a.dtype)
-    # Write grad_a[0:4].sum to grad_a_ptr[0], grad_a[4:8].sum to grad_a_ptr[1], and grad_a[8:24].sum to grad_a_ptr[2]
-    tl.atomic_add(grad_a_ptr, tl.where(cols[None, :] < n, grad_a, 0.0).sum(), sem="relaxed")
-    tl.atomic_add(
-        grad_a_ptr + stride_grad_a,
-        tl.where((cols[None, :] >= n) & (cols[None, :] < 2 * n), grad_a, 0.0).sum(),
-        sem="relaxed",
-    )
-    tl.atomic_add(
-        grad_a_ptr + 2 * stride_grad_a,
-        tl.where((cols[None, :] >= 2 * n) & (cols[None, :] < 2 * n + n * n), grad_a, 0.0).sum(),
-        sem="relaxed",
-    )
+        # Gradiient of H before H_pre and H_post go through sigmoid
+        grad_out_out = grad_out * out
+        grad_h_pre = grad_out_out * (1 - out)
+        grad_h_post = grad_out_out * 0.5 * (2 - out)
+        grad_h = grad_out
+        grad_h = tl.where(cols[None, :] < n, grad_h_pre, grad_h)
+        grad_h = tl.where((cols[None, :] >= n) & (cols[None, :] < 2 * n), grad_h_post, grad_h)
 
-    grad_b = tl.sum(grad_h, axis=0).to(a.dtype)
-    tl.atomic_add(grad_b_ptr + cols * stride_grad_b, grad_b, mask=cols < N, sem="relaxed")
+        grad_a = tl.sum(h * grad_h / rms[:, None], axis=0).to(a.dtype)
+        partial_grad_a += grad_a
 
-    grad_rms = (tl.sum((-grad_h * h * a[None, :]), axis=1) / (rms * rms)).to(rms.dtype)
-    grad_ms = grad_rms / (2 * rms)
-    tl.store(grad_ms_ptr + ms_offsets * stride_grad_ms, grad_ms, mask=ms_mask)
+        grad_b = tl.sum(grad_h, axis=0).to(a.dtype)
+        partial_grad_b += grad_b
+        
+        grad_rms = (tl.sum((-grad_h * h * a[None, :]), axis=1) / (rms * rms)).to(rms.dtype)
+        grad_ms = grad_rms / (2 * rms)
+        tl.store(grad_ms_ptr + ms_offsets * stride_grad_ms, grad_ms, mask=ms_mask)
 
-    grad_h = a[None, :] * grad_h / rms[:, None]
-    tl.store(
-        grad_h_ptr + offs_m[:, None] * stride_grad_hm + cols[None, :] * stride_grad_hn,
-        grad_h,
-        mask=mask_m[:, None] & mask_n[None, :],
-    )
+        grad_h = a[None, :] * grad_h / rms[:, None]
+        tl.store(
+            grad_h_ptr + offs_m[:, None] * stride_grad_hm + cols[None, :] * stride_grad_hn,
+            grad_h,
+            mask=mask_m[:, None] & mask_n[None, :],
+        )
+
+    if DETERMINISTIC:
+        ws_grad_a_ptrs = ws_grad_a_ptr + pid * 4
+        # Write grad_a[0:4].sum to grad_a_ptr[0], grad_a[4:8].sum to grad_a_ptr[1], and grad_a[8:24].sum to grad_a_ptr[2]
+        tl.store(ws_grad_a_ptrs, 
+            tl.where(cols[None, :] < n, partial_grad_a, 0.0).sum()
+        )
+        tl.store(ws_grad_a_ptrs + 1,
+            tl.where((cols[None, :] >= n) & (cols[None, :] < 2 * n), partial_grad_a, 0.0).sum(),
+        )
+        tl.store(
+            ws_grad_a_ptrs + 2,
+            tl.where((cols[None, :] >= 2 * n) & (cols[None, :] < 2 * n + n * n), partial_grad_a, 0.0).sum(),
+        )
+        ws_grad_b_ptrs = ws_grad_b_ptr + pid * 32 + cols
+        tl.store(ws_grad_b_ptrs, partial_grad_b, mask=cols < N)
+    else:
+        # Write grad_a[0:4].sum to grad_a_ptr[0], grad_a[4:8].sum to grad_a_ptr[1], and grad_a[8:24].sum to grad_a_ptr[2]
+        tl.atomic_add(grad_a_ptr, tl.where(cols[None, :] < n, partial_grad_a, 0.0).sum(), sem="relaxed")
+        tl.atomic_add(
+            grad_a_ptr + stride_grad_a,
+            tl.where((cols[None, :] >= n) & (cols[None, :] < 2 * n), partial_grad_a, 0.0).sum(),
+            sem="relaxed",
+        )
+        tl.atomic_add(
+            grad_a_ptr + 2 * stride_grad_a,
+            tl.where((cols[None, :] >= 2 * n) & (cols[None, :] < 2 * n + n * n), partial_grad_a, 0.0).sum(),
+            sem="relaxed",
+        )
+
+        tl.atomic_add(grad_b_ptr + cols * stride_grad_b, partial_grad_b, mask=cols < N, sem="relaxed")
+
+@triton.jit
+def _mhc_scale_bwd_reduce_workspace(
+    ws_grad_a_ptr, # Temporary workspace for a with shape (NUM_SMS, 3)
+    ws_grad_b_ptr, # Temporary workspace for b with shape (NUM_SMS, 2*n+n*n)
+    grad_a_ptr, # (3,)
+    grad_b_ptr, # (2*n+n*n,)
+    stride_grad_a,
+    stride_grad_b,
+    NUM_SMS: tl.constexpr,
+    NUM_SMS_PADDED: tl.constexpr,
+    n: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    dtype: tl.constexpr,
+):
+    tl.assume(NUM_SMS > 0)
+    tl.assume(n == 4)
+    tl.assume(stride_grad_a == 1)
+    tl.assume(stride_grad_b == 1)
+
+    N = 2 * n + n * n
+
+    offs_m = tl.arange(0, NUM_SMS_PADDED)
+    mask_m = offs_m < NUM_SMS
+    offs_a = tl.arange(0, 4)
+    mask_a = offs_a < 3
+    offs_b = tl.arange(0, BLOCK_SIZE_N)
+    mask_b = offs_b < N
+
+    ws_grad_a_offs = ws_grad_a_ptr + offs_m[:, None] * 4 + offs_a[None, :]
+    ws_grad_a = tl.load(ws_grad_a_offs, mask=mask_m[:, None] & mask_a[None, :], other=0.0) # (NUM_SMS_PADDED, 4)
+    grad_a = tl.sum(ws_grad_a, axis=0)  # (4,)
+    grad_a_offs = grad_a_ptr + offs_a * stride_grad_a
+    tl.store(grad_a_offs, grad_a.to(dtype), mask=mask_a)
+
+    ws_grad_b_offs = ws_grad_b_ptr + offs_m[:, None] * BLOCK_SIZE_N + offs_b[None, :]
+    ws_grad_b = tl.load(ws_grad_b_offs, mask=mask_m[:, None] & mask_b[None, :], other=0.0) # (NUM_SMS_PADDED, BLOCK_SIZE_N)
+    grad_b = tl.sum(ws_grad_b, axis=0)  # (BLOCK_SIZE_N)
+    grad_b_offs = grad_b_ptr + offs_b * stride_grad_b
+    tl.store(grad_b_offs, grad_b.to(dtype), mask=mask_b)
 
 
 def sinkhorn_config():
@@ -462,15 +541,16 @@ def sinkhorn_config():
         configs = configs[:1]
     return configs
 
-
 @triton.autotune(
     configs=sinkhorn_config(),
     key=["M"],
 )
 @triton.jit
-def _mhc_sinkhorn_fwd_fused_recompute(
+def _mhc_sinkhorn_fwd_fused(
     x_ptr,  # (M, n*n)
     output_ptr,  # (M, n*n)
+    hist_f_ptr,  # (iters+1, M, n), or None if RECOMPUTE is True
+    hist_g_ptr,  # (iters+1, M, n) or None if RECOMPUTE is True
     stride_xm,
     stride_xn,
     stride_out_m,
@@ -479,6 +559,7 @@ def _mhc_sinkhorn_fwd_fused_recompute(
     n: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
     iters,
+    RECOMPUTE: tl.constexpr,
 ):
     pid = tl.program_id(0)
 
@@ -486,10 +567,11 @@ def _mhc_sinkhorn_fwd_fused_recompute(
     tl.assume(M > 0 and iters > 0)
     tl.assume(n == 4)
 
-    BATCH_SIZE: tl.constexpr = BLOCK_SIZE // (n * n)
+    BATCH_SIZE: tl.constexpr = BLOCK_SIZE // (n * n)  # Assume there's no remainder for simplicity
 
     offs_batch = pid * BATCH_SIZE + tl.arange(0, BATCH_SIZE)
     offs_nn = tl.arange(0, n * n)
+    offs_n_hist = tl.arange(0, n)
     mask_batch = offs_batch < M
 
     x_ptrs = x_ptr + offs_batch[:, None] * stride_xm + offs_nn[None, :] * stride_xn
@@ -502,18 +584,39 @@ def _mhc_sinkhorn_fwd_fused_recompute(
     f = tl.zeros((BATCH_SIZE, n), dtype=x.dtype)  # (BATCH_SIZE, n)
     g = tl.zeros((BATCH_SIZE, n), dtype=x.dtype)  # (BATCH_SIZE, n)
 
-    for _ in range(iters):
+    sbn = M * n
+
+    if not RECOMPUTE:
+        # Store the initial f and g to history
+        f_hist_ptrs = hist_f_ptr + offs_batch[:, None] * n + offs_n_hist[None, :]
+        g_hist_ptrs = hist_g_ptr + offs_batch[:, None] * n + offs_n_hist[None, :]
+        tl.store(f_hist_ptrs, f, mask=mask_batch[:, None])
+        tl.store(g_hist_ptrs, g, mask=mask_batch[:, None])
+
+    for iter_idx in range(iters):
         # Update f: logsumexp over the column dimension (1)
         f = x + g[:, None, :]  # Broadcast g to (BATCH_SIZE, n, n)
         f_max = tl.max(f, axis=2)
         f = tl.log(tl.sum(tl.exp(f - f_max[:, :, None]), axis=2))  # logsumexp over columns
         f = log_mu - f - f_max
 
+        if not RECOMPUTE:
+            f_hist_ptrs = (
+                hist_f_ptr + (iter_idx + 1) * sbn + offs_batch[:, None] * n + offs_n_hist[None, :]
+            )
+            tl.store(f_hist_ptrs, f, mask=mask_batch[:, None])
+
         # Update g: logsumexp over the row dimension (2)
         g = x + f[:, :, None]  # Broadcast f to (BATCH_SIZE, n, n)
         g_max = tl.max(g, axis=1)
         g = tl.log(tl.sum(tl.exp(g - g_max[:, None, :]), axis=1))  # logsumexp over rows
         g = log_nu - g - g_max
+
+        if not RECOMPUTE:
+            g_hist_ptrs = (
+                hist_g_ptr + (iter_idx + 1) * sbn + offs_batch[:, None] * n + offs_n_hist[None, :]
+            )
+            tl.store(g_hist_ptrs, g, mask=mask_batch[:, None])
 
     log_P = f[:, :, None] + x + g[:, None, :]
     log_P = tl.reshape(
@@ -670,93 +773,6 @@ def _mhc_sinkhorn_bwd_fused(
         mask=mask_batch[:, None],
     )
 
-
-@triton.autotune(
-    configs=sinkhorn_config(),
-    key=["M"],
-)
-@triton.jit
-def _mhc_sinkhorn_fwd_fused(
-    x_ptr,  # (M, n*n)
-    output_ptr,  # (M, n*n)
-    hist_f_ptr,  # (iters+1, M, n)
-    hist_g_ptr,  # (iters+1, M, n)
-    stride_xm,
-    stride_xn,
-    stride_out_m,
-    stride_out_n,
-    M,
-    n: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
-    iters,
-):
-    pid = tl.program_id(0)
-
-    tl.static_assert(BLOCK_SIZE % (n * n) == 0, "BLOCK_SIZE must be divisible by n*n")
-    tl.assume(M > 0 and iters > 0)
-    tl.assume(n == 4)
-
-    BATCH_SIZE: tl.constexpr = BLOCK_SIZE // (n * n)  # Assume there's no remainder for simplicity
-
-    offs_batch = pid * BATCH_SIZE + tl.arange(0, BATCH_SIZE)
-    offs_nn = tl.arange(0, n * n)
-    offs_n_hist = tl.arange(0, n)
-    mask_batch = offs_batch < M
-
-    x_ptrs = x_ptr + offs_batch[:, None] * stride_xm + offs_nn[None, :] * stride_xn
-    x = tl.load(x_ptrs, mask=mask_batch[:, None], other=0.0)  # (BATCH_SIZE, n*n)
-    x = tl.reshape(x, (BATCH_SIZE, n, n))  # (BATCH_SIZE, n, n)
-
-    log_mu = tl.zeros((BATCH_SIZE, n), dtype=x.dtype)  # (BATCH_SIZE, n)
-    log_nu = tl.zeros((BATCH_SIZE, n), dtype=x.dtype)  # (BATCH_SIZE, n)
-
-    f = tl.zeros((BATCH_SIZE, n), dtype=x.dtype)  # (BATCH_SIZE, n)
-    g = tl.zeros((BATCH_SIZE, n), dtype=x.dtype)  # (BATCH_SIZE, n)
-
-    sbn = M * n
-
-    # Store the initial f and g to history
-    f_hist_ptrs = hist_f_ptr + offs_batch[:, None] * n + offs_n_hist[None, :]
-    g_hist_ptrs = hist_g_ptr + offs_batch[:, None] * n + offs_n_hist[None, :]
-    tl.store(f_hist_ptrs, f, mask=mask_batch[:, None])
-    tl.store(g_hist_ptrs, g, mask=mask_batch[:, None])
-
-    for iter_idx in range(iters):
-        # Update f: logsumexp over the column dimension (1)
-        f = x + g[:, None, :]  # Broadcast g to (BATCH_SIZE, n, n)
-        f_max = tl.max(f, axis=2)
-        f = tl.log(tl.sum(tl.exp(f - f_max[:, :, None]), axis=2))  # logsumexp over columns
-        f = log_mu - f - f_max
-
-        f_hist_ptrs = (
-            hist_f_ptr + (iter_idx + 1) * sbn + offs_batch[:, None] * n + offs_n_hist[None, :]
-        )
-        tl.store(f_hist_ptrs, f, mask=mask_batch[:, None])
-
-        # Update g: logsumexp over the row dimension (2)
-        g = x + f[:, :, None]  # Broadcast f to (BATCH_SIZE, n, n)
-        g_max = tl.max(g, axis=1)
-        g = tl.log(tl.sum(tl.exp(g - g_max[:, None, :]), axis=1))  # logsumexp over rows
-        g = log_nu - g - g_max
-
-        g_hist_ptrs = (
-            hist_g_ptr + (iter_idx + 1) * sbn + offs_batch[:, None] * n + offs_n_hist[None, :]
-        )
-        tl.store(g_hist_ptrs, g, mask=mask_batch[:, None])
-
-    log_P = f[:, :, None] + x + g[:, None, :]
-    log_P = tl.reshape(
-        log_P,
-        (
-            BATCH_SIZE,
-            n * n,
-        ),
-    )
-    P = tl.exp(log_P)
-
-    output_ptrs = output_ptr + offs_batch[:, None] * stride_out_m + offs_nn[None, :] * stride_out_n
-    tl.store(output_ptrs, P, mask=mask_batch[:, None])
-
 def aggregate_config():
     block_m = [1, 2, 4]
     block_c = [64, 128, 256]
@@ -874,6 +890,7 @@ def _mhc_aggregate_bwd(
     BLOCK_SIZE_C: tl.constexpr,
     precision: tl.constexpr,
     FUSE_GRAD_X_ACC: tl.constexpr,
+    DETERMINISTIC: tl.constexpr,
 ):
     """
     Forward:
@@ -927,7 +944,10 @@ def _mhc_aggregate_bwd(
     grad_H_pre = tl.reshape(grad_H_pre, (BLOCK_SIZE_M * n,))  # (BLOCK_SIZE_M * n)
     offs_grad_H_pre = pid_m * BLOCK_SIZE_M * n + tl.arange(0, BLOCK_SIZE_M * n)
     grad_H_pre_ptrs = grad_H_pre_ptr + offs_grad_H_pre
-    tl.atomic_add(grad_H_pre_ptrs, grad_H_pre, mask=offs_grad_H_pre < M * n, sem="relaxed")
+    if DETERMINISTIC:
+        tl.store(grad_H_pre_ptrs, grad_H_pre, mask=offs_grad_H_pre < M * n)
+    else:
+        tl.atomic_add(grad_H_pre_ptrs, grad_H_pre, mask=offs_grad_H_pre < M * n, sem="relaxed")
 
     H_pre_offs = pid_m * BLOCK_SIZE_M * n + tl.arange(0, BLOCK_SIZE_M * n)
     H_pre = tl.load(
@@ -1111,6 +1131,7 @@ def _mhc_expand_combine_bwd(
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_C: tl.constexpr,
     precision: tl.constexpr,
+    DETERMINISTIC: tl.constexpr,
 ):
     """
     Each block
@@ -1193,7 +1214,10 @@ def _mhc_expand_combine_bwd(
     grad_H_post = tl.reshape(grad_H_post, (BLOCK_SIZE_M * n,))  # (BLOCK_SIZE_M * n)
     offs_grad_H_post = pid_m * BLOCK_SIZE_M * n + tl.arange(0, BLOCK_SIZE_M * n)
     grad_H_post_ptrs = grad_H_post_ptr + offs_grad_H_post
-    tl.atomic_add(grad_H_post_ptrs, grad_H_post, mask=offs_grad_H_post < M * n, sem="relaxed")
+    if DETERMINISTIC:
+        tl.store(grad_H_post_ptrs, grad_H_post, mask=offs_grad_H_post < M * n)
+    else:
+        tl.atomic_add(grad_H_post_ptrs, grad_H_post, mask=offs_grad_H_post < M * n, sem="relaxed")
 
     x_ptrs = x_ptr + offs_m[:, None] * stride_xm + offs_cn[None, :] * stride_xCn
     x = tl.load(
@@ -1208,9 +1232,12 @@ def _mhc_expand_combine_bwd(
     grad_H_res = tl.reshape(grad_H_res, (BLOCK_SIZE_M * n * n,))  # (BLOCK_SIZE_M * n * n)
     offs_grad_H_res = pid_m * BLOCK_SIZE_M * n * n + tl.arange(0, BLOCK_SIZE_M * n * n)
     grad_H_res_ptrs = grad_H_res_ptr + offs_grad_H_res
-    tl.atomic_add(
-        grad_H_res_ptrs, grad_H_res.to(tl.float32), mask=offs_grad_H_res < M * n * n, sem="relaxed"
-    )
+    if DETERMINISTIC:
+        tl.store(grad_H_res_ptrs, grad_H_res, mask=offs_grad_H_res < M * n * n)
+    else:
+        tl.atomic_add(
+            grad_H_res_ptrs, grad_H_res.to(tl.float32), mask=offs_grad_H_res < M * n * n, sem="relaxed"
+        )
 
     grad_out_reshape = tl.reshape(
         grad_out, (BLOCK_SIZE_M, BLOCK_SIZE_C, 2, 2)
@@ -1425,6 +1452,7 @@ def _mhc_expand_combine_with_bias_bwd(
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_C: tl.constexpr,
     precision: tl.constexpr,
+    DETERMINISTIC: tl.constexpr,
 ):
     """
     Each block
@@ -1518,7 +1546,10 @@ def _mhc_expand_combine_with_bias_bwd(
     grad_H_post = tl.reshape(grad_H_post, (BLOCK_SIZE_M * n,))  # (BLOCK_SIZE_M * n)
     offs_grad_H_post = pid_m * BLOCK_SIZE_M * n + tl.arange(0, BLOCK_SIZE_M * n)
     grad_H_post_ptrs = grad_H_post_ptr + offs_grad_H_post
-    tl.atomic_add(grad_H_post_ptrs, grad_H_post, mask=offs_grad_H_post < M * n, sem="relaxed")
+    if DETERMINISTIC:
+        tl.store(grad_H_post_ptrs, grad_H_post, mask=offs_grad_H_post < M * n)
+    else:
+        tl.atomic_add(grad_H_post_ptrs, grad_H_post, mask=offs_grad_H_post < M * n, sem="relaxed")
 
     x_ptrs = x_ptr + offs_m[:, None] * stride_xm + offs_cn[None, :] * stride_xCn
     x = tl.load(
@@ -1533,9 +1564,12 @@ def _mhc_expand_combine_with_bias_bwd(
     grad_H_res = tl.reshape(grad_H_res, (BLOCK_SIZE_M * n * n,))  # (BLOCK_SIZE_M * n * n)
     offs_grad_H_res = pid_m * BLOCK_SIZE_M * n * n + tl.arange(0, BLOCK_SIZE_M * n * n)
     grad_H_res_ptrs = grad_H_res_ptr + offs_grad_H_res
-    tl.atomic_add(
-        grad_H_res_ptrs, grad_H_res.to(tl.float32), mask=offs_grad_H_res < M * n * n, sem="relaxed"
-    )
+    if DETERMINISTIC:
+        tl.store(grad_H_res_ptrs, grad_H_res, mask=offs_grad_H_res < M * n * n)
+    else:
+        tl.atomic_add(
+            grad_H_res_ptrs, grad_H_res.to(tl.float32), mask=offs_grad_H_res < M * n * n, sem="relaxed"
+        )
 
     grad_out_reshape = tl.reshape(
         grad_out, (BLOCK_SIZE_M, BLOCK_SIZE_C, 2, 2)
@@ -1575,7 +1609,10 @@ def _mhc_expand_combine_with_bias_bwd(
 
     grad_bias = tl.sum(grad_f_acc, axis=0)  # (BLOCK_SIZE_C,)
     grad_bias_ptrs = grad_bias_ptr + offs_c * stride_grad_bias
-    tl.atomic_add(grad_bias_ptrs, grad_bias, mask=mask_c, sem="relaxed")
+    if DETERMINISTIC:
+        tl.store(grad_bias_ptrs, grad_bias, mask=mask_c)
+    else:
+        tl.atomic_add(grad_bias_ptrs, grad_bias, mask=mask_c, sem="relaxed")
 
     # grad_x = grad_output @ H_res.T: (BLOCK_SIZE_M, BLOCK_SIZE_C, n) @ (BLOCK_SIZE_M, n, n) = (BLOCK_SIZE_M, n, BLOCK_SIZE_C)
     # The inner dim is n=4 which is too small for triton, so we will manually unroll the matmul

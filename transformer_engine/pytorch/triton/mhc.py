@@ -9,6 +9,7 @@ import torch
 import triton
 
 from transformer_engine.common.triton.mhc import (
+    _mhc_scale_bwd_reduce_workspace,
     _mhc_scale_fwd_fused,
     _mhc_scale_bwd_fused,
     _mhc_expand_combine_with_bias_fwd,
@@ -20,22 +21,16 @@ from transformer_engine.common.triton.mhc import (
     _mhc_projection_fwd_fused,
     _mhc_projection_bwd_fused,
     _mhc_sinkhorn_fwd_fused,
-    _mhc_sinkhorn_fwd_fused_recompute,
     _mhc_sinkhorn_bwd_fused,
 )
 from transformer_engine.pytorch.cpp_extensions.gemm import general_gemm
 
+# Choose deterministic algorithms only if non-determinism is **explicitly disallowed** for maximal performance.
+deterministic = os.environ.get("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1") == "0"
 
-def check_deterministic(operator: str):
-    """
-    Checks if the non-deterministic algorithm is allowed for the given operator. If not, raises an assertion error with instructions on how to allow it.
-    Since atomic add is used in this mHC implementation, it breaks the determinism guarantee due to non-associativity of floating point addition.
-    """
-    allow_nondeterministic = os.environ.get("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1") == "1"
-    assert allow_nondeterministic, (
-        f"[{operator}]: This operation uses atomic add which violates determinism. Set"
-        " NVTE_ALLOW_NONDETERMINISTIC_ALGO=1 to allow this non-deterministic behavior."
-    )
+def nearest_power_of_2(x):
+    """Utility function to compute the nearest power of 2 greater than or equal to x."""
+    return 1 << (x - 1).bit_length()
 
 
 def mhc_fused_sinkhorn(
@@ -111,7 +106,6 @@ def mhc_fused_scale(
 
     """
     assert n == 4, "Only n=4 is supported in this implementation"
-    check_deterministic("mhc_fused_scale")
     out = mHCScaleFusedOp.apply(H, alpha, beta, ms, n)
     h_pre = out[..., :n]
     h_post = out[..., n : 2 * n]
@@ -142,7 +136,6 @@ def mhc_fused_aggregate(x: torch.Tensor, H_pre: torch.Tensor, n: int, use_tf32: 
          output activation tensor of shape (s, b, C), which is the aggregated output after merging n hyper connections
     """
     assert n == 4, "Only n=4 is supported in this implementation"
-    check_deterministic("mhc_fused_aggregate")
     out = mHCAggregateOp.apply(x, H_pre, n, use_tf32)
     return out
 
@@ -189,7 +182,6 @@ def mhc_fused_expand_combine(
         out of shape (s, b, C, n), which is the expanded and combined output after merging n hyper connections
     """
     assert n == 4, "Only n=4 is supported in this implementation"
-    check_deterministic("mhc_fused_expand_combine")
     out = mHCExpandCombineOp.apply(
         f,
         bias,
@@ -232,7 +224,6 @@ def mhc_fused_projection(x: torch.Tensor, phi: torch.Tensor, use_tf32: bool = Tr
     assert (
         phi.shape[0] == 24
     ), "Currently only n=4 is supported, which means phi should have 24 in its first dimension"
-    check_deterministic("mhc_fused_projection")
     H, ms = mHCProjectionOp.apply(x, phi, use_tf32)
     return H, ms
 
@@ -297,6 +288,7 @@ class mHCProjectionOp(torch.autograd.Function):
             stride_ms=1,
             BLOCK_SIZE_N=32,
             precision="tf32" if use_tf32 else "ieee",
+            DETERMINISTIC=deterministic,
         )
 
         ctx.save_for_backward(x, phi, ms)
@@ -482,37 +474,68 @@ class mHCScaleFusedOp(torch.autograd.Function):
         ]  # Use only the first N elements for grad_beta, the rest are just padding
         grad_ms = torch.zeros((M,), device=grad_out.device, dtype=grad_out.dtype)
 
-        # pylint: disable=unnecessary-lambda-assignment
-        grid = lambda META: (triton.cdiv(M, META["BLOCK_SIZE_M"]),)
+        device = torch.cuda.current_device()
+        num_sms = torch.cuda.get_device_properties(device).multi_processor_count
+        grid = (num_sms,)
 
-        _mhc_scale_bwd_fused[grid](
-            grad_out_ptr=grad_out,
-            out_ptr=out,
-            grad_h_ptr=grad_h,
-            h_ptr=H,
-            grad_a_ptr=grad_alpha,
-            a_ptr=alpha,
-            grad_b_ptr=grad_beta,
-            grad_ms_ptr=grad_ms,
-            ms_ptr=ms,
-            M=M,
-            n=n,
-            stride_grad_out_m=32,
-            stride_grad_out_n=1,
-            stride_out_m=32,
-            stride_out_n=1,
-            stride_grad_hm=32,
-            stride_grad_hn=1,
-            stride_hm=32,
-            stride_hn=1,
-            stride_grad_a=1,
-            stride_a=1,
-            stride_grad_b=1,
-            stride_grad_ms=1,
-            stride_ms=1,
-            BLOCK_SIZE_N=32,
-            eps=torch.finfo(ms.dtype).eps,
-        )
+        kwargs = {
+            "grad_out_ptr": grad_out,
+            "out_ptr": out,
+            "grad_h_ptr": grad_h,
+            "h_ptr": H,
+            "grad_a_ptr": grad_alpha,
+            "a_ptr": alpha,
+            "grad_b_ptr": grad_beta,
+            "grad_ms_ptr": grad_ms,
+            "ms_ptr": ms,
+            "M": M,
+            "n": n,
+            "stride_grad_out_m": 32,
+            "stride_grad_out_n": 1,
+            "stride_out_m": 32,
+            "stride_out_n": 1,
+            "stride_grad_hm": 32,
+            "stride_grad_hn": 1,
+            "stride_hm": 32,
+            "stride_hn": 1,
+            "stride_grad_a": 1,
+            "stride_a": 1,
+            "stride_grad_b": 1,
+            "stride_grad_ms": 1,
+            "stride_ms": 1,
+            "BLOCK_SIZE_N": 32,
+            "eps": torch.finfo(ms.dtype).eps,
+            "NUM_SMS": num_sms,
+            "DETERMINISTIC": deterministic,
+        }
+        if deterministic:
+            workspace_buffer_grad_alpha = torch.empty((num_sms, 4), device=grad_out.device, dtype=torch.float32)
+            workspace_buffer_grad_beta = torch.empty((num_sms, 32), device=grad_out.device, dtype=torch.float32)
+            _mhc_scale_bwd_fused[grid](
+                ws_grad_a_ptr=workspace_buffer_grad_alpha,
+                ws_grad_b_ptr=workspace_buffer_grad_beta,
+                **kwargs,
+            )
+            num_sms_padded = nearest_power_of_2(num_sms)
+            _mhc_scale_bwd_reduce_workspace[(1,)](
+                ws_grad_a_ptr=workspace_buffer_grad_alpha.to(grad_alpha.dtype),
+                ws_grad_b_ptr=workspace_buffer_grad_beta.to(grad_beta.dtype),
+                grad_a_ptr=grad_alpha,
+                grad_b_ptr=grad_beta,
+                stride_grad_a=1,
+                stride_grad_b=1,
+                NUM_SMS=num_sms,
+                NUM_SMS_PADDED=num_sms_padded,
+                n=n,
+                BLOCK_SIZE_N=32,
+                dtype=triton.language.bfloat16 if grad_out.dtype == torch.bfloat16 else triton.language.float32,
+            )
+        else:
+            _mhc_scale_bwd_fused[grid](
+                ws_grad_a_ptr=None,  # No workspace for non-deterministic version
+                ws_grad_b_ptr=None,  # No workspace for non-deterministic version
+                **kwargs,
+            )
 
         return (
             grad_h.to(ctx.dtype),
@@ -558,46 +581,43 @@ class mHCSinkhornOp(torch.autograd.Function):
         H_res = H_res.contiguous().view(s * b, n * n)
 
         hist_f, hist_g = None, None
-        if not recompute_hist:
-            # History buffers: (iters+1, s, b, n)
-            hist_f = torch.empty((iters + 1, s, b, n), device=H_res.device, dtype=H_res.dtype)
-            hist_g = torch.empty((iters + 1, s, b, n), device=H_res.device, dtype=H_res.dtype)
         H_res_out = torch.empty_like(H_res)  # (s*b, n*n)
 
         # pylint: disable=unnecessary-lambda-assignment
         grid = lambda META: (triton.cdiv(s * b * n * n, META["BLOCK_SIZE"]),)
 
-        if recompute_hist:
-            _mhc_sinkhorn_fwd_fused_recompute[grid](
-                x_ptr=H_res,
-                output_ptr=H_res_out,
-                stride_xm=n * n,
-                stride_xn=1,
-                stride_out_m=n * n,
-                stride_out_n=1,
-                M=s * b,
-                n=n,
-                iters=iters,
-            )
-        else:
-            _mhc_sinkhorn_fwd_fused[grid](
-                x_ptr=H_res,
-                output_ptr=H_res_out,
-                hist_f_ptr=hist_f,
-                hist_g_ptr=hist_g,
-                stride_xm=n * n,
-                stride_xn=1,
-                stride_out_m=n * n,
-                stride_out_n=1,
-                M=s * b,
-                n=n,
-                iters=iters,
-            )
+        common_kwargs = {
+            "x_ptr": H_res,
+            "output_ptr": H_res_out,
+            "stride_xm": n * n,
+            "stride_xn": 1,
+            "stride_out_m": n * n,
+            "stride_out_n": 1,
+            "M": s * b,
+            "n": n,
+            "iters": iters,
+        }
 
         if recompute_hist:
+            _mhc_sinkhorn_fwd_fused[grid](
+                hist_f_ptr=None,
+                hist_g_ptr=None,
+                RECOMPUTE=True,
+                **common_kwargs
+            )
             ctx.save_for_backward(H_res, H_res_out)
         else:
+            # History buffers: (iters+1, s, b, n)
+            hist_f = torch.empty((iters + 1, s, b, n), device=H_res.device, dtype=H_res.dtype)
+            hist_g = torch.empty((iters + 1, s, b, n), device=H_res.device, dtype=H_res.dtype)
+            _mhc_sinkhorn_fwd_fused[grid](
+                hist_f_ptr=hist_f,
+                hist_g_ptr=hist_g,
+                RECOMPUTE=False,
+                **common_kwargs
+            )
             ctx.save_for_backward(H_res, H_res_out, hist_f, hist_g)
+
         ctx.recompute_hist = recompute_hist
         ctx.iters = iters
         ctx.n = n
@@ -783,6 +803,7 @@ class mHCAggregateOp(torch.autograd.Function):
             stride_grad_xCn=1,
             precision="tf32" if ctx.use_tf32 else "ieee",
             FUSE_GRAD_X_ACC=fuse_grad_x_acc,
+            DETERMINISTIC=deterministic,
         )
 
         grad_H_pre = grad_H_pre.to(H_pre.dtype)  # Cast back to the original dtype of H_pre
@@ -957,6 +978,7 @@ class mHCExpandCombineOp(torch.autograd.Function):
                 stride_grad_xm=n * C,
                 stride_grad_xCn=1,
                 precision="tf32" if ctx.use_tf32 else "ieee",
+                DETERMINISTIC=deterministic,
             )
         else:
             _mhc_expand_combine_with_bias_bwd[grid](
@@ -987,6 +1009,7 @@ class mHCExpandCombineOp(torch.autograd.Function):
                 stride_grad_xm=n * C,
                 stride_grad_xCn=1,
                 precision="tf32" if ctx.use_tf32 else "ieee",
+                DETERMINISTIC=deterministic,
             )
 
         grad_H_post = grad_H_post.to(H_post.dtype)  # Cast back to the original dtype of H_post
