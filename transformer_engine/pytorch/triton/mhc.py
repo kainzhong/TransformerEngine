@@ -864,42 +864,27 @@ class mHCExpandCombineOp(torch.autograd.Function):
             triton.cdiv(M, META["BLOCK_SIZE_M"]),
         )
 
-        if bias is None:
-            _mhc_expand_combine_fwd[grid](
-                f_ptr=f,
-                H_post_ptr=H_post,
-                x_ptr=x,
-                H_res_ptr=H_res,
-                output_ptr=out,
-                M=M,
-                C=C,
-                n=n,
-                stride_fm=C,
-                stride_fc=1,
-                stride_xm=Cn,
-                stride_xCn=1,
-                stride_output_m=Cn,
-                stride_output_Cn=1,
-            )
-        else:
-            _mhc_expand_combine_with_bias_fwd[grid](
-                f_ptr=f,
-                bias_ptr=bias,
-                H_post_ptr=H_post,
-                x_ptr=x,
-                H_res_ptr=H_res,
-                output_ptr=out,
-                M=M,
-                C=C,
-                n=n,
-                stride_fm=C,
-                stride_fc=1,
-                stride_bias=1,
-                stride_xm=Cn,
-                stride_xCn=1,
-                stride_output_m=Cn,
-                stride_output_Cn=1,
-            )
+        kwargs = {
+            "f_ptr": f,
+            "bias_ptr": bias if bias is not None else None,
+            "H_post_ptr": H_post,
+            "x_ptr": x,
+            "H_res_ptr": H_res,
+            "output_ptr": out,
+            "M": M,
+            "C": C,
+            "n": n,
+            "stride_fm": C,
+            "stride_fc": 1,
+            "stride_bias": 1 if bias is not None else None,
+            "stride_xm": Cn,
+            "stride_xCn": 1,
+            "stride_output_m": Cn,
+            "stride_output_Cn": 1,
+        }
+        _mhc_expand_combine_fwd[grid](
+            **kwargs
+        )
 
         ctx.n = n
         ctx.have_bias = bias is not None
