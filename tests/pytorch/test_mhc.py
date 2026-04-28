@@ -405,6 +405,65 @@ def test_mhc_combined(cfg: MHCConfig, dtype):
     torch.testing.assert_close(combined_H_post, fused_H_post, **tols)
     torch.testing.assert_close(combined_H_res, fused_H_res, **tols)
 
+@pytest.mark.parametrize("cfg", mhc_configs, ids=MHCConfig.desc)
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
+def test_mhc_expand_fuse_grad_acc(cfg: MHCConfig, dtype):
+    reset_rng_states()
+
+    s, b, C, n = cfg.s, cfg.b, cfg.C, cfg.n
+    N = 2 * n + n * n
+    nC = n * C
+
+    tols = get_tols(dtype)
+    use_tf32 = False
+
+    x = torch.randn(s * b, nC, device="cuda", requires_grad=True, dtype=dtype)
+    phi = torch.randn(N, nC, dtype=dtype, requires_grad=True, device="cuda")
+
+    alpha = torch.randn(3, device="cuda", requires_grad=True, dtype=dtype)
+    beta = torch.randn(1, 2 * n + n * n, device="cuda", requires_grad=True, dtype=dtype)
+
+    x_ref = x.detach().clone().requires_grad_(True)
+    phi_ref = phi.detach().clone().requires_grad_(True)
+
+    alpha_ref = alpha.detach().clone().requires_grad_(True)
+    beta_ref = beta.detach().clone().requires_grad_(True)
+
+    def end_to_end(x, phi, alpha, beta, fused_grad_x_acc):
+        H, ms = mhc_fused_projection(x, phi, use_tf32)
+        H_pre, H_post, _ = mhc_fused_scale(H, alpha, beta, ms, n)
+        H_res = torch.eye(4, device="cuda", dtype=dtype).expand(s, b, n, n).contiguous()
+
+        aggregated = mhc_fused_aggregate(x.view(s, b, C, n), H_pre.view(s, b, n), n, False)
+        expanded_combined = mhc_fused_expand_combine(
+            aggregated,
+            None,
+            H_post.view(s, b, n),
+            x.view(s, b, C, n),
+            H_res,
+            n,
+            False,
+            fused_grad_x_acc,
+        )
+
+        return H_pre, H_post, H_res, aggregated, expanded_combined
+
+    _, _, _, _, expanded_combined_fuse_grad  = end_to_end(
+        x_ref, phi_ref, alpha_ref, beta_ref, False
+    )
+    _, _, _, _, expanded_combined_no_fuse_grad = end_to_end(
+        x, phi, alpha, beta, True
+    )
+
+    grad_output = torch.randn_like(expanded_combined_fuse_grad)
+    expanded_combined_fuse_grad.backward(grad_output)
+    expanded_combined_no_fuse_grad.backward(grad_output)
+
+    torch.testing.assert_close(x.grad, x_ref.grad, **tols)
+    torch.testing.assert_close(phi.grad, phi_ref.grad, **tols)
+    torch.testing.assert_close(alpha.grad, alpha_ref.grad, **tols)
+    torch.testing.assert_close(beta.grad, beta_ref.grad, **tols)
+
 
 @pytest.mark.parametrize("cfg", mhc_configs, ids=MHCConfig.desc)
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
@@ -482,7 +541,7 @@ def test_mhc_expand_combine(cfg: MHCConfig, dtype, with_bias):
     H_res_ref = H_res.detach().clone().requires_grad_(True)
 
     ref_out = mhc_expand_combine_ref(f_ref, bias_ref, H_post_ref, x_ref, H_res_ref, n)
-    fused_out = mhc_fused_expand_combine(f, bias, H_post, x, H_res, n, False)
+    fused_out = mhc_fused_expand_combine(f, bias, H_post, x, H_res, n, False, False)
 
     torch.testing.assert_close(fused_out, ref_out, **tols)
 

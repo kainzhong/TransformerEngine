@@ -22,7 +22,6 @@ from transformer_engine.common.triton.mhc import (
     _mhc_sinkhorn_fwd_fused,
     _mhc_sinkhorn_fwd_fused_recompute,
     _mhc_sinkhorn_bwd_fused,
-    _mhc_sinkhorn_bwd_fused_recompute,
 )
 from transformer_engine.pytorch.cpp_extensions.gemm import general_gemm
 
@@ -119,7 +118,6 @@ def mhc_fused_scale(
     h_res = out[..., 2 * n : n * n + 2 * n]
     return h_pre, h_post, h_res
 
-
 def mhc_fused_aggregate(x: torch.Tensor, H_pre: torch.Tensor, n: int, use_tf32: bool = True):
     """
     Aggregate operation to merge n activation streams into one (see section 4.3.1 of the DeepSeek mHC paper):
@@ -157,6 +155,7 @@ def mhc_fused_expand_combine(
     H_res: torch.Tensor,
     n: int,
     use_tf32: bool = True,
+    fuse_grad_x_acc: bool = False,
 ):
     """
     Expand and combine operation for merging n hyper connections (see section 4.3.1 of the DeepSeek mHC paper):
@@ -180,6 +179,9 @@ def mhc_fused_expand_combine(
     use_tf32 : bool
         whether to use TF32 precision for matmul operations. If False, it will use ieee for better precision.
         This is mainly used by our unittests since TF32 precision will introduce some errors and cause tests to fail
+    fuse_grad_x_acc : bool
+        Use the same buffer for inplace gradient accumulation to avoid PyTorch autograd overhead.
+        If enable, triton kernels will accumulate the gradient of x in the same buffer to avoid copying the gradient by PyTorch.
 
     Returns
     -------
@@ -196,6 +198,7 @@ def mhc_fused_expand_combine(
         H_res,
         n,
         use_tf32,
+        fuse_grad_x_acc
     )
     return out
 
@@ -332,7 +335,11 @@ class mHCProjectionOp(torch.autograd.Function):
             M,
         )
 
-        grad_x = torch.empty((M, K), device=device, dtype=x.dtype)
+        fuse_grad_x_acc = hasattr(x.untyped_storage(), 'grad_from_mhc_post')
+        if fuse_grad_x_acc:
+            grad_x = x.untyped_storage().grad_acc
+        else:
+            grad_x = torch.empty((M, K), device=device, dtype=x.dtype)
 
         grad_x = torch.empty((M, K), device=device, dtype=x.dtype)
         grad_phi = general_gemm(x, grad_H, out_dtype=torch.float32, layout="NT")[0][:N, :].to(
@@ -367,6 +374,7 @@ class mHCProjectionOp(torch.autograd.Function):
             stride_grad_ms=1,
             BLOCK_SIZE_N=32,
             precision="tf32" if ctx.use_tf32 else "ieee",
+            FUSE_GRAD_X_ACC=fuse_grad_x_acc,
         )
 
         return grad_x.to(ctx.dtype), grad_phi.to(ctx.dtype), None
@@ -634,46 +642,26 @@ class mHCSinkhornOp(torch.autograd.Function):
         # pylint: disable=unnecessary-lambda-assignment
         grid = lambda META: (triton.cdiv(M * n * n, META["BLOCK_SIZE"]),)
 
-        if recompute_hist:
-            _mhc_sinkhorn_bwd_fused_recompute[grid](
-                grad_out_ptr=grad_res_out,
-                output_ptr=H_res_out,
-                grad_x_ptr=grad_res,
-                x_ptr=H_res,
-                hist_f_ptr=hist_f,
-                hist_g_ptr=hist_g,
-                stride_grad_out_m=n * n,
-                stride_grad_out_n=1,
-                stride_out_m=n * n,
-                stride_out_n=1,
-                stride_grad_xm=n * n,
-                stride_grad_xn=1,
-                stride_xm=n * n,
-                stride_xn=1,
-                M=M,
-                n=n,
-                iters=iters,
-            )
-        else:
-            _mhc_sinkhorn_bwd_fused[grid](
-                grad_out_ptr=grad_res_out,
-                output_ptr=H_res_out,
-                grad_x_ptr=grad_res,
-                x_ptr=H_res,
-                hist_f_ptr=hist_f,
-                hist_g_ptr=hist_g,
-                stride_grad_out_m=n * n,
-                stride_grad_out_n=1,
-                stride_out_m=n * n,
-                stride_out_n=1,
-                stride_grad_xm=n * n,
-                stride_grad_xn=1,
-                stride_xm=n * n,
-                stride_xn=1,
-                M=M,
-                n=n,
-                iters=iters,
-            )
+        _mhc_sinkhorn_bwd_fused[grid](
+            grad_out_ptr=grad_res_out,
+            output_ptr=H_res_out,
+            grad_x_ptr=grad_res,
+            x_ptr=H_res,
+            hist_f_ptr=hist_f,
+            hist_g_ptr=hist_g,
+            stride_grad_out_m=n * n,
+            stride_grad_out_n=1,
+            stride_out_m=n * n,
+            stride_out_n=1,
+            stride_grad_xm=n * n,
+            stride_grad_xn=1,
+            stride_xm=n * n,
+            stride_xn=1,
+            M=M,
+            n=n,
+            iters=iters,
+            RECOMPUTE=recompute_hist,
+        )
 
         grad_res = grad_res.view(s, b, n, n)
 
@@ -763,7 +751,11 @@ class mHCAggregateOp(torch.autograd.Function):
         assert n == 4, "Only n=4 is supported in this implementation"
         M = s * b
 
-        grad_x = torch.empty_like(x)
+        fuse_grad_x_acc = hasattr(x.untyped_storage(), 'grad_from_mhc_post')
+        if fuse_grad_x_acc:
+            grad_x = x.untyped_storage().grad_acc
+        else:
+            grad_x = torch.empty_like(x)
         grad_H_pre = torch.zeros(
             (s, b, n), dtype=torch.float32, device=H_pre.device
         )  # We need to use atomic_add for this so we need higher precision
@@ -790,9 +782,13 @@ class mHCAggregateOp(torch.autograd.Function):
             stride_grad_xm=nC,
             stride_grad_xCn=1,
             precision="tf32" if ctx.use_tf32 else "ieee",
+            FUSE_GRAD_X_ACC=fuse_grad_x_acc,
         )
 
         grad_H_pre = grad_H_pre.to(H_pre.dtype)  # Cast back to the original dtype of H_pre
+
+        if fuse_grad_x_acc:
+            grad_x = None
 
         return grad_x, grad_H_pre, None, None
 
@@ -803,7 +799,7 @@ class mHCExpandCombineOp(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(ctx, f, bias, H_post, x, H_res, n, use_tf32=True):
+    def forward(ctx, f, bias, H_post, x, H_res, n, use_tf32=True, fuse_grad_x_acc=True):
         """
         The forward pass of the expand and combine operation. Expands the sub-layer output f back
         to n streams using H_post, and combines with the residual connections using H_res:
@@ -819,6 +815,7 @@ class mHCExpandCombineOp(torch.autograd.Function):
         H_res (tensor): The residual connection matrix of shape (s, b, n, n).
         n (int): The number of hyper connections (only n=4 is supported).
         use_tf32 (bool): Whether to use TF32 precision for matmul operations.
+        fuse_grad_x_acc (bool): Use the same buffer for inplace gradient accumulation to avoid PyTorch autograd overhead.
 
         Returns:
         tensor: The expanded and combined output of shape (s, b, C, n).
@@ -882,6 +879,7 @@ class mHCExpandCombineOp(torch.autograd.Function):
 
         ctx.n = n
         ctx.have_bias = bias is not None
+        ctx.fuse_grad_x_acc = fuse_grad_x_acc
         if bias is not None:
             ctx.save_for_backward(f, bias, H_post, x, H_res)
         else:
@@ -996,4 +994,7 @@ class mHCExpandCombineOp(torch.autograd.Function):
         if bias is not None:
             grad_bias = grad_bias.to(bias.dtype)
 
-        return grad_f, grad_bias, grad_H_post, grad_x, grad_H_res, None, None
+        if ctx.fuse_grad_x_acc:
+            x.untyped_storage().grad_acc = grad_x
+
+        return grad_f, grad_bias, grad_H_post, grad_x, grad_H_res, None, None, None
