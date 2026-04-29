@@ -9,7 +9,6 @@ import torch
 import triton
 
 from transformer_engine.common.triton.mhc import (
-    _mhc_aggregate_bwd_reduce_workspace,
     _mhc_scale_fwd_fused,
     _mhc_scale_bwd_fused,
     _mhc_expand_combine_fwd,
@@ -774,9 +773,7 @@ class mHCAggregateOp(torch.autograd.Function):
         else:
             grad_x = torch.empty_like(x)
         if deterministic:
-            grad_H_pre = torch.empty(
-                (s, b, n), dtype=torch.float32, device=H_pre.device
-            )  # We need to use atomic_add for this so we need higher precision
+            grad_H_pre = None
         else:
             grad_H_pre = torch.zeros(
                 (s, b, n), dtype=torch.float32, device=H_pre.device
@@ -791,7 +788,7 @@ class mHCAggregateOp(torch.autograd.Function):
             # Fix BLOCK_SIZE_C otherwise we don't know how to allocate workspace
             BLOCK_SIZE_C = 128
             BLOCK_NUM_C = triton.cdiv(C, BLOCK_SIZE_C)
-            workspace_grad_H_pre = torch.empty((BLOCK_NUM_C, M * n), device=H_pre.device, dtype=torch.float32)
+            workspace_grad_H_pre = torch.empty((M, BLOCK_NUM_C * n), device=H_pre.device, dtype=torch.float32)
         else:
             workspace_grad_H_pre = None
             BLOCK_NUM_C = 1 # Not used anyway
@@ -812,26 +809,14 @@ class mHCAggregateOp(torch.autograd.Function):
             stride_xCn=1,
             stride_grad_xm=nC,
             stride_grad_xCn=1,
-            stride_ws_grad_H_pre_c=M*n,
-            stride_ws_grad_H_pre_m=1,
+            stride_ws_grad_H_pre_m=BLOCK_NUM_C*n,
+            stride_ws_grad_H_pre_c=1,
             precision="tf32" if ctx.use_tf32 else "ieee",
             FUSE_GRAD_X_ACC=fuse_grad_x_acc,
             DETERMINISTIC=deterministic,
         )
         if deterministic:
-            BLOCK_NUM_C_PADDED = nearest_power_of_2(BLOCK_NUM_C)
-            reduce_grid = lambda META: (triton.cdiv(M, META["BLOCK_SIZE_M"]),)
-            _mhc_aggregate_bwd_reduce_workspace[reduce_grid](
-                ws_grad_H_pre_ptr=workspace_grad_H_pre,
-                grad_H_pre_ptr=grad_H_pre,
-                M=M,
-                n=n,
-                stride_grad_H_pre=n,
-                stride_ws_grad_H_pre_c=M*n,
-                stride_ws_grad_H_pre_m=1,
-                BLOCK_NUM_C=BLOCK_NUM_C,
-                BLOCK_NUM_C_PADDED=BLOCK_NUM_C_PADDED,
-            )
+            grad_H_pre = workspace_grad_H_pre.view(s, b, BLOCK_NUM_C, n).sum(dim=2)
 
         grad_H_pre = grad_H_pre.to(H_pre.dtype)  # Cast back to the original dtype of H_pre
 
