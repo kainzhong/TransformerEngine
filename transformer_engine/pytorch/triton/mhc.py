@@ -41,6 +41,8 @@ def mhc_generate_mix_and_aggregate(x: torch.Tensor, phi: torch.Tensor, alpha: to
     """
     Generate the mix matrix H_pre, H_post, H_res and apply H_pre to x to aggregate n streams
     This wraps projection, scale, sinkhorn, and aggregate operations into one function.
+    To replicate DeepSeek V4's mHC implementation, call this function before attention / FFN to merge n hyper connections into one,
+    and call `mhc_fused_expand_combine` after attention / FFN to expand the output back to n hyper connections and mix with the residual connection.
 
     This API accepts both BF16 and FP32 parameters, though the DeepSeek V4 recipe is:
     - x: BF16
@@ -55,13 +57,13 @@ def mhc_generate_mix_and_aggregate(x: torch.Tensor, phi: torch.Tensor, alpha: to
     phi : torch.Tensor
         projection matrix of shape (N, nC), where N=2n+n*n (=24 for n=4), and nC is the hidden dimension after expansion (n times of C),
         dtype is torch.float16 or torch.float32
-    alpha : torch.Tensor, with dtype torch.float16 or torch.float32
+    alpha : torch.Tensor
         scaling factor for H, of shape (3,), where
         alpha[0] is applied to H[:, 0:n] for H_pre
         alpha[1] is applied to H[:, n:2n] for H_post
         alpha[2] is applied to H[:, 2n:2n+n*n] for H_res
         dtype: torch.float16 or torch.float32
-    beta : torch.Tensor, with dtype torch.float16 or torch.float32
+    beta : torch.Tensor
         bias term for H, of shape (1, 2*n+n*n), where
         beta[0, 0:n] is applied to H[:, 0:n] for H_pre
         beta[0, n:2n] is applied to H[:, n:2n] for H_post
@@ -294,10 +296,12 @@ def mhc_fused_projection(x: torch.Tensor, phi: torch.Tensor, use_tf32: bool = Tr
 
     Returns
     -------
-    H : torch.Tensor, with dtype float32
-        Projected matrix of shape (M, 32), where only the first N elements in the last dimension are valid.
-    ms : torch.Tensor, with dtype float32
-        Mean square of shape (M,), which is used for RMSNorm in the next kernel.
+    H : torch.Tensor
+        Projected matrix of shape (M, 32), where only the first N elements in the last dimension are valid,
+        with dtype float32
+    ms : torch.Tensor
+        Mean square of shape (M,), which is used for RMSNorm in the next kernel,
+        with dtype float32
     """
     assert (
         phi.shape[0] == 24
