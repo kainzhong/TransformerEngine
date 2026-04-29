@@ -48,21 +48,25 @@ def mhc_generate_mix_and_aggregate(x: torch.Tensor, phi: torch.Tensor, alpha: to
 
     Parameters
     ----------
-    x : torch.Tensor
-        input tensor of shape (s, b, C, n), where s is the sequence length, b is the batch size, C is the hidden dimension per hyper connection, and n is the number of hyper connections. 
+    x : torch.Tensor, 
+        input tensor of shape (s, b, C, n), where s is the sequence length, b is the batch size, C is the hidden dimension per hyper connection, and n is the number of hyper connections,
+        dtype is torch.float16 or torch.float32
         Note that C is equal to the original hidden dimension divided by n.
     phi : torch.Tensor
-        projection matrix of shape (N, nC), where N=2n+n*n (=24 for n=4), and nC is the hidden dimension after expansion (n times of C).
-    alpha : torch.Tensor
+        projection matrix of shape (N, nC), where N=2n+n*n (=24 for n=4), and nC is the hidden dimension after expansion (n times of C),
+        dtype is torch.float16 or torch.float32
+    alpha : torch.Tensor, with dtype torch.float16 or torch.float32
         scaling factor for H, of shape (3,), where
         alpha[0] is applied to H[:, 0:n] for H_pre
         alpha[1] is applied to H[:, n:2n] for H_post
         alpha[2] is applied to H[:, 2n:2n+n*n] for H_res
-    beta : torch.Tensor
+        dtype: torch.float16 or torch.float32
+    beta : torch.Tensor, with dtype torch.float16 or torch.float32
         bias term for H, of shape (1, 2*n+n*n), where
         beta[0, 0:n] is applied to H[:, 0:n] for H_pre
         beta[0, n:2n] is applied to H[:, n:2n] for H_post
         beta[0, 2n:2n+n*n] is applied to H[:, 2n:2n+n*n] for H_res
+        dtype is torch.float16 or torch.float32
     use_tf32 : bool
         whether to use TF32 for matrix multiplications
 
@@ -70,10 +74,13 @@ def mhc_generate_mix_and_aggregate(x: torch.Tensor, phi: torch.Tensor, alpha: to
     -------
     out : torch.Tensor
         out of shape (s, b, C), which is the aggregated result after applying H_pre to x, which will be fed into attention / FFN
+        with the same dtype as x
     H_post : torch.Tensor
         H_post of shape (s, b, n), which will be used in the post-processing after attention / FFN in `mhc_fused_expand_combine`
+        with dtype float32
     H_res : torch.Tensor
         H_res of shape (s, b, n, n), which will be used to mix the residual connection in `mhc_fused_expand_combine`
+        with dtype float32
     """
     s, b, C, n = x.shape
     assert n == 4, "Only n=4 is supported in this implementation, where n is the Hyper Connection number"
@@ -102,6 +109,7 @@ def mhc_fused_sinkhorn(
     ----------
     H_res : torch.Tensor
         input H_res matrix of shape (s, b, n, n) that needs to be normalized into a doubly stochastic matrix.
+        dtype is torch.float16 or torch.float32
     n : int
         number of hyper connections, where only n=4 is supported in the current implementation
     recompute_hist : bool
@@ -113,6 +121,7 @@ def mhc_fused_sinkhorn(
     -------
     out : torch.Tensor
         out of shape (s, b, n, n), which is the final H_res after Sinkhorn normalization
+        with the same dtype as H_res
     """
     assert n == 4, "Only n=4 is supported in this implementation"
     out = mHCSinkhornOp.apply(H_res, n, recompute_hist, iters)
@@ -154,11 +163,14 @@ def mhc_fused_scale(
     Returns
     -------
     h_pre : torch.Tensor
-        Scaled H_pre of shape (M, n), which aggregates (s, b, C, n) input of a Hyper Connection block into (s, b, n) as the input of attention / MLP
+        Scaled H_pre of shape (M, n), which aggregates (s, b, C, n) input of a Hyper Connection block into (s, b, n) as the input of attention / MLP,
+        with the same dtype as H
     h_post : torch.Tensor
-        Scaled H_post of shape (M, n), which expands the output of attention / MLP of shape (s, b, n) back to (s, b, C, n) for the residual connection
+        Scaled H_post of shape (M, n), which expands the output of attention / MLP of shape (s, b, n) back to (s, b, C, n) for the residual connection,
+        with the same dtype as H
     h_res : torch.Tensor
-        Scaled H_res of shape (M, n*n), which mixes the n streams of the (s, b, C, n) input of a Hyper Connection block
+        Scaled H_res of shape (M, n*n), which mixes the n streams of the (s, b, C, n) input of a Hyper Connection block,
+        with the same dtype as H
 
     """
     assert n == 4, "Only n=4 is supported in this implementation"
@@ -179,8 +191,10 @@ def mhc_fused_aggregate(x: torch.Tensor, H_pre: torch.Tensor, n: int, use_tf32: 
     x : torch.Tensor
         input activation tensor of shape (s, b, C, n),
         where s is the sequence length, b is the batch size, C is the hidden dimension per hyper connection, and n is the number of hyper connections. Note that C is equal to the original hidden dimension divided by n.
+        dtype is torch.float16 or torch.float32
     H_pre: torch.Tensor
         input H_pre matrix of shape (s, b, n)
+        dtype is torch.float16 or torch.float32
     n: int
         number of hyper connections, where only n=4 is supported in the current implementation
     use_tf32: bool
@@ -190,7 +204,8 @@ def mhc_fused_aggregate(x: torch.Tensor, H_pre: torch.Tensor, n: int, use_tf32: 
     Returns
     -------
     out: torch.Tensor
-         output activation tensor of shape (s, b, C), which is the aggregated output after merging n hyper connections
+         output activation tensor of shape (s, b, C), which is the aggregated output after merging n hyper connections,
+         with the same dtype as x
     """
     assert n == 4, "Only n=4 is supported in this implementation"
     check_deterministic("mhc_fused_aggregate")
@@ -216,14 +231,19 @@ def mhc_fused_expand_combine(
     ----------
     f : torch.Tensor
         input activation tensor of shape (s, b, C), which is the output from the attention / FFN sub-layer in a transformer block
+        dtype is torch.float16 or torch.float32
     bias : torch.Tensor or None
         optional bias tensor of shape (C,) from the last linear layer, where f + bias is fused in this kernel for better performance
+        dtype is torch.float16 or torch.float32
     H_post : torch.Tensor
         input H_post matrix of shape (s, b, n)
+        dtype is torch.float16 or torch.float32
     x : torch.Tensor
         input activation tensor of shape (s, b, C, n), which is the hyper connection input before the aggregation operation
+        dtype is torch.float16 or torch.float32
     H_res : torch.Tensor
         input H_res matrix of shape (s, b, n, n)
+        dtype is torch.float16 or torch.float32
     use_tf32 : bool
         whether to use TF32 precision for matmul operations. If False, it will use ieee for better precision.
         This is mainly used by our unittests since TF32 precision will introduce some errors and cause tests to fail
@@ -234,7 +254,8 @@ def mhc_fused_expand_combine(
     Returns
     -------
     out : torch.Tensor
-        out of shape (s, b, C, n), which is the expanded and combined output after merging n hyper connections
+        out of shape (s, b, C, n), which is the expanded and combined output after merging n hyper connections,
+        with the same dtype as x
     """
     _, _, _, n = x.shape
     assert n == 4, "Only n=4 is supported in this implementation"
@@ -273,9 +294,9 @@ def mhc_fused_projection(x: torch.Tensor, phi: torch.Tensor, use_tf32: bool = Tr
 
     Returns
     -------
-    H : torch.Tensor
+    H : torch.Tensor, with dtype float32
         Projected matrix of shape (M, 32), where only the first N elements in the last dimension are valid.
-    ms : torch.Tensor
+    ms : torch.Tensor, with dtype float32
         Mean square of shape (M,), which is used for RMSNorm in the next kernel.
     """
     assert (
