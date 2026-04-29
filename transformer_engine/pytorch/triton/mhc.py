@@ -42,6 +42,10 @@ def mhc_generate_mix_and_aggregate(x: torch.Tensor, phi: torch.Tensor, alpha: to
     Generate the mix matrix H_pre, H_post, H_res and apply H_pre to x to aggregate n streams
     This wraps projection, scale, sinkhorn, and aggregate operations into one function.
 
+    This API accepts both BF16 and FP32 parameters, though the DeepSeek V4 recipe is:
+    - x: BF16
+    - phi, alpha, beta: FP32
+
     Parameters
     ----------
     x : torch.Tensor
@@ -59,8 +63,6 @@ def mhc_generate_mix_and_aggregate(x: torch.Tensor, phi: torch.Tensor, alpha: to
         beta[0, 0:n] is applied to H[:, 0:n] for H_pre
         beta[0, n:2n] is applied to H[:, n:2n] for H_post
         beta[0, 2n:2n+n*n] is applied to H[:, 2n:2n+n*n] for H_res
-    n : int
-        number of hyper connections, where only n=4 is supported in the current implementation
     use_tf32 : bool
         whether to use TF32 for matrix multiplications
 
@@ -78,10 +80,10 @@ def mhc_generate_mix_and_aggregate(x: torch.Tensor, phi: torch.Tensor, alpha: to
     nC = n * C
     N = 2 * n + n * n
     H, ms = mhc_fused_projection(x.view(s * b, nC), phi, use_tf32=use_tf32)
-    H_scaled = mhc_fused_scale(H, alpha, beta, ms, n)
-    H_pre = H_scaled[..., :n].view(s, b, n)
-    H_post = H_scaled[..., n : 2 * n].view(s, b, n)
-    H_res = H_scaled[..., 2 * n : 2 * n + n * n].view(s, b, n, n)
+    h_pre, h_post, h_res = mhc_fused_scale(H, alpha, beta, ms, n)
+    H_pre = h_pre.view(s, b, n)
+    H_post = h_post.view(s, b, n)
+    H_res = h_res.view(s, b, n, n)
     H_res = mhc_fused_sinkhorn(H_res, n, recompute_hist=True, iters=20)
     out = mhc_fused_aggregate(x, H_pre.view(s, b, n), n, use_tf32=use_tf32)
     return out, H_post, H_res
@@ -202,7 +204,6 @@ def mhc_fused_expand_combine(
     H_post: torch.Tensor,
     x: torch.Tensor,
     H_res: torch.Tensor,
-    n: int,
     use_tf32: bool = True,
     fuse_grad_x_acc: bool = False,
 ):
@@ -223,8 +224,6 @@ def mhc_fused_expand_combine(
         input activation tensor of shape (s, b, C, n), which is the hyper connection input before the aggregation operation
     H_res : torch.Tensor
         input H_res matrix of shape (s, b, n, n)
-    n : int
-        number of hyper connections
     use_tf32 : bool
         whether to use TF32 precision for matmul operations. If False, it will use ieee for better precision.
         This is mainly used by our unittests since TF32 precision will introduce some errors and cause tests to fail
@@ -237,6 +236,7 @@ def mhc_fused_expand_combine(
     out : torch.Tensor
         out of shape (s, b, C, n), which is the expanded and combined output after merging n hyper connections
     """
+    _, _, _, n = x.shape
     assert n == 4, "Only n=4 is supported in this implementation"
     check_deterministic("mhc_fused_expand_combine")
     out = mHCExpandCombineOp.apply(
