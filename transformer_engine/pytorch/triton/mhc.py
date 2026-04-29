@@ -9,6 +9,7 @@ import torch
 import triton
 
 from transformer_engine.common.triton.mhc import (
+    _mhc_aggregate_bwd_reduce_workspace,
     _mhc_scale_fwd_fused,
     _mhc_scale_bwd_fused,
     _mhc_expand_combine_fwd,
@@ -265,7 +266,7 @@ class mHCProjectionOp(torch.autograd.Function):
         # pylint: disable=unnecessary-lambda-assignment
         grid = lambda META: (
             triton.cdiv(M, META["BLOCK_SIZE_M"]),
-            triton.cdiv(K, META["BLOCK_SIZE_K"]),
+            triton.cdiv(K, META["BLOCK_SIZE_K"]), # Will be 1 if deterministic since we set BLOCK_SIZE_K to the nearest power of 2 of K
         )
 
         kwargs = {
@@ -464,9 +465,19 @@ class mHCScaleFusedOp(torch.autograd.Function):
         M, _ = grad_out.shape
         N = 2 * n + n * n
 
-        grad_h = torch.zeros(
+        grad_h = torch.empty(
             (M, 32), device=grad_out.device, dtype=grad_out.dtype
         )  # Pad the grad_h to 32 in the last dimension
+
+        if deterministic:
+            grad_alpha = torch.empty((3,), device=grad_out.device, dtype=grad_out.dtype)
+            grad_beta_padded = torch.empty((1, 32), device=grad_out.device, dtype=grad_out.dtype)
+        else:
+            grad_alpha = torch.zeros((3,), device=grad_out.device, dtype=grad_out.dtype)
+            grad_beta_padded = torch.zeros((1, 32), device=grad_out.device, dtype=grad_out.dtype)
+        grad_beta = grad_beta_padded[
+            :, :N
+        ]  # Use only the first N elements for grad_beta, the rest are just padding
         grad_ms = torch.zeros((M,), device=grad_out.device, dtype=grad_out.dtype)
 
         device = torch.cuda.current_device()
@@ -762,15 +773,28 @@ class mHCAggregateOp(torch.autograd.Function):
             grad_x = x.untyped_storage().grad_acc
         else:
             grad_x = torch.empty_like(x)
-        grad_H_pre = torch.zeros(
-            (s, b, n), dtype=torch.float32, device=H_pre.device
-        )  # We need to use atomic_add for this so we need higher precision
+        if deterministic:
+            grad_H_pre = torch.empty(
+                (s, b, n), dtype=torch.float32, device=H_pre.device
+            )  # We need to use atomic_add for this so we need higher precision
+        else:
+            grad_H_pre = torch.zeros(
+                (s, b, n), dtype=torch.float32, device=H_pre.device
+            )  # We need to use atomic_add for this so we need higher precision
 
         # pylint: disable=unnecessary-lambda-assignment
         grid = lambda META: (
             triton.cdiv(C, META["BLOCK_SIZE_C"]),
             triton.cdiv(M, META["BLOCK_SIZE_M"]),
         )
+        if deterministic:
+            # Fix BLOCK_SIZE_C otherwise we don't know how to allocate workspace
+            BLOCK_SIZE_C = 128
+            BLOCK_NUM_C = triton.cdiv(C, BLOCK_SIZE_C)
+            workspace_grad_H_pre = torch.empty((BLOCK_NUM_C, M * n), device=H_pre.device, dtype=torch.float32)
+        else:
+            workspace_grad_H_pre = None
+            BLOCK_NUM_C = 1 # Not used anyway
 
         _mhc_aggregate_bwd[grid](
             grad_output_ptr=grad_output,
@@ -778,6 +802,7 @@ class mHCAggregateOp(torch.autograd.Function):
             grad_H_pre_ptr=grad_H_pre,
             x_ptr=x,
             grad_x_ptr=grad_x,
+            ws_grad_H_pre_ptr=workspace_grad_H_pre,
             M=M,
             C=C,
             n=n,
@@ -787,10 +812,26 @@ class mHCAggregateOp(torch.autograd.Function):
             stride_xCn=1,
             stride_grad_xm=nC,
             stride_grad_xCn=1,
+            stride_ws_grad_H_pre_c=M*n,
+            stride_ws_grad_H_pre_m=1,
             precision="tf32" if ctx.use_tf32 else "ieee",
             FUSE_GRAD_X_ACC=fuse_grad_x_acc,
             DETERMINISTIC=deterministic,
         )
+        if deterministic:
+            BLOCK_NUM_C_PADDED = nearest_power_of_2(BLOCK_NUM_C)
+            reduce_grid = lambda META: (triton.cdiv(M, META["BLOCK_SIZE_M"]),)
+            _mhc_aggregate_bwd_reduce_workspace[reduce_grid](
+                ws_grad_H_pre_ptr=workspace_grad_H_pre,
+                grad_H_pre_ptr=grad_H_pre,
+                M=M,
+                n=n,
+                stride_grad_H_pre=n,
+                stride_ws_grad_H_pre_c=M*n,
+                stride_ws_grad_H_pre_m=1,
+                BLOCK_NUM_C=BLOCK_NUM_C,
+                BLOCK_NUM_C_PADDED=BLOCK_NUM_C_PADDED,
+            )
 
         grad_H_pre = grad_H_pre.to(H_pre.dtype)  # Cast back to the original dtype of H_pre
 

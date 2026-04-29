@@ -762,6 +762,8 @@ def aggregate_config():
 
     configs = []
     for m, c, w, s in itertools.product(block_m, block_c, warps, stages):
+        if deterministic and c != 128:
+            continue # BLOCK_SIZE_C is fixed to 128 for the deterministic version
         configs.append(
             triton.Config({"BLOCK_SIZE_M": m, "BLOCK_SIZE_C": c}, num_warps=w, num_stages=s)
         )
@@ -857,6 +859,7 @@ def _mhc_aggregate_bwd(
     grad_H_pre_ptr,  # (M, n)
     x_ptr,  # (M, C, n)
     grad_x_ptr,  # # (M, C, n)
+    ws_grad_H_pre_ptr,  # Temporary workspace for grad_H_pre with shape (BLOCK_NUM_C, M * n), or None if DETERMINISTIC is False
     M,
     C,
     n: tl.constexpr,
@@ -866,6 +869,8 @@ def _mhc_aggregate_bwd(
     stride_xCn,
     stride_grad_xm,
     stride_grad_xCn,
+    stride_ws_grad_H_pre_c,
+    stride_ws_grad_H_pre_m,
     # Meta-parameters
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_C: tl.constexpr,
@@ -892,6 +897,7 @@ def _mhc_aggregate_bwd(
     tl.assume(stride_xm > 0 and stride_xCn == 1)
     tl.assume(stride_grad_xm > 0 and stride_grad_xCn == 1)
     tl.assume(stride_grad_output_m > 0 and stride_grad_output_c == 1)
+    tl.assume(stride_ws_grad_H_pre_c == M * n and stride_ws_grad_H_pre_m == 1)
 
     tl.assume(BLOCK_SIZE_C % 32 == 0)
 
@@ -923,11 +929,17 @@ def _mhc_aggregate_bwd(
         out_dtype=tl.float32,
     )
     grad_H_pre = tl.reshape(grad_H_pre, (BLOCK_SIZE_M * n,))  # (BLOCK_SIZE_M * n)
-    offs_grad_H_pre = pid_m * BLOCK_SIZE_M * n + tl.arange(0, BLOCK_SIZE_M * n)
-    grad_H_pre_ptrs = grad_H_pre_ptr + offs_grad_H_pre
     if DETERMINISTIC:
-        tl.store(grad_H_pre_ptrs, grad_H_pre, mask=offs_grad_H_pre < M * n)
+        offs_ws_H_pre_m = pid_m * BLOCK_SIZE_M * n + tl.arange(0, BLOCK_SIZE_M * n)
+        ws_grad_H_pre_ptrs = (
+            ws_grad_H_pre_ptr
+            + pid_c * stride_ws_grad_H_pre_c
+            + offs_ws_H_pre_m * stride_ws_grad_H_pre_m
+        )
+        tl.store(ws_grad_H_pre_ptrs, grad_H_pre, mask=offs_ws_H_pre_m < M * n)
     else:
+        offs_grad_H_pre = pid_m * BLOCK_SIZE_M * n + tl.arange(0, BLOCK_SIZE_M * n)
+        grad_H_pre_ptrs = grad_H_pre_ptr + offs_grad_H_pre
         tl.atomic_add(grad_H_pre_ptrs, grad_H_pre, mask=offs_grad_H_pre < M * n, sem="relaxed")
 
     H_pre_offs = pid_m * BLOCK_SIZE_M * n + tl.arange(0, BLOCK_SIZE_M * n)
@@ -954,6 +966,61 @@ def _mhc_aggregate_bwd(
         mask=mask_m[:, None] & mask_cn[None, :],
     )
 
+def reduce_workspace_config():
+    block_m = [64, 128, 256]
+    stages = [2, 3, 4, 5]
+    configs = []
+    for m, s in itertools.product(block_m, stages):
+        configs.append(
+            triton.Config({"BLOCK_SIZE_M": m}, num_warps=m // 32, num_stages=s)
+        )
+    if os.environ.get("NVTE_DISABLE_TRITON_AUTOTUNING", "0") == "1":
+        configs = configs[:1]
+    return configs
+    
+
+@triton.autotune(
+    configs=reduce_workspace_config(), 
+    key=["M"]
+)
+@triton.jit
+def _mhc_aggregate_bwd_reduce_workspace(
+    ws_grad_H_pre_ptr, # Temporary workspace for grad_H_pre with shape (BLOCK_NUM_C, M * n)
+    grad_H_pre_ptr, # (M, n)
+    M,
+    n: tl.constexpr,
+    stride_grad_H_pre,
+    stride_ws_grad_H_pre_c,
+    stride_ws_grad_H_pre_m,
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_NUM_C: tl.constexpr,
+    BLOCK_NUM_C_PADDED: tl.constexpr,
+):
+    pid_m = tl.program_id(0)
+
+    tl.assume(BLOCK_NUM_C > 0)
+    tl.assume(n == 4)
+    tl.assume(stride_grad_H_pre == 1)
+    tl.assume(pid_m >= 0)
+    tl.assume(stride_ws_grad_H_pre_c == M * n and stride_ws_grad_H_pre_m == 1)
+
+    offs_ws_grad_H_pre_c = tl.arange(0, BLOCK_NUM_C_PADDED)
+    mask_ws_grad_H_pre_c = offs_ws_grad_H_pre_c < BLOCK_NUM_C
+    offs_ws_grad_H_pre_m = pid_m * BLOCK_SIZE_M * n + tl.arange(0, BLOCK_SIZE_M * n)
+    mask_ws_grad_H_pre_m = offs_ws_grad_H_pre_m < M * n
+
+    ws_grad_H_pre_ptrs = ws_grad_H_pre_ptr + \
+        offs_ws_grad_H_pre_c[:, None] * stride_ws_grad_H_pre_c + \
+        offs_ws_grad_H_pre_m[None, :] * stride_ws_grad_H_pre_m
+    ws_grad_H_pre = tl.load(ws_grad_H_pre_ptrs, mask=mask_ws_grad_H_pre_c[:, None] & mask_ws_grad_H_pre_m[None, :], other=0.0)
+
+    ws_grad_H_pre = tl.reshape(ws_grad_H_pre, (BLOCK_NUM_C_PADDED, BLOCK_SIZE_M, n))  # (BLOCK_NUM_C_PADDED, BLOCK_SIZE_M, n)
+    grad_H_pre = tl.sum(ws_grad_H_pre, axis=0)  # (BLOCK_SIZE_M, n)
+    grad_H_pre = tl.reshape(grad_H_pre, (BLOCK_SIZE_M * n,))
+
+    offs_grad_H_pre = pid_m * BLOCK_SIZE_M * n + tl.arange(0, BLOCK_SIZE_M * n)
+    grad_H_pre_ptrs = grad_H_pre_ptr + offs_grad_H_pre
+    tl.store(grad_H_pre_ptrs, grad_H_pre, mask=offs_grad_H_pre < M * n)
 
 def expand_combine_config():
     block_m = [1, 2, 4]
