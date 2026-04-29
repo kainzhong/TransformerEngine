@@ -41,8 +41,13 @@ def mhc_generate_mix_and_aggregate(x: torch.Tensor, phi: torch.Tensor, alpha: to
     """
     Generate the mix matrix H_pre, H_post, H_res and apply H_pre to x to aggregate n streams
     This wraps projection, scale, sinkhorn, and aggregate operations into one function.
-    To replicate DeepSeek V4's mHC implementation, call this function before attention / FFN to merge n hyper connections into one,
-    and call `mhc_fused_expand_combine` after attention / FFN to expand the output back to n hyper connections and mix with the residual connection.
+
+    To use mHC in your model:
+    ```
+    layer_input, H_post, H_res = mhc_generate_mix_and_aggregate(x, phi, alpha, beta)
+    layer_output = layer(layer_input) # Attn / FFN layer
+    x = mhc_fused_expand_combine(layer_input, bias, H_post, x, H_res)
+    ```
 
     This API accepts both BF16 and FP32 parameters, though the DeepSeek V4 recipe is:
     - x: BF16
