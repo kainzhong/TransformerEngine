@@ -14,10 +14,15 @@ from transformer_engine.pytorch.triton.mhc import (
     mhc_fused_aggregate,
     mhc_fused_expand_combine,
     mhc_fused_projection,
+    mhc_generate_mix_and_aggregate,
 )
 
 # Disable TF32 for matmul to ensure consistency between the fused and reference implementations
 torch.backends.cuda.matmul.allow_tf32 = False
+
+
+def truncate_to_tf32(x: torch.Tensor) -> torch.Tensor:
+    return (x.view(torch.int32) & ~0x1FFF).view(torch.float32)
 
 
 def mhc_projection_ref(x, phi):
@@ -38,10 +43,9 @@ def mhc_projection_ref(x, phi):
 
     Hs = x @ phi.T  # (M, 2n + n^2)
 
-    x_fp32 = x.to(torch.float32)  # Use fp32 for better numerical stability in variance calculation
-    ms = (x_fp32 * x_fp32).mean(dim=1)
+    ms = (x * x).mean(dim=1)
 
-    return Hs.to(x_dtype), ms
+    return Hs, ms
 
 
 def mhc_scale_ref(H, alpha, beta, ms, n):
@@ -267,19 +271,31 @@ def get_tols(dtype):
 
 
 @pytest.mark.parametrize("cfg", mhc_configs, ids=MHCConfig.desc)
-@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
-def test_mhc_projection(cfg: MHCConfig, dtype):
+@pytest.mark.parametrize("dtypes", [
+    (torch.float32, torch.float32), (torch.bfloat16, torch.float32), (torch.bfloat16, torch.bfloat16)
+    ], ids=["x_fp32_phi_fp32", "x_bf16_phi_fp32", "x_bf16_phi_bf16"])
+def test_mhc_projection(cfg: MHCConfig, dtypes):
     reset_rng_states()
 
     s, b, C, n = cfg.s, cfg.b, cfg.C, cfg.n
     nC = n * C
     N = 2 * n + n * n
 
-    tols = get_tols(dtype)
+    x_dtype = dtypes[0]
+    phi_dtype = dtypes[1]
+
+    tols = get_tols(x_dtype)
     use_tf32 = False
 
-    x = torch.randn(s * b, nC, device="cuda", requires_grad=True, dtype=dtype)
-    phi = torch.randn(N, nC, dtype=dtype, requires_grad=True, device="cuda")
+    x = torch.randn(s * b, nC, device="cuda", requires_grad=True, dtype=x_dtype)
+    phi = torch.randn(N, nC, dtype=phi_dtype, device="cuda")
+    if x_dtype == torch.bfloat16 and phi_dtype == torch.float32:
+        # If we upcast bf16 operand to fp32 inside the triton kernel,
+        # triton will ignore input_precision="ieee" and use tf32 matmul anyway
+        # so we manually truncate phi to tf32 precision to match the kernel's behavior and ensure the test is valid
+        # See https://github.com/triton-lang/triton/issues/10176
+        phi = truncate_to_tf32(phi).clone()
+    phi.requires_grad_(True)
 
     x_ref = x.detach().clone().requires_grad_(True)
     phi_ref = phi.detach().clone().requires_grad_(True)
@@ -406,22 +422,21 @@ def test_mhc_combined(cfg: MHCConfig, dtype):
     torch.testing.assert_close(combined_H_res, fused_H_res, **tols)
 
 @pytest.mark.parametrize("cfg", mhc_configs, ids=MHCConfig.desc)
-@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
-def test_mhc_expand_fuse_grad_acc(cfg: MHCConfig, dtype):
+def test_mhc_fuse_grad_acc(cfg: MHCConfig):
     reset_rng_states()
 
     s, b, C, n = cfg.s, cfg.b, cfg.C, cfg.n
     N = 2 * n + n * n
     nC = n * C
 
-    tols = get_tols(dtype)
+    tols = get_tols(torch.bfloat16)
     use_tf32 = False
 
-    x = torch.randn(s * b, nC, device="cuda", requires_grad=True, dtype=dtype)
-    phi = torch.randn(N, nC, dtype=dtype, requires_grad=True, device="cuda")
+    x = torch.randn(s, b, C, n, device="cuda", requires_grad=True, dtype=torch.bfloat16)
+    phi = torch.randn(N, nC, dtype=torch.float32, requires_grad=True, device="cuda")
 
-    alpha = torch.randn(3, device="cuda", requires_grad=True, dtype=dtype)
-    beta = torch.randn(1, 2 * n + n * n, device="cuda", requires_grad=True, dtype=dtype)
+    alpha = torch.randn(3, device="cuda", requires_grad=True, dtype=torch.float32)
+    beta = torch.randn(1, 2 * n + n * n, device="cuda", requires_grad=True, dtype=torch.float32)
 
     x_ref = x.detach().clone().requires_grad_(True)
     phi_ref = phi.detach().clone().requires_grad_(True)
@@ -430,28 +445,25 @@ def test_mhc_expand_fuse_grad_acc(cfg: MHCConfig, dtype):
     beta_ref = beta.detach().clone().requires_grad_(True)
 
     def end_to_end(x, phi, alpha, beta, fused_grad_x_acc):
-        H, ms = mhc_fused_projection(x, phi, use_tf32)
-        H_pre, H_post, _ = mhc_fused_scale(H, alpha, beta, ms, n)
-        H_res = torch.eye(4, device="cuda", dtype=dtype).expand(s, b, n, n).contiguous()
-
-        aggregated = mhc_fused_aggregate(x.view(s, b, C, n), H_pre.view(s, b, n), n, False)
+        aggregated, H_post, H_res = mhc_generate_mix_and_aggregate(
+            x, phi, alpha, beta, use_tf32
+        )
         expanded_combined = mhc_fused_expand_combine(
             aggregated,
             None,
             H_post.view(s, b, n),
             x.view(s, b, C, n),
             H_res,
-            n,
             False,
             fused_grad_x_acc,
         )
 
-        return H_pre, H_post, H_res, aggregated, expanded_combined
+        return expanded_combined
 
-    _, _, _, _, expanded_combined_fuse_grad  = end_to_end(
+    expanded_combined_fuse_grad  = end_to_end(
         x_ref, phi_ref, alpha_ref, beta_ref, False
     )
-    _, _, _, _, expanded_combined_no_fuse_grad = end_to_end(
+    expanded_combined_no_fuse_grad = end_to_end(
         x, phi, alpha, beta, True
     )
 
@@ -541,7 +553,7 @@ def test_mhc_expand_combine(cfg: MHCConfig, dtype, with_bias):
     H_res_ref = H_res.detach().clone().requires_grad_(True)
 
     ref_out = mhc_expand_combine_ref(f_ref, bias_ref, H_post_ref, x_ref, H_res_ref, n)
-    fused_out = mhc_fused_expand_combine(f, bias, H_post, x, H_res, n, False, False)
+    fused_out = mhc_fused_expand_combine(f, bias, H_post, x, H_res, False, False)
 
     torch.testing.assert_close(fused_out, ref_out, **tols)
 
