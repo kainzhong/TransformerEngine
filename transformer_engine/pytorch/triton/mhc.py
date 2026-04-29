@@ -37,6 +37,55 @@ def check_deterministic(operator: str):
         " NVTE_ALLOW_NONDETERMINISTIC_ALGO=1 to allow this non-deterministic behavior."
     )
 
+def mhc_generate_mix_and_aggregate(x: torch.Tensor, phi: torch.Tensor, alpha: torch.Tensor, beta: torch.Tensor, use_tf32: bool = True):
+    """
+    Generate the mix matrix H_pre, H_post, H_res and apply H_pre to x to aggregate n streams
+    This wraps projection, scale, sinkhorn, and aggregate operations into one function.
+
+    Parameters
+    ----------
+    x : torch.Tensor
+        input tensor of shape (s, b, C, n), where s is the sequence length, b is the batch size, C is the hidden dimension per hyper connection, and n is the number of hyper connections. 
+        Note that C is equal to the original hidden dimension divided by n.
+    phi : torch.Tensor
+        projection matrix of shape (N, nC), where N=2n+n*n (=24 for n=4), and nC is the hidden dimension after expansion (n times of C).
+    alpha : torch.Tensor
+        scaling factor for H, of shape (3,), where
+        alpha[0] is applied to H[:, 0:n] for H_pre
+        alpha[1] is applied to H[:, n:2n] for H_post
+        alpha[2] is applied to H[:, 2n:2n+n*n] for H_res
+    beta : torch.Tensor
+        bias term for H, of shape (1, 2*n+n*n), where
+        beta[0, 0:n] is applied to H[:, 0:n] for H_pre
+        beta[0, n:2n] is applied to H[:, n:2n] for H_post
+        beta[0, 2n:2n+n*n] is applied to H[:, 2n:2n+n*n] for H_res
+    n : int
+        number of hyper connections, where only n=4 is supported in the current implementation
+    use_tf32 : bool
+        whether to use TF32 for matrix multiplications
+
+    Returns
+    -------
+    out : torch.Tensor
+        out of shape (s, b, C), which is the aggregated result after applying H_pre to x, which will be fed into attention / FFN
+    H_post : torch.Tensor
+        H_post of shape (s, b, n), which will be used in the post-processing after attention / FFN in `mhc_fused_expand_combine`
+    H_res : torch.Tensor
+        H_res of shape (s, b, n, n), which will be used to mix the residual connection in `mhc_fused_expand_combine`
+    """
+    s, b, C, n = x.shape
+    assert n == 4, "Only n=4 is supported in this implementation, where n is the Hyper Connection number"
+    nC = n * C
+    N = 2 * n + n * n
+    H, ms = mhc_fused_projection(x.view(s * b, nC), phi, use_tf32=use_tf32)
+    H_scaled = mhc_fused_scale(H, alpha, beta, ms, n)
+    H_pre = H_scaled[..., :n].view(s, b, n)
+    H_post = H_scaled[..., n : 2 * n].view(s, b, n)
+    H_res = H_scaled[..., 2 * n : 2 * n + n * n].view(s, b, n, n)
+    H_res = mhc_fused_sinkhorn(H_res, n, recompute_hist=True, iters=20)
+    out = mhc_fused_aggregate(x, H_pre.view(s, b, n), n, use_tf32=use_tf32)
+    return out, H_post, H_res
+
 
 def mhc_fused_sinkhorn(
     H_res: torch.Tensor, n: int = 4, recompute_hist: bool = True, iters: int = 20
@@ -302,7 +351,7 @@ class mHCProjectionOp(torch.autograd.Function):
         ctx.save_for_backward(x, phi, ms)
         ctx.phi_dtype = phi.dtype
 
-        return H.to(ctx.dtype), ms  # Keep ms in fp32
+        return H, ms  # Keep both in fp32, which will be passed to sigmoid in mHCScaleFusedOp
 
     @staticmethod
     def backward(ctx, grad_H, grad_ms):
@@ -342,9 +391,9 @@ class mHCProjectionOp(torch.autograd.Function):
             grad_x = torch.empty((M, K), device=device, dtype=x.dtype)
 
         grad_x = torch.empty((M, K), device=device, dtype=x.dtype)
-        grad_phi = general_gemm(x, grad_H, out_dtype=torch.float32, layout="NT")[0][:N, :].to(
-            phi.dtype
-        )  # (2n + n^2, M) @ (M, nC) = (2n + n^2, nC); grad_H's last dim is padded to 32
+        # (2n + n^2, M) @ (M, nC) = (2n + n^2, nC); grad_H's last dim is padded to 32
+        grad_phi = general_gemm(x.to(grad_H.dtype), grad_H, out_dtype=torch.float32, layout="NT")[0]
+        grad_phi = grad_phi[:N, :].to(phi.dtype)
 
         # pylint: disable=unnecessary-lambda-assignment
         grid = lambda META: (
@@ -635,7 +684,7 @@ class mHCSinkhornOp(torch.autograd.Function):
 
         n = ctx.n
 
-        grad_res_out = grad_out.clone().contiguous().view(M, n * n)
+        grad_res_out = grad_out.contiguous().view(M, n * n)
 
         grad_res = torch.empty_like(H_res)
 

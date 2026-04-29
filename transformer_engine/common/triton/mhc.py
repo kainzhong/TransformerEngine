@@ -115,7 +115,7 @@ def _mhc_projection_fwd_fused(
         )  # (BLOCK_SIZE_N, BLOCK_SIZE_K)
         ms_acc += tl.sum(x * x, axis=1)
         h_acc = tl.dot(
-            x, tl.trans(phi, (1, 0)), h_acc, input_precision=precision, out_dtype=tl.float32
+            x.to(phi.dtype), tl.trans(phi, (1, 0)), h_acc, input_precision=precision, out_dtype=tl.float32
         )
 
     h_ptrs = h_ptr + offs_m[:, None] * stride_hm + offs_n_full[None, :] * stride_hn
@@ -211,7 +211,7 @@ def _mhc_projection_bwd_fused(
 
     grad_x = x * (grad_ms * 2 / tl.cast(K, tl.float32))[:, None]
     grad_x = tl.dot(
-        grad_h, phi, acc=grad_x, input_precision=precision, out_dtype=tl.float32
+        grad_h.to(phi.dtype), phi, acc=grad_x, input_precision=precision, out_dtype=tl.float32
     )  # (BLOCK_SIZE_M, BLOCK_SIZE_K)
     grad_x_ptrs = grad_x_ptr + offs_m[:, None] * stride_grad_xm + offs_k[None, :] * stride_grad_xk
     grad_x = grad_x.to(x.dtype)
