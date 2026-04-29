@@ -304,15 +304,14 @@ def test_mhc_projection(cfg: MHCConfig, dtype):
 def test_mhc_projection_determinism(cfg: MHCConfig, dtype):
     reset_rng_states()
 
-    if not deterministic:
-        pytest.skip("Skipping determinism test since non-deterministic algorithms are currently allowed.")
-
     s, b, C, n = cfg.s, cfg.b, cfg.C, cfg.n
     nC = n * C
     N = 2 * n + n * n
-
-    tols = deterministic_tols
     use_tf32 = False
+
+    if not deterministic:
+        pytest.skip("Skipping determinism test since non-deterministic algorithms are currently allowed.")
+    tols = deterministic_tols
 
     x = torch.randn(s * b, nC, device="cuda", requires_grad=True, dtype=dtype)
     phi = torch.randn(N, nC, dtype=dtype, requires_grad=True, device="cuda")
@@ -364,6 +363,43 @@ def test_mhc_scale(cfg: MHCConfig, dtype):
     torch.cat([fused_out[i] for i in range(3)], dim=-1).sum().backward()
 
     torch.testing.assert_close(H_padded.grad[:, :N], H_ref.grad, **tols)
+    torch.testing.assert_close(alpha.grad, alpha_ref.grad, **tols)
+    torch.testing.assert_close(beta.grad, beta_ref.grad, **tols)
+    torch.testing.assert_close(ms.grad, ms_ref.grad, **tols)
+
+@pytest.mark.parametrize("cfg", mhc_configs, ids=MHCConfig.desc)
+@pytest.mark.parametrize("dtype", [torch.float32], ids=["fp32"])
+def test_mhc_scale_determinism(cfg: MHCConfig, dtype):
+    reset_rng_states()
+
+    s, b, C, n = cfg.s, cfg.b, cfg.C, cfg.n
+    N = 2 * n + n * n
+
+    if not deterministic:
+        pytest.skip("Skipping determinism test since non-deterministic algorithms are currently allowed.")
+    tols = deterministic_tols
+
+    H_padded = torch.randn(s * b, 32, device="cuda", requires_grad=True, dtype=dtype)
+    alpha = torch.randn(3, device="cuda", requires_grad=True, dtype=dtype)
+    beta = torch.randn(1, 2 * n + n * n, device="cuda", requires_grad=True, dtype=dtype)
+    ms_raw = torch.randn(s * b, device="cuda", dtype=dtype).abs() + 1.0
+    ms = ms_raw.detach().clone().requires_grad_(True)
+
+    H_ref = H_padded.detach().clone().requires_grad_(True)
+    alpha_ref = alpha.detach().clone().requires_grad_(True)
+    beta_ref = beta.detach().clone().requires_grad_(True)
+    ms_ref = ms.detach().clone().requires_grad_(True)
+
+    ref_out = mhc_fused_scale(H_ref, alpha_ref, beta_ref, ms_ref, n)
+    fused_out = mhc_fused_scale(H_padded, alpha, beta, ms, n)
+
+    for i in range(3):
+        torch.testing.assert_close(fused_out[i], ref_out[i], **tols)
+
+    torch.cat([ref_out[i] for i in range(3)], dim=-1).sum().backward()
+    torch.cat([fused_out[i] for i in range(3)], dim=-1).sum().backward()
+
+    torch.testing.assert_close(H_padded.grad, H_ref.grad, **tols)
     torch.testing.assert_close(alpha.grad, alpha_ref.grad, **tols)
     torch.testing.assert_close(beta.grad, beta_ref.grad, **tols)
     torch.testing.assert_close(ms.grad, ms_ref.grad, **tols)

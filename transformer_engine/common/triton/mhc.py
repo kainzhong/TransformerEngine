@@ -511,47 +511,6 @@ def _mhc_scale_bwd_fused(
 
         tl.atomic_add(grad_b_ptr + cols * stride_grad_b, partial_grad_b, mask=cols < N, sem="relaxed")
 
-@triton.jit
-def _mhc_scale_bwd_reduce_workspace(
-    ws_grad_a_ptr, # Temporary workspace for a with shape (NUM_SMS, 3)
-    ws_grad_b_ptr, # Temporary workspace for b with shape (NUM_SMS, 2*n+n*n)
-    grad_a_ptr, # (3,)
-    grad_b_ptr, # (2*n+n*n,)
-    stride_grad_a,
-    stride_grad_b,
-    NUM_SMS: tl.constexpr,
-    NUM_SMS_PADDED: tl.constexpr,
-    n: tl.constexpr,
-    BLOCK_SIZE_N: tl.constexpr,
-    dtype: tl.constexpr,
-):
-    tl.assume(NUM_SMS > 0)
-    tl.assume(n == 4)
-    tl.assume(stride_grad_a == 1)
-    tl.assume(stride_grad_b == 1)
-
-    N = 2 * n + n * n
-
-    offs_m = tl.arange(0, NUM_SMS_PADDED)
-    mask_m = offs_m < NUM_SMS
-    offs_a = tl.arange(0, 4)
-    mask_a = offs_a < 3
-    offs_b = tl.arange(0, BLOCK_SIZE_N)
-    mask_b = offs_b < N
-
-    ws_grad_a_offs = ws_grad_a_ptr + offs_m[:, None] * 4 + offs_a[None, :]
-    ws_grad_a = tl.load(ws_grad_a_offs, mask=mask_m[:, None] & mask_a[None, :], other=0.0) # (NUM_SMS_PADDED, 4)
-    grad_a = tl.sum(ws_grad_a, axis=0)  # (4,)
-    grad_a_offs = grad_a_ptr + offs_a * stride_grad_a
-    tl.store(grad_a_offs, grad_a.to(dtype), mask=mask_a)
-
-    ws_grad_b_offs = ws_grad_b_ptr + offs_m[:, None] * BLOCK_SIZE_N + offs_b[None, :]
-    ws_grad_b = tl.load(ws_grad_b_offs, mask=mask_m[:, None] & mask_b[None, :], other=0.0) # (NUM_SMS_PADDED, BLOCK_SIZE_N)
-    grad_b = tl.sum(ws_grad_b, axis=0)  # (BLOCK_SIZE_N)
-    grad_b_offs = grad_b_ptr + offs_b * stride_grad_b
-    tl.store(grad_b_offs, grad_b.to(dtype), mask=mask_b)
-
-
 def sinkhorn_config():
     block = [256, 1024]
     warps = [2, 8]

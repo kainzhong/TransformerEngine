@@ -9,7 +9,6 @@ import torch
 import triton
 
 from transformer_engine.common.triton.mhc import (
-    _mhc_scale_bwd_reduce_workspace,
     _mhc_scale_fwd_fused,
     _mhc_scale_bwd_fused,
     _mhc_expand_combine_fwd,
@@ -468,75 +467,61 @@ class mHCScaleFusedOp(torch.autograd.Function):
         grad_h = torch.zeros(
             (M, 32), device=grad_out.device, dtype=grad_out.dtype
         )  # Pad the grad_h to 32 in the last dimension
-        grad_alpha = torch.zeros((3,), device=grad_out.device, dtype=grad_out.dtype)
-        grad_beta_padded = torch.zeros((1, 32), device=grad_out.device, dtype=grad_out.dtype)
-        grad_beta = grad_beta_padded[
-            :, :N
-        ]  # Use only the first N elements for grad_beta, the rest are just padding
         grad_ms = torch.zeros((M,), device=grad_out.device, dtype=grad_out.dtype)
 
         device = torch.cuda.current_device()
         num_sms = torch.cuda.get_device_properties(device).multi_processor_count
         grid = (num_sms,)
 
-        kwargs = {
-            "grad_out_ptr": grad_out,
-            "out_ptr": out,
-            "grad_h_ptr": grad_h,
-            "h_ptr": H,
-            "grad_a_ptr": grad_alpha,
-            "a_ptr": alpha,
-            "grad_b_ptr": grad_beta,
-            "grad_ms_ptr": grad_ms,
-            "ms_ptr": ms,
-            "M": M,
-            "n": n,
-            "stride_grad_out_m": 32,
-            "stride_grad_out_n": 1,
-            "stride_out_m": 32,
-            "stride_out_n": 1,
-            "stride_grad_hm": 32,
-            "stride_grad_hn": 1,
-            "stride_hm": 32,
-            "stride_hn": 1,
-            "stride_grad_a": 1,
-            "stride_a": 1,
-            "stride_grad_b": 1,
-            "stride_grad_ms": 1,
-            "stride_ms": 1,
-            "BLOCK_SIZE_N": 32,
-            "eps": torch.finfo(ms.dtype).eps,
-            "NUM_SMS": num_sms,
-            "DETERMINISTIC": deterministic,
-        }
         if deterministic:
+            grad_alpha = None
+            grad_beta_padded = None
             workspace_buffer_grad_alpha = torch.empty((num_sms, 4), device=grad_out.device, dtype=torch.float32)
             workspace_buffer_grad_beta = torch.empty((num_sms, 32), device=grad_out.device, dtype=torch.float32)
-            _mhc_scale_bwd_fused[grid](
-                ws_grad_a_ptr=workspace_buffer_grad_alpha,
-                ws_grad_b_ptr=workspace_buffer_grad_beta,
-                **kwargs,
-            )
-            num_sms_padded = nearest_power_of_2(num_sms)
-            _mhc_scale_bwd_reduce_workspace[(1,)](
-                ws_grad_a_ptr=workspace_buffer_grad_alpha.to(grad_alpha.dtype),
-                ws_grad_b_ptr=workspace_buffer_grad_beta.to(grad_beta.dtype),
-                grad_a_ptr=grad_alpha,
-                grad_b_ptr=grad_beta,
-                stride_grad_a=1,
-                stride_grad_b=1,
-                NUM_SMS=num_sms,
-                NUM_SMS_PADDED=num_sms_padded,
-                n=n,
-                BLOCK_SIZE_N=32,
-                dtype=triton.language.bfloat16 if grad_out.dtype == torch.bfloat16 else triton.language.float32,
-            )
         else:
-            _mhc_scale_bwd_fused[grid](
-                ws_grad_a_ptr=None,  # No workspace for non-deterministic version
-                ws_grad_b_ptr=None,  # No workspace for non-deterministic version
-                **kwargs,
-            )
+            grad_alpha = torch.zeros((3,), device=grad_out.device, dtype=grad_out.dtype)
+            grad_beta_padded = torch.zeros((1, 32), device=grad_out.device, dtype=grad_out.dtype)
+            workspace_buffer_grad_alpha = None
+            workspace_buffer_grad_beta = None
+
+        _mhc_scale_bwd_fused[grid](grad_out_ptr=grad_out,
+            out_ptr=out,
+            grad_h_ptr=grad_h,
+            h_ptr=H,
+            grad_a_ptr=grad_alpha,
+            a_ptr=alpha,
+            grad_b_ptr=grad_beta_padded,
+            grad_ms_ptr=grad_ms,
+            ms_ptr=ms,
+            ws_grad_a_ptr=workspace_buffer_grad_alpha,
+            ws_grad_b_ptr=workspace_buffer_grad_beta,
+            M=M,
+            n=n,
+            stride_grad_out_m=32,
+            stride_grad_out_n=1,
+            stride_out_m=32,
+            stride_out_n=1,
+            stride_grad_hm=32,
+            stride_grad_hn=1,
+            stride_hm=32,
+            stride_hn=1,
+            stride_grad_a=1,
+            stride_a=1,
+            stride_grad_b=1,
+            stride_grad_ms=1,
+            stride_ms=1,
+            BLOCK_SIZE_N=32,
+            eps=torch.finfo(ms.dtype).eps,
+            NUM_SMS=num_sms,
+            DETERMINISTIC=deterministic,
+        )
+
+        if deterministic:
+            grad_alpha = workspace_buffer_grad_alpha.sum(dim=0)[:3]  # Sum across blocks and take the first 3 elements for grad_alpha
+            grad_beta_padded = workspace_buffer_grad_beta.sum(dim=0, keepdim=True)  # Sum across blocks for grad_beta
+
+        # Use only the first N elements for grad_beta, the rest are just padding
+        grad_beta = grad_beta_padded[:, :N] 
 
         return (
             grad_h.to(ctx.dtype),
