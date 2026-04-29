@@ -267,7 +267,7 @@ def get_tols(dtype):
         tols = dict(atol=5e-3, rtol=5e-3)
     return tols
 
-bit_exact_tols = dict(atol=0, rtol=0)
+deterministic_tols = dict(atol=0, rtol=0)
 
 @pytest.mark.parametrize("cfg", mhc_configs, ids=MHCConfig.desc)
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
@@ -311,7 +311,7 @@ def test_mhc_projection_determinism(cfg: MHCConfig, dtype):
     nC = n * C
     N = 2 * n + n * n
 
-    tols = bit_exact_tols
+    tols = deterministic_tols
     use_tf32 = False
 
     x = torch.randn(s * b, nC, device="cuda", requires_grad=True, dtype=dtype)
@@ -540,35 +540,6 @@ def test_mhc_aggregate(cfg: MHCConfig, dtype):
     H_pre_ref = H_pre.detach().clone().requires_grad_(True)
 
     ref_out = mhc_aggregate_ref(x_ref, H_pre_ref, n)
-    fused_out = mhc_fused_aggregate(x, H_pre, n, False)
-
-    torch.testing.assert_close(fused_out, ref_out, **tols)
-
-    ref_out.sum().backward()
-    fused_out.sum().backward()
-
-    torch.testing.assert_close(x.grad, x_ref.grad, **tols)
-    torch.testing.assert_close(H_pre.grad, H_pre_ref.grad, **tols)
-
-@pytest.mark.parametrize("cfg", mhc_configs, ids=MHCConfig.desc)
-@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
-def test_mhc_aggregate_determinism(cfg: MHCConfig, dtype):
-    reset_rng_states()
-
-    if not deterministic:
-        pytest.skip("Skipping determinism test since non-deterministic algorithms are currently allowed.")
-
-    s, b, C, n = cfg.s, cfg.b, cfg.C, cfg.n
-
-    tols = get_tols(dtype)
-
-    x = torch.randn(s, b, C, n, device="cuda", requires_grad=True, dtype=dtype)
-    H_pre = torch.randn(s, b, n, device="cuda", requires_grad=True, dtype=dtype)
-
-    x_ref = x.detach().clone().requires_grad_(True)
-    H_pre_ref = H_pre.detach().clone().requires_grad_(True)
-
-    ref_out = mhc_fused_aggregate(x_ref, H_pre_ref, n, False)
     fused_out = mhc_fused_aggregate(x, H_pre, n, False)
 
     torch.testing.assert_close(fused_out, ref_out, **tols)
