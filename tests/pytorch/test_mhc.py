@@ -451,8 +451,8 @@ def test_mhc_fuse_grad_acc(cfg: MHCConfig):
         expanded_combined = mhc_fused_expand_combine(
             aggregated,
             None,
-            H_post.view(s, b, n),
-            x.view(s, b, C, n),
+            H_post,
+            x,
             H_res,
             False,
             fused_grad_x_acc,
