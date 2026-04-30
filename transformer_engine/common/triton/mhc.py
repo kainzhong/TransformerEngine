@@ -110,7 +110,6 @@ def _mhc_projection_fwd_fused(
         x = tl.load(
             x_ptrs, mask=mask_m[:, None] & mask_k[None, :], other=0.0
         )  # (BLOCK_SIZE_M, BLOCK_SIZE_K)
-        x = x.to(tl.float32)
         phi_ptrs = phi_ptr + offs_n_full[:, None] * stride_phin + k_offs[None, :] * stride_phik
         phi = tl.load(
             phi_ptrs,
@@ -118,7 +117,6 @@ def _mhc_projection_fwd_fused(
             other=0.0,
             cache_modifier=".ca",
         )  # (BLOCK_SIZE_N, BLOCK_SIZE_K)
-        phi = phi.to(tl.float32)
 
         ms_acc += tl.sum(x * x, axis=1)
 
@@ -127,10 +125,10 @@ def _mhc_projection_fwd_fused(
         # to generate H. This is the correct way to fuse H = RMSNorm(x) @ phi.T.
         if HAS_NORM_WEIGHT:
             norm_weight_ptrs = norm_weight_ptr + k_offs * stride_norm_weight
-            norm_weight = tl.load(norm_weight_ptrs, mask=mask_k, other=1.0, cache_modifier=".ca").to(tl.float32)
+            norm_weight = tl.load(norm_weight_ptrs, mask=mask_k, other=1.0, cache_modifier=".ca")
             phi = phi * norm_weight[None, :]
         h_acc = tl.dot(
-            x, tl.trans(phi, (1, 0)), h_acc, input_precision=precision, out_dtype=tl.float32
+            x.to(phi.dtype), tl.trans(phi, (1, 0)), h_acc, input_precision=precision, out_dtype=tl.float32
         )
 
     h_ptrs = h_ptr + offs_m[:, None] * stride_hm + offs_n_full[None, :] * stride_hn

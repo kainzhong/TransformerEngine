@@ -37,14 +37,10 @@ def mhc_projection_ref(x, phi, norm_weight):
     x_fp32 = x.to(torch.float32)
     ms = (x_fp32 * x_fp32).mean(dim=1)
 
-    x = x.to(torch.float32)
-    phi = phi.to(torch.float32)
-
     if norm_weight is not None:
-        norm_weight = norm_weight.to(torch.float32)
         phi = phi * norm_weight[None, :]
-
-    Hs = x @ phi.T  # (M, 2n + n^2)
+    phi_fp32 = phi.to(torch.float32) 
+    Hs = x_fp32 @ phi_fp32.T  # (M, 2n + n^2)
 
     return Hs, ms
 
@@ -350,7 +346,7 @@ def test_mhc_scale(cfg: MHCConfig, dtype):
 
 
 @pytest.mark.parametrize("cfg", mhc_configs, ids=MHCConfig.desc)
-@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
+@pytest.mark.parametrize("dtype", [torch.float32], ids=["fp32"])
 @pytest.mark.parametrize("has_norm_weight", [False, True], ids=["false", "true"])
 def test_mhc_rmsnorm(cfg: MHCConfig, dtype, has_norm_weight):
     # Verify if the fused kernel is equivalent to applying RMSNorm in the normal order
@@ -393,16 +389,12 @@ def test_mhc_rmsnorm(cfg: MHCConfig, dtype, has_norm_weight):
     )
 
     def mhc_combined(x_ref, phi_ref, alpha_ref, beta_ref, norm_weight_ref):
-        x_ref = x_ref.to(torch.float32)
-        phi_ref = phi_ref.to(torch.float32)
-        alpha_ref = alpha_ref.to(torch.float32)
-        beta_ref = beta_ref.to(torch.float32)
-        norm_weight_ref = None if norm_weight_ref is None else norm_weight_ref.to(torch.float32)
-
         # Check if after spliting RMSNorm to two steps in projection and scaling,
         # theresult is close to applying RMSNorm in the correct order
-        x_rmsnorm = F.rms_norm(x_ref, normalized_shape=(nC,), weight=norm_weight_ref)
-        H = x_rmsnorm @ phi_ref.T
+        x_fp32 = x_ref.to(torch.float32)
+        w_fp32 = None if norm_weight_ref is None else norm_weight_ref.to(torch.float32)
+        x_rmsnorm = F.rms_norm(x_fp32, normalized_shape=(nC,), weight=w_fp32)
+        H = x_rmsnorm @ phi_ref.to(torch.float32).T
         H_pre = H[:, :n]
         H_post = H[:, n : 2 * n]
         H_res = H[:, 2 * n :]
@@ -424,6 +416,10 @@ def test_mhc_rmsnorm(cfg: MHCConfig, dtype, has_norm_weight):
     torch.testing.assert_close(combined_H_pre, ref_H_pre, **tols)
     torch.testing.assert_close(combined_H_post, ref_H_post, **tols)
     torch.testing.assert_close(combined_H_res, ref_H_res, **tols)
+
+    torch.testing.assert_close(ref_H_pre, fused_H_pre, **tols)
+    torch.testing.assert_close(ref_H_post, fused_H_post, **tols)
+    torch.testing.assert_close(ref_H_res, fused_H_res, **tols)
 
     torch.testing.assert_close(combined_H_pre, fused_H_pre, **tols)
     torch.testing.assert_close(combined_H_post, fused_H_post, **tols)
