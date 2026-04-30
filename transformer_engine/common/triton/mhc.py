@@ -57,6 +57,7 @@ def _mhc_projection_fwd_fused(
     phi_ptr,  # (N, K)
     h_ptr,  # (M, 32)
     ms_ptr,  # (M,)
+    norm_weight_ptr, # (K,)
     M,
     N,
     K,
@@ -67,12 +68,14 @@ def _mhc_projection_fwd_fused(
     stride_hm: tl.constexpr,
     stride_hn: tl.constexpr,
     stride_ms: tl.constexpr,
+    stride_norm_weight: tl.constexpr,
     # Meta-parameters
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
     STEP_SIZE_K: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     precision: tl.constexpr,
+    HAS_NORM_WEIGHT: tl.constexpr,
 ):
     pid_m = tl.program_id(axis=0)
     pid_k = tl.program_id(axis=1)
@@ -86,6 +89,7 @@ def _mhc_projection_fwd_fused(
     tl.assume(stride_hm == 32)
     tl.assume(stride_hn == 1)
     tl.assume(stride_ms == 1)
+    tl.assume(stride_norm_weight == 1)
 
     tl.assume(BLOCK_SIZE_M % 32 == 0)
     tl.assume(BLOCK_SIZE_K % 32 == 0)
@@ -113,6 +117,10 @@ def _mhc_projection_fwd_fused(
             other=0.0,
             cache_modifier=".ca",
         )  # (BLOCK_SIZE_N, BLOCK_SIZE_K)
+        if HAS_NORM_WEIGHT:
+            norm_weight_ptrs = norm_weight_ptr + k_offs * stride_norm_weight
+            norm_weight = tl.load(norm_weight_ptrs, mask=mask_k, other=1.0, cache_modifier=".ca")
+            phi = phi * norm_weight[None, :]
         ms_acc += tl.sum(x * x, axis=1)
         h_acc = tl.dot(
             x.to(phi.dtype), tl.trans(phi, (1, 0)), h_acc, input_precision=precision, out_dtype=tl.float32
@@ -160,6 +168,7 @@ def _mhc_projection_bwd_fused(
     BLOCK_SIZE_N: tl.constexpr,
     precision: tl.constexpr,
     FUSE_GRAD_X_ACC: tl.constexpr,
+    HAS_NORM_WEIGHT: tl.constexpr,
 ):
     pid_m = tl.program_id(axis=0)
     pid_k = tl.program_id(axis=1)

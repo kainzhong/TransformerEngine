@@ -37,7 +37,7 @@ def check_deterministic(operator: str):
         " NVTE_ALLOW_NONDETERMINISTIC_ALGO=1 to allow this non-deterministic behavior."
     )
 
-def mhc_generate_mix_and_aggregate(x: torch.Tensor, phi: torch.Tensor, alpha: torch.Tensor, beta: torch.Tensor, use_tf32: bool = True):
+def mhc_generate_mix_and_aggregate(x: torch.Tensor, phi: torch.Tensor, norm_weight: torch.Tensor, alpha: torch.Tensor, beta: torch.Tensor, use_tf32: bool = True):
     """
     Generate the mix matrix H_pre, H_post, H_res and apply H_pre to x to aggregate n streams
     This wraps projection, scale, sinkhorn, and aggregate operations into one function.
@@ -61,6 +61,9 @@ def mhc_generate_mix_and_aggregate(x: torch.Tensor, phi: torch.Tensor, alpha: to
         Note that C is equal to the original hidden dimension divided by n.
     phi : torch.Tensor
         projection matrix of shape (N, nC), where N=2n+n*n (=24 for n=4), and nC is the hidden dimension after expansion (n times of C),
+        dtype is torch.float16 or torch.float32
+    norm_weight : torch.Tensor or None
+        optional, the weight for RMSNorm, of shape (K,), which is the learnable per-element affine parameters (gamma) applied to RMSNorm
         dtype is torch.float16 or torch.float32
     alpha : torch.Tensor
         scaling factor for H, of shape (3,), where
@@ -93,7 +96,7 @@ def mhc_generate_mix_and_aggregate(x: torch.Tensor, phi: torch.Tensor, alpha: to
     assert n == 4, "Only n=4 is supported in this implementation, where n is the Hyper Connection number"
     nC = n * C
     N = 2 * n + n * n
-    H, ms = mhc_fused_projection(x.view(s * b, nC), phi, use_tf32=use_tf32)
+    H, ms = mhc_fused_projection(x.view(s * b, nC), phi, norm_weight, use_tf32=use_tf32)
     h_pre, h_post, h_res = mhc_fused_scale(H, alpha, beta, ms, n)
     H_pre = h_pre.view(s, b, n)
     H_post = h_post.view(s, b, n)
@@ -280,7 +283,7 @@ def mhc_fused_expand_combine(
     return out
 
 
-def mhc_fused_projection(x: torch.Tensor, phi: torch.Tensor, use_tf32: bool = True):
+def mhc_fused_projection(x: torch.Tensor, phi: torch.Tensor, norm_weight: torch.Tensor, use_tf32: bool = True):
     """
     Fused projection operation to compute H matrices and mean square for RMSNorm (see eq. 14-15, section 4.3.1 of the DeepSeek mHC paper):
 
@@ -293,8 +296,13 @@ def mhc_fused_projection(x: torch.Tensor, phi: torch.Tensor, use_tf32: bool = Tr
     ----------
     x : torch.Tensor
         input tensor of shape (M, K), where M=s*b is the batch size and K=nC is the hidden dimension after expansion.
+        dtype is torch.float16 or torch.float32
     phi : torch.Tensor
         projection matrix of shape (N, K), where N=2n+n*n (=24 for n=4)
+        dtype is torch.float16 or torch.float32
+    norm_weight : torch.Tensor or None
+        optional, the weight for RMSNorm, of shape (K,), which is the learnable per-element affine parameters (gamma) applied to RMSNorm
+        dtype is torch.float16 or torch.float32
     use_tf32 : bool
         whether to use TF32 precision for matmul operations. If False, it will use ieee for better precision.
         This is mainly used by our unittests since TF32 precision will introduce some errors and cause tests to fail.
@@ -312,7 +320,7 @@ def mhc_fused_projection(x: torch.Tensor, phi: torch.Tensor, use_tf32: bool = Tr
         phi.shape[0] == 24
     ), "Currently only n=4 is supported, which means phi should have 24 in its first dimension"
     check_deterministic("mhc_fused_projection")
-    H, ms = mHCProjectionOp.apply(x, phi, use_tf32)
+    H, ms = mHCProjectionOp.apply(x, phi, norm_weight, use_tf32)
     return H, ms
 
 
@@ -322,7 +330,7 @@ class mHCProjectionOp(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(ctx, x, phi, use_tf32=True):
+    def forward(ctx, x, phi, norm_weight, use_tf32=True):
         """
         The forward pass of the fused projection operation. Computes H = x @ phi^T and the mean
         square ms = mean(x^2, dim=-1) for RMSNorm in a single fused kernel.
@@ -331,6 +339,7 @@ class mHCProjectionOp(torch.autograd.Function):
         ctx : The context object.
         x (tensor): The input tensor of shape (M, K), where M=s*b is the flattened batch dimension and K=nC is the hidden dimension after expansion.
         phi (tensor): The projection matrix of shape (N, K), where N=2n+n*n (=24 for n=4).
+        norm_weight (tensor or None): Optional, or tensor of shape (K,). RMSNorm's learnable per-element affine parameters
         use_tf32 (bool): Whether to use TF32 precision for matmul operations. If False, uses IEEE for better precision.
 
         Returns:
@@ -364,6 +373,7 @@ class mHCProjectionOp(torch.autograd.Function):
             phi_ptr=phi,  # (N, K)
             h_ptr=H,  # (M, 32)
             ms_ptr=ms,  # (M,)
+            norm_weight_ptr=norm_weight,
             M=M,
             N=N,
             K=K,
@@ -374,11 +384,13 @@ class mHCProjectionOp(torch.autograd.Function):
             stride_hm=32,
             stride_hn=1,
             stride_ms=1,
+            stride_norm_weight=1,
             BLOCK_SIZE_N=32,
             precision="tf32" if use_tf32 else "ieee",
+            HAS_NORM_WEIGHT=norm_weight is not None,
         )
 
-        ctx.save_for_backward(x, phi, ms)
+        ctx.save_for_backward(x, phi, ms, norm_weight)
         ctx.phi_dtype = phi.dtype
 
         return H, ms  # Keep both in fp32, which will be passed to sigmoid in mHCScaleFusedOp
@@ -400,7 +412,7 @@ class mHCProjectionOp(torch.autograd.Function):
         Returns:
         tuple: A tuple with the gradients (grad_x, grad_phi, None).
         """
-        x, phi, ms = ctx.saved_tensors
+        x, phi, ms, norm_weight = ctx.saved_tensors
         M, K = x.shape
         device = x.device
 
