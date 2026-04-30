@@ -443,6 +443,62 @@ def test_mhc_rmsnorm(cfg: MHCConfig, dtypes, has_norm_weight):
     torch.testing.assert_close(combined_H_res, fused_H_res, **tols)
 
 @pytest.mark.parametrize("cfg", mhc_configs, ids=MHCConfig.desc)
+def test_mhc_fuse_grad_acc(cfg: MHCConfig):
+    reset_rng_states()
+
+    s, b, C, n = cfg.s, cfg.b, cfg.C, cfg.n
+    N = 2 * n + n * n
+    nC = n * C
+
+    tols = get_tols(torch.bfloat16)
+    use_tf32 = False
+
+    x = torch.randn(s, b, C, n, device="cuda", requires_grad=True, dtype=torch.bfloat16)
+    phi = torch.randn(N, nC, dtype=torch.float32, requires_grad=True, device="cuda")
+
+    alpha = torch.randn(3, device="cuda", requires_grad=True, dtype=torch.float32)
+    beta = torch.randn(1, 2 * n + n * n, device="cuda", requires_grad=True, dtype=torch.float32)
+
+    x_ref = x.detach().clone().requires_grad_(True)
+    phi_ref = phi.detach().clone().requires_grad_(True)
+
+    alpha_ref = alpha.detach().clone().requires_grad_(True)
+    beta_ref = beta.detach().clone().requires_grad_(True)
+
+    def end_to_end(x, phi, alpha, beta, fused_grad_x_acc):
+        aggregated, H_post, H_res = mhc_generate_mix_and_aggregate(
+            x, phi, alpha, beta, use_tf32
+        )
+        expanded_combined = mhc_fused_expand_combine(
+            aggregated,
+            None,
+            H_post,
+            x,
+            H_res,
+            False,
+            fused_grad_x_acc,
+        )
+
+        return expanded_combined
+
+    expanded_combined_fuse_grad  = end_to_end(
+        x_ref, phi_ref, alpha_ref, beta_ref, False
+    )
+    expanded_combined_no_fuse_grad = end_to_end(
+        x, phi, alpha, beta, True
+    )
+
+    grad_output = torch.randn_like(expanded_combined_fuse_grad)
+    expanded_combined_fuse_grad.backward(grad_output)
+    expanded_combined_no_fuse_grad.backward(grad_output)
+
+    torch.testing.assert_close(x.grad, x_ref.grad, **tols)
+    torch.testing.assert_close(phi.grad, phi_ref.grad, **tols)
+    torch.testing.assert_close(alpha.grad, alpha_ref.grad, **tols)
+    torch.testing.assert_close(beta.grad, beta_ref.grad, **tols)
+
+
+@pytest.mark.parametrize("cfg", mhc_configs, ids=MHCConfig.desc)
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
 @pytest.mark.parametrize("recompute", [False, True], ids=["no_recompute", "recompute"])
 def test_mhc_sinkhorn(cfg: MHCConfig, dtype, recompute):
