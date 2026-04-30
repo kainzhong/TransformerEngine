@@ -434,13 +434,10 @@ class mHCProjectionOp(torch.autograd.Function):
 
         if norm_weight is not None:
             # (2n + n^2, M) @ (M, nC) = (2n + n^2, nC); grad_H's last dim is padded to 32
-            grad_phi_norm_weight = general_gemm(x.to(grad_H.dtype), grad_H, out_dtype=torch.float32, layout="NT")[0][:N, :]
-            # (2n + n^2, nC) = (2n + n^2, nC) * (1, nC)
-            grad_phi = grad_phi_norm_weight * norm_weight[None, :].to(grad_phi_norm_weight.dtype)
-            grad_phi = grad_phi.to(phi.dtype)
-            # (nC) = ((2n + n^2, nC) * (2n + n^2, nC)).sum(0)
-            grad_norm_weight = (grad_phi_norm_weight * phi.to(torch.float32)).sum(dim=0)
-            grad_norm_weight = grad_norm_weight.to(norm_weight.dtype)
+            grad_psi = general_gemm(x.to(grad_H.dtype), grad_H, out_dtype=torch.float32, layout="NT")[0][:N, :]
+            grad_psi = grad_psi.to(phi.dtype)
+            grad_phi = grad_psi * norm_weight[None, :]
+            grad_norm_weight = (grad_psi * phi).sum(dim=0).to(norm_weight.dtype)
         else:
             grad_phi = general_gemm(x.to(grad_H.dtype), grad_H, out_dtype=torch.float32, layout="NT")[0][:N, :]
             grad_phi = grad_phi.to(phi.dtype)

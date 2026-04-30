@@ -21,10 +21,6 @@ from transformer_engine.pytorch.triton.mhc import (
 torch.backends.cuda.matmul.allow_tf32 = False
 
 
-def truncate_to_tf32(x: torch.Tensor) -> torch.Tensor:
-    return (x.view(torch.int32) & ~0x1FFF).view(torch.float32)
-
-
 def mhc_projection_ref(x, phi, norm_weight):
     """
     Reference operator for mHC's projection building operation.
@@ -34,11 +30,10 @@ def mhc_projection_ref(x, phi, norm_weight):
         - phi_pre: (n, nC)
         - phi_post: (n, nC)
         - phi_res: (n^2, nC)
-    norm_weight: (nC,) or None, if not None, apply element-wise multiplication to x before projection
+    norm_weight: (nC,) or None, if not None, apply element-wise multiplication to phi before projection
     n: number of Hyper Connection streams
     C: hidden dimension per stream
     """
-    x_dtype = x.dtype
 
     x_fp32 = x.to(torch.float32)
     ms = (x_fp32 * x_fp32).mean(dim=1)
@@ -277,38 +272,26 @@ def get_tols(dtype):
 
 
 @pytest.mark.parametrize("cfg", mhc_configs, ids=MHCConfig.desc)
-@pytest.mark.parametrize("dtypes", [
-    (torch.float32, torch.float32), (torch.bfloat16, torch.float32), (torch.bfloat16, torch.bfloat16)
-    ], ids=["x_fp32_phi_fp32", "x_bf16_phi_fp32", "x_bf16_phi_bf16"])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
 @pytest.mark.parametrize("has_norm_weight", [False, True], ids=["false", "true"])
-def test_mhc_projection(cfg: MHCConfig, dtypes, has_norm_weight):
+def test_mhc_projection(cfg: MHCConfig, dtype, has_norm_weight):
     reset_rng_states()
 
     s, b, C, n = cfg.s, cfg.b, cfg.C, cfg.n
     nC = n * C
     N = 2 * n + n * n
 
-    x_dtype = dtypes[0]
-    phi_dtype = dtypes[1]
-
-    tols = get_tols(x_dtype)
+    tols = get_tols(dtype)
     use_tf32 = False
 
-    x = torch.randn(s * b, nC, device="cuda", requires_grad=True, dtype=x_dtype)
-    phi = torch.randn(N, nC, dtype=phi_dtype, device="cuda")
-    if x_dtype == torch.bfloat16 and phi_dtype == torch.float32:
-        # If we upcast bf16 operand to fp32 inside the triton kernel,
-        # triton will ignore input_precision="ieee" and use tf32 matmul anyway
-        # so we manually truncate phi to tf32 precision to match the kernel's behavior and ensure the test is valid
-        # See https://github.com/triton-lang/triton/issues/10176
-        phi = truncate_to_tf32(phi).clone()
-    phi.requires_grad_(True)
+    x = torch.randn(s * b, nC, device="cuda", requires_grad=True, dtype=dtype)
+    phi = torch.randn(N, nC, dtype=dtype, requires_grad=True, device="cuda")
 
     x_ref = x.detach().clone().requires_grad_(True)
     phi_ref = phi.detach().clone().requires_grad_(True)
 
     if has_norm_weight:
-        norm_weight = torch.randn(nC, device="cuda", requires_grad=True, dtype=x_dtype)
+        norm_weight = torch.randn(nC, device="cuda", requires_grad=True, dtype=dtype)
         norm_weight_ref = norm_weight.detach().clone().requires_grad_(True)
     else:
         norm_weight = None
@@ -393,7 +376,7 @@ def test_mhc_rmsnorm(cfg: MHCConfig, dtype, has_norm_weight):
     beta_ref = beta.detach().clone().requires_grad_(True)
 
     if has_norm_weight:
-        norm_weight = torch.randn(nC, device="cuda", requires_grad=True, dtype=x_dtype)
+        norm_weight = torch.randn(nC, device="cuda", requires_grad=True, dtype=dtype)
         norm_weight_ref = norm_weight.detach().clone().requires_grad_(True)
     else:
         norm_weight = None
@@ -409,13 +392,12 @@ def test_mhc_rmsnorm(cfg: MHCConfig, dtype, has_norm_weight):
         fused_out_H_padded, alpha, beta, fused_out_r, n
     )
 
-    def mhc_combined(x_ref, phi_ref, alpha_ref, beta_ref):
-        dtype = x_ref.dtype
+    def mhc_combined(x_ref, phi_ref, alpha_ref, beta_ref, norm_weight_ref):
         x_ref = x_ref.to(torch.float32)
         phi_ref = phi_ref.to(torch.float32)
         alpha_ref = alpha_ref.to(torch.float32)
         beta_ref = beta_ref.to(torch.float32)
-        norm_weight_ref = norm_weight_ref.to(torch.float32) if norm_weight_ref is not None else None
+        norm_weight_ref = None if norm_weight_ref is None else norm_weight_ref.to(torch.float32)
 
         # Check if after spliting RMSNorm to two steps in projection and scaling,
         # theresult is close to applying RMSNorm in the correct order
@@ -436,7 +418,7 @@ def test_mhc_rmsnorm(cfg: MHCConfig, dtype, has_norm_weight):
         return out_pre, out_post, out_res # Return in FP32 to match the kernel's behavior
 
     combined_H_pre, combined_H_post, combined_H_res = mhc_combined(
-        x_ref, phi_ref, alpha_ref, beta_ref
+        x_ref, phi_ref, alpha_ref, beta_ref, norm_weight_ref
     )
 
     torch.testing.assert_close(combined_H_pre, ref_H_pre, **tols)
@@ -472,20 +454,16 @@ def test_mhc_sinkhorn(cfg: MHCConfig, dtype, recompute):
 
 
 @pytest.mark.parametrize("cfg", mhc_configs, ids=MHCConfig.desc)
-@pytest.mark.parametrize("dtypes", [
-    (torch.float32, torch.float32), (torch.bfloat16, torch.float32), (torch.bfloat16, torch.bfloat16)
-    ], ids=["x_fp32_H_fp32", "x_bf16_H_fp32", "x_bf16_H_bf16"])
-def test_mhc_aggregate(cfg: MHCConfig, dtypes):
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
+def test_mhc_aggregate(cfg: MHCConfig, dtype):
     reset_rng_states()
 
     s, b, C, n = cfg.s, cfg.b, cfg.C, cfg.n
 
-    x_dtype = dtypes[0]
-    H_dtype = dtypes[1]
-    tols = get_tols(x_dtype)
+    tols = get_tols(dtype)
 
-    x = torch.randn(s, b, C, n, device="cuda", requires_grad=True, dtype=x_dtype)
-    H_pre = torch.randn(s, b, n, device="cuda", requires_grad=True, dtype=H_dtype)
+    x = torch.randn(s, b, C, n, device="cuda", requires_grad=True, dtype=dtype)
+    H_pre = torch.randn(s, b, n, device="cuda", requires_grad=True, dtype=dtype)
 
     x_ref = x.detach().clone().requires_grad_(True)
     H_pre_ref = H_pre.detach().clone().requires_grad_(True)
@@ -503,26 +481,22 @@ def test_mhc_aggregate(cfg: MHCConfig, dtypes):
 
 
 @pytest.mark.parametrize("cfg", mhc_configs, ids=MHCConfig.desc)
-@pytest.mark.parametrize("dtypes", [
-    (torch.float32, torch.float32), (torch.bfloat16, torch.float32), (torch.bfloat16, torch.bfloat16)
-    ], ids=["x_fp32_H_fp32", "x_bf16_H_fp32", "x_bf16_H_bf16"])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
 @pytest.mark.parametrize("with_bias", [True, False], ids=["with_bias", "no_bias"])
-def test_mhc_expand_combine(cfg: MHCConfig, dtypes, with_bias):
+def test_mhc_expand_combine(cfg: MHCConfig, dtype, with_bias):
     reset_rng_states()
 
     s, b, C, n = cfg.s, cfg.b, cfg.C, cfg.n
 
-    x_dtype = dtypes[0]
-    H_dtype = dtypes[1]
-    tols = get_tols(x_dtype)
+    tols = get_tols(dtype)
 
-    f = torch.randn(s, b, C, device="cuda", requires_grad=True, dtype=x_dtype)
+    f = torch.randn(s, b, C, device="cuda", requires_grad=True, dtype=dtype)
     bias = None
     if with_bias:
-        bias = torch.randn(C, device="cuda", requires_grad=True, dtype=x_dtype)
-    H_post = torch.randn(s, b, n, device="cuda", requires_grad=True, dtype=H_dtype)
-    x = torch.randn(s, b, C, n, device="cuda", requires_grad=True, dtype=x_dtype)
-    H_res = torch.randn(s, b, n, n, device="cuda", requires_grad=True, dtype=H_dtype)
+        bias = torch.randn(C, device="cuda", requires_grad=True, dtype=dtype)
+    H_post = torch.randn(s, b, n, device="cuda", requires_grad=True, dtype=dtype)
+    x = torch.randn(s, b, C, n, device="cuda", requires_grad=True, dtype=dtype)
+    H_res = torch.randn(s, b, n, n, device="cuda", requires_grad=True, dtype=dtype)
 
     f_ref = f.detach().clone().requires_grad_(True)
     bias_ref = None if bias is None else bias.detach().clone().requires_grad_(True)
