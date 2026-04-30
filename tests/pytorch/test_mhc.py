@@ -268,26 +268,31 @@ def get_tols(dtype):
 
 
 @pytest.mark.parametrize("cfg", mhc_configs, ids=MHCConfig.desc)
-@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
+@pytest.mark.parametrize("dtypes", [
+    (torch.float32, torch.float32),
+    (torch.bfloat16, torch.bfloat16),
+    (torch.bfloat16, torch.float32),
+], ids=["x_fp32_phi_fp32", "x_bf16_phi_bf16", "x_bf16_phi_fp32"])
 @pytest.mark.parametrize("has_norm_weight", [False, True], ids=["false", "true"])
-def test_mhc_projection(cfg: MHCConfig, dtype, has_norm_weight):
+def test_mhc_projection(cfg: MHCConfig, dtypes, has_norm_weight):
     reset_rng_states()
 
     s, b, C, n = cfg.s, cfg.b, cfg.C, cfg.n
     nC = n * C
     N = 2 * n + n * n
 
-    tols = get_tols(dtype)
+    x_dtype = dtypes[0]
+    phi_dtype = dtypes[1]
+    tols = get_tols(x_dtype)
     use_tf32 = False
 
-    x = torch.randn(s * b, nC, device="cuda", requires_grad=True, dtype=dtype)
-    phi = torch.randn(N, nC, dtype=dtype, requires_grad=True, device="cuda")
-
+    x = torch.randn(s * b, nC, device="cuda", requires_grad=True, dtype=x_dtype)
+    phi = torch.randn(N, nC, dtype=phi_dtype, requires_grad=True, device="cuda")
     x_ref = x.detach().clone().requires_grad_(True)
     phi_ref = phi.detach().clone().requires_grad_(True)
 
     if has_norm_weight:
-        norm_weight = torch.randn(nC, device="cuda", requires_grad=True, dtype=dtype)
+        norm_weight = torch.randn(nC, device="cuda", requires_grad=True, dtype=x_dtype)
         norm_weight_ref = norm_weight.detach().clone().requires_grad_(True)
     else:
         norm_weight = None
@@ -346,9 +351,14 @@ def test_mhc_scale(cfg: MHCConfig, dtype):
 
 
 @pytest.mark.parametrize("cfg", mhc_configs, ids=MHCConfig.desc)
-@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
+@pytest.mark.parametrize("dtypes", [
+    (torch.float32, torch.float32),
+    (torch.bfloat16, torch.bfloat16),
+    (torch.bfloat16, torch.float32),
+], ids=["x_fp32_phi_fp32", "x_bf16_phi_bf16", "x_bf16_phi_fp32"])
+
 @pytest.mark.parametrize("has_norm_weight", [False, True], ids=["false", "true"])
-def test_mhc_rmsnorm(cfg: MHCConfig, dtype, has_norm_weight):
+def test_mhc_rmsnorm(cfg: MHCConfig, dtypes, has_norm_weight):
     # Verify if the fused kernel is equivalent to applying RMSNorm in the normal order
     reset_rng_states()
 
@@ -356,14 +366,15 @@ def test_mhc_rmsnorm(cfg: MHCConfig, dtype, has_norm_weight):
     N = 2 * n + n * n
     nC = n * C
 
-    tols = get_tols(dtype)
+    x_dtype = dtypes[0]
+    phi_dtype = dtypes[1]
+    tols = get_tols(x_dtype)
     use_tf32 = False
 
-    x = torch.randn(s * b, nC, device="cuda", requires_grad=True, dtype=dtype)
-    phi = torch.randn(N, nC, dtype=dtype, requires_grad=True, device="cuda")
-
-    alpha = torch.randn(3, device="cuda", requires_grad=True, dtype=dtype)
-    beta = torch.randn(1, 2 * n + n * n, device="cuda", requires_grad=True, dtype=dtype)
+    x = torch.randn(s * b, nC, device="cuda", requires_grad=True, dtype=x_dtype)
+    phi = torch.randn(N, nC, dtype=phi_dtype, requires_grad=True, device="cuda")
+    alpha = torch.randn(3, device="cuda", requires_grad=True, dtype=phi_dtype)
+    beta = torch.randn(1, 2 * n + n * n, device="cuda", requires_grad=True, dtype=phi_dtype)
 
     x_ref = x.detach().clone().requires_grad_(True)
     phi_ref = phi.detach().clone().requires_grad_(True)
@@ -372,7 +383,7 @@ def test_mhc_rmsnorm(cfg: MHCConfig, dtype, has_norm_weight):
     beta_ref = beta.detach().clone().requires_grad_(True)
 
     if has_norm_weight:
-        norm_weight = torch.randn(nC, device="cuda", requires_grad=True, dtype=dtype)
+        norm_weight = torch.randn(nC, device="cuda", requires_grad=True, dtype=x_dtype)
         norm_weight_ref = norm_weight.detach().clone().requires_grad_(True)
     else:
         norm_weight = None

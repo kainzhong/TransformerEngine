@@ -380,12 +380,18 @@ class mHCProjectionOp(torch.autograd.Function):
         )
 
         precision = "tf32" if ctx.use_tf32 else "ieee"
-        # With norm_weight, inside the triton kernel we will promote phi to fp32 because we want better precision for phi * norm_weight
-        # However, due to https://github.com/triton-lang/triton/issues/10176, promoting to fp32 inside the kernel
-        # will cause triton to take tf32 precision and ignore the specified ieee precision, causing tests to fail due to worse accuracy.
-        # So here we use tf32x3 which is at least better than tf32 to make the tests pass
-        if precision == "ieee" and norm_weight is not None:
-            precision = "tf32x3"
+        # If upcasting from bf16 to fp32 takes place inside the triton kernel, triton will ignore "ieee" precision and use tf32 anyway
+        # See https://github.com/triton-lang/triton/issues/10176 for detail.
+        # Therefore, we need to use tf32x3 instead which at least has better accuracy than tf32 just to make the tests pass. In production
+        # precision should be tf32 so it's not affected.
+        if precision == "ieee" and x.dtype == torch.bfloat16:
+            # When we have x is bf16, and either
+            # - phi is fp32, or
+            # - phi is bf16 but norm_weight is not None, where in this case inside the triton kernel,
+            #   we will promote phi to fp32 because we want better precision for phi * norm_weight
+            # In both cases we will need to upcast x to fp32 inside the kernel, and trigger the issue mentioned above
+            if norm_weight is not None or phi.dtype == torch.float32:
+                precision = "tf32x3"
 
         _mhc_projection_fwd_fused[grid](
             x_ptr=x,  # (M, K)
@@ -411,6 +417,7 @@ class mHCProjectionOp(torch.autograd.Function):
 
         ctx.save_for_backward(x, phi, ms, norm_weight)
         ctx.phi_dtype = phi.dtype
+        ctx.precision = precision
 
         return H, ms  # Keep both in fp32, which will be passed to sigmoid in mHCScaleFusedOp
 
@@ -499,11 +506,6 @@ class mHCProjectionOp(torch.autograd.Function):
             triton.cdiv(K, META["BLOCK_SIZE_K"]),
         )
 
-        precision = "tf32" if ctx.use_tf32 else "ieee"
-        # Have to use the same precision as fwd
-        if precision == "ieee" and norm_weight is not None:
-            precision = "tf32x3"
-
         _mhc_projection_bwd_fused[grid](
             x_ptr=x,
             grad_x_ptr=grad_x,  # (M, K)
@@ -527,7 +529,7 @@ class mHCProjectionOp(torch.autograd.Function):
             stride_grad_hn=1,
             stride_grad_ms=1,
             BLOCK_SIZE_N=32,
-            precision=precision,
+            precision=ctx.precision,
             FUSE_GRAD_X_ACC=fuse_grad_x_acc,
             HAS_NORM_WEIGHT=norm_weight is not None,
         )
