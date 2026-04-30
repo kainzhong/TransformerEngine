@@ -39,7 +39,7 @@ def mhc_projection_ref(x, phi, norm_weight):
 
     if norm_weight is not None:
         phi = phi * norm_weight[None, :]
-    phi_fp32 = phi.to(torch.float32) 
+    phi_fp32 = phi.to(torch.float32)
     Hs = x_fp32 @ phi_fp32.T  # (M, 2n + n^2)
 
     return Hs, ms
