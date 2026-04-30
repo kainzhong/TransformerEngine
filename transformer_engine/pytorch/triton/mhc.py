@@ -461,9 +461,9 @@ class mHCProjectionOp(torch.autograd.Function):
             M,
         )
 
-        fuse_grad_x_acc = hasattr(x.untyped_storage(), 'grad_from_mhc_post')
+        fuse_grad_x_acc = hasattr(x.untyped_storage(), 'grad_x_acc')
         if fuse_grad_x_acc:
-            grad_x = x.untyped_storage().grad_acc
+            grad_x = x.untyped_storage().grad_x_acc.view_as(x)
         else:
             grad_x = torch.empty((M, K), device=device, dtype=x.dtype)
 
@@ -539,6 +539,9 @@ class mHCProjectionOp(torch.autograd.Function):
             FUSE_GRAD_X_ACC=fuse_grad_x_acc,
             HAS_NORM_WEIGHT=norm_weight is not None,
         )
+
+        if fuse_grad_x_acc:
+            del x.untyped_storage().grad_x_acc
 
         return grad_x.to(x.dtype), grad_phi, grad_norm_weight, None
 
@@ -914,9 +917,9 @@ class mHCAggregateOp(torch.autograd.Function):
         assert n == 4, "Only n=4 is supported in this implementation"
         M = s * b
 
-        fuse_grad_x_acc = hasattr(x.untyped_storage(), 'grad_from_mhc_post')
+        fuse_grad_x_acc = hasattr(x.untyped_storage(), 'grad_x_acc')
         if fuse_grad_x_acc:
-            grad_x = x.untyped_storage().grad_acc
+            grad_x = x.untyped_storage().grad_x_acc.view_as(x)
         else:
             grad_x = torch.empty_like(x)
         grad_H_pre = torch.zeros(
@@ -1158,6 +1161,8 @@ class mHCExpandCombineOp(torch.autograd.Function):
             grad_bias = grad_bias.to(bias.dtype)
 
         if ctx.fuse_grad_x_acc:
-            x.untyped_storage().grad_acc = grad_x
+            # When fused x gradient accumulation is enabled, use fp32 for the accumulation buffer
+            x.untyped_storage().grad_x_acc = grad_x.to(torch.float32)
+            grad_x = None
 
         return grad_f, grad_bias, grad_H_post, grad_x, grad_H_res, None, None, None

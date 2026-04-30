@@ -14,6 +14,7 @@ from transformer_engine.pytorch.triton.mhc import (
     mhc_fused_aggregate,
     mhc_fused_expand_combine,
     mhc_fused_projection,
+    mhc_generate_mix_and_aggregate,
 )
 
 # Disable TF32 for matmul to ensure consistency between the fused and reference implementations
@@ -443,7 +444,8 @@ def test_mhc_rmsnorm(cfg: MHCConfig, dtypes, has_norm_weight):
     torch.testing.assert_close(combined_H_res, fused_H_res, **tols)
 
 @pytest.mark.parametrize("cfg", mhc_configs, ids=MHCConfig.desc)
-def test_mhc_fuse_grad_acc(cfg: MHCConfig):
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
+def test_mhc_fuse_grad_acc(cfg: MHCConfig, dtype):
     reset_rng_states()
 
     s, b, C, n = cfg.s, cfg.b, cfg.C, cfg.n
@@ -453,12 +455,11 @@ def test_mhc_fuse_grad_acc(cfg: MHCConfig):
     tols = get_tols(torch.bfloat16)
     use_tf32 = False
 
-    x = torch.randn(s, b, C, n, device="cuda", requires_grad=True, dtype=torch.bfloat16)
-    phi = torch.randn(N, nC, dtype=torch.float32, requires_grad=True, device="cuda")
+    x = torch.randn(s, b, C, n, device="cuda", requires_grad=True, dtype=dtype)
+    phi = torch.randn(N, nC, dtype=dtype, requires_grad=True, device="cuda")
 
-    alpha = torch.randn(3, device="cuda", requires_grad=True, dtype=torch.float32)
-    beta = torch.randn(1, 2 * n + n * n, device="cuda", requires_grad=True, dtype=torch.float32)
-
+    alpha = torch.randn(3, device="cuda", requires_grad=True, dtype=dtype)
+    beta = torch.randn(1, 2 * n + n * n, device="cuda", requires_grad=True, dtype=dtype)
     x_ref = x.detach().clone().requires_grad_(True)
     phi_ref = phi.detach().clone().requires_grad_(True)
 
@@ -467,7 +468,7 @@ def test_mhc_fuse_grad_acc(cfg: MHCConfig):
 
     def end_to_end(x, phi, alpha, beta, fused_grad_x_acc):
         aggregated, H_post, H_res = mhc_generate_mix_and_aggregate(
-            x, phi, alpha, beta, use_tf32
+            x, phi, alpha, beta, None, use_tf32
         )
         expanded_combined = mhc_fused_expand_combine(
             aggregated,
