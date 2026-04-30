@@ -117,11 +117,16 @@ def _mhc_projection_fwd_fused(
             other=0.0,
             cache_modifier=".ca",
         )  # (BLOCK_SIZE_N, BLOCK_SIZE_K)
+
+        ms_acc += tl.sum(x * x, axis=1)
+
+        # In RMSNorm, mean square should be the mean squrare of the original x, so we need to first accumulate the sum of squares of x
+        # before we let x absore norm weight and pass x with norm weight's affine transformation applied to w to do the dot product 
+        # to generate H. This is the correct way to fuse H = RMSNorm(x) @ phi.T.
         if HAS_NORM_WEIGHT:
             norm_weight_ptrs = norm_weight_ptr + k_offs * stride_norm_weight
-            norm_weight = tl.load(norm_weight_ptrs, mask=mask_k, other=1.0, cache_modifier=".ca")
-            phi = phi * norm_weight[None, :]
-        ms_acc += tl.sum(x * x, axis=1)
+            norm_weight = tl.load(norm_weight_ptrs, mask=mask_k, other=1.0, cache_modifier=".ca").to(x.dtype)
+            x = x * norm_weight[None, :]
         h_acc = tl.dot(
             x.to(phi.dtype), tl.trans(phi, (1, 0)), h_acc, input_precision=precision, out_dtype=tl.float32
         )
@@ -146,6 +151,7 @@ def _mhc_projection_bwd_fused(
     x_ptr,
     grad_x_ptr,  # (M, K)
     phi_ptr,  # (N, K)
+    norm_weight_ptr, # (K,)
     grad_h_ptr,  # (M, N)
     grad_ms_ptr,  # (M,)
     M,
@@ -157,6 +163,7 @@ def _mhc_projection_bwd_fused(
     stride_grad_xk: tl.constexpr,
     stride_phin,
     stride_phik: tl.constexpr,
+    stride_norm_weight: tl.constexpr,
     stride_grad_phin,
     stride_grad_phik: tl.constexpr,
     stride_grad_hm: tl.constexpr,
@@ -184,6 +191,7 @@ def _mhc_projection_bwd_fused(
     tl.assume(stride_grad_phin == K)
     tl.assume(stride_grad_phik == 1)
     tl.assume(stride_grad_ms == 1)
+    tl.assume(stride_norm_weight == 1)
 
     tl.assume(BLOCK_SIZE_M % 32 == 0)
     tl.assume(BLOCK_SIZE_K % 32 == 0)
@@ -214,6 +222,12 @@ def _mhc_projection_bwd_fused(
     phi = tl.load(
         phi_ptrs, mask=(offs_n_full[:, None] < N) & mask_k[None, :], other=0.0
     )  # (BLOCK_SIZE_N, BLOCK_SIZE_K)
+
+    if HAS_NORM_WEIGHT:
+        norm_weight_ptrs = norm_weight_ptr + offs_k * stride_norm_weight
+        norm_weight = tl.load(norm_weight_ptrs, mask=mask_k, other=1.0, cache_modifier=".ca")
+        phi = phi * norm_weight[None, :]
+
     grad_ms = tl.load(
         grad_ms_ptrs, mask=offs_ms < M, other=0.0, cache_modifier=".ca"
     )  # (BLOCK_SIZE_M,)

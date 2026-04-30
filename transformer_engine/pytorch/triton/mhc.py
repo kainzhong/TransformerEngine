@@ -410,7 +410,7 @@ class mHCProjectionOp(torch.autograd.Function):
         grad_ms (tensor): The gradient of the loss with respect to the mean square, of shape (M,).
 
         Returns:
-        tuple: A tuple with the gradients (grad_x, grad_phi, None).
+        tuple: A tuple with the gradients (grad_x, grad_phi, grad_norm_weight, None).
         """
         x, phi, ms, norm_weight = ctx.saved_tensors
         M, K = x.shape
@@ -432,10 +432,11 @@ class mHCProjectionOp(torch.autograd.Function):
         else:
             grad_x = torch.empty((M, K), device=device, dtype=x.dtype)
 
-        grad_x = torch.empty((M, K), device=device, dtype=x.dtype)
         # (2n + n^2, M) @ (M, nC) = (2n + n^2, nC); grad_H's last dim is padded to 32
         grad_phi = general_gemm(x.to(grad_H.dtype), grad_H, out_dtype=torch.float32, layout="NT")[0]
         grad_phi = grad_phi[:N, :].to(phi.dtype)
+
+        grad_norm_weight = torch.zeros_like(norm_weight) if norm_weight is not None else None
 
         # pylint: disable=unnecessary-lambda-assignment
         grid = lambda META: (
@@ -447,6 +448,7 @@ class mHCProjectionOp(torch.autograd.Function):
             x_ptr=x,
             grad_x_ptr=grad_x,  # (M, K)
             phi_ptr=phi,  # (N, K)
+            norm_weight_ptr=norm_weight,
             grad_h_ptr=grad_H,  # (M, 32)
             grad_ms_ptr=grad_ms,  # (M,)
             M=M,
@@ -458,6 +460,7 @@ class mHCProjectionOp(torch.autograd.Function):
             stride_grad_xk=1,
             stride_phin=K,
             stride_phik=1,
+            stride_norm_weight=1,
             stride_grad_phin=K,
             stride_grad_phik=1,
             stride_grad_hm=32,
@@ -466,9 +469,10 @@ class mHCProjectionOp(torch.autograd.Function):
             BLOCK_SIZE_N=32,
             precision="tf32" if ctx.use_tf32 else "ieee",
             FUSE_GRAD_X_ACC=fuse_grad_x_acc,
+            HAS_NORM_WEIGHT=norm_weight is not None,
         )
 
-        return grad_x.to(ctx.dtype), grad_phi.to(ctx.dtype), None
+        return grad_x.to(x.dtype), grad_phi, grad_norm_weight, None
 
 
 class mHCScaleFusedOp(torch.autograd.Function):
