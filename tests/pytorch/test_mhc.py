@@ -14,7 +14,6 @@ from transformer_engine.pytorch.triton.mhc import (
     mhc_fused_aggregate,
     mhc_fused_expand_combine,
     mhc_fused_projection,
-    mhc_generate_mix_and_aggregate,
 )
 
 # Disable TF32 for matmul to ensure consistency between the fused and reference implementations
@@ -38,11 +37,12 @@ def mhc_projection_ref(x, phi, norm_weight):
     x_fp32 = x.to(torch.float32)
     ms = (x_fp32 * x_fp32).mean(dim=1)
 
-    if norm_weight is not None:
-        phi = phi * norm_weight[None, :]
-
     x = x.to(torch.float32)
     phi = phi.to(torch.float32)
+
+    if norm_weight is not None:
+        norm_weight = norm_weight.to(torch.float32)
+        phi = phi * norm_weight[None, :]
 
     Hs = x @ phi.T  # (M, 2n + n^2)
 
