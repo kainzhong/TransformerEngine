@@ -37,7 +37,7 @@ def check_deterministic(operator: str):
         " NVTE_ALLOW_NONDETERMINISTIC_ALGO=1 to allow this non-deterministic behavior."
     )
 
-def mhc_generate_mix_and_aggregate(x: torch.Tensor, phi: torch.Tensor, norm_weight: torch.Tensor, alpha: torch.Tensor, beta: torch.Tensor, use_tf32: bool = True):
+def mhc_generate_mix_and_aggregate(x: torch.Tensor, phi: torch.Tensor, alpha: torch.Tensor, beta: torch.Tensor, norm_weight: torch.Tensor = None, use_tf32: bool = True):
     """
     Generate the mix matrix H_pre, H_post, H_res and apply H_pre to x to aggregate n streams
     This wraps projection, scale, sinkhorn, and aggregate operations into one function.
@@ -283,7 +283,7 @@ def mhc_fused_expand_combine(
     return out
 
 
-def mhc_fused_projection(x: torch.Tensor, phi: torch.Tensor, norm_weight: torch.Tensor, use_tf32: bool = True):
+def mhc_fused_projection(x: torch.Tensor, phi: torch.Tensor, norm_weight: torch.Tensor = None, use_tf32: bool = True):
     """
     Fused projection operation to compute H matrices and mean square for RMSNorm (see eq. 14-15, section 4.3.1 of the DeepSeek mHC paper):
 
@@ -330,7 +330,7 @@ class mHCProjectionOp(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(ctx, x, phi, norm_weight, use_tf32=True):
+    def forward(ctx, x, phi, norm_weight=None, use_tf32=True):
         """
         The forward pass of the fused projection operation. Computes H = x @ phi^T and the mean
         square ms = mean(x^2, dim=-1) for RMSNorm in a single fused kernel.
