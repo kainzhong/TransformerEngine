@@ -295,7 +295,6 @@ def _mhc_projection_bwd_fused_norm_weight(
     BLOCK_SIZE_K: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     precision: tl.constexpr,
-    SPLIT_M: tl.constexpr,
 ):
     pid_k = tl.program_id(axis=0)
     pid_m = tl.program_id(axis=1)
@@ -313,9 +312,10 @@ def _mhc_projection_bwd_fused_norm_weight(
     tl.assume(stride_grad_norm_weight == 1)
     tl.assume(stride_norm_weight == 1)
 
-    tl.assume(BLOCK_SIZE_M % 512 == 0)
-    tl.assume(BLOCK_SIZE_K % 32 == 0)
+    tl.assume(BLOCK_SIZE_M % 128 == 0)
+    tl.assume(BLOCK_SIZE_K % 128 == 0)
     tl.assume(BLOCK_SIZE_N == 32)
+    tl.assume(STEP_SIZE_M % 32 == 0)
 
     offs_k = pid_k * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
     mask_k = offs_k < K
@@ -324,12 +324,8 @@ def _mhc_projection_bwd_fused_norm_weight(
 
     grad_psi_acc = tl.zeros((BLOCK_SIZE_N, BLOCK_SIZE_K), dtype=tl.float32)
     
-    if SPLIT_M:
-        m_start = pid_m * BLOCK_SIZE_M
-        m_end = tl.minimum(m_start + BLOCK_SIZE_M, M)
-    else:
-        m_start = 0
-        m_end = M
+    m_start = pid_m * BLOCK_SIZE_M
+    m_end = tl.minimum(m_start + BLOCK_SIZE_M, M)
     for m_idx in range(0, tl.cdiv(m_end-m_start, STEP_SIZE_M)):
         offs_m = m_start + m_idx * STEP_SIZE_M + tl.arange(0, STEP_SIZE_M)
         mask_m = offs_m < M
@@ -353,7 +349,7 @@ def _mhc_projection_bwd_fused_norm_weight(
         phi_ptrs, mask=(offs_n_full[:, None] < N) & mask_k[None, :], other=0.0
     )  # (BLOCK_SIZE_N, BLOCK_SIZE_K)
     norm_weight_ptrs = norm_weight_ptr + offs_k * stride_norm_weight
-    norm_weight = tl.load(norm_weight_ptrs, mask=mask_k, other=0.0, cache_modifier=".ca") # (BLOCK_SIZE_K,)
+    norm_weight = tl.load(norm_weight_ptrs, mask=mask_k, other=0.0, cache_modifier=".cg") # (BLOCK_SIZE_K,)
     phi = phi.to(tl.float32)
     norm_weight = norm_weight.to(tl.float32)
 
@@ -364,12 +360,8 @@ def _mhc_projection_bwd_fused_norm_weight(
     grad_phi_ptrs = grad_phi_ptr + offs_n_full[:, None] * stride_grad_phin + offs_k[None, :] * stride_grad_phik
     grad_norm_weight_ptrs = grad_norm_weight_ptr + offs_k * stride_grad_norm_weight
 
-    if SPLIT_M: # If split-M, allocated grad buffers are always fp32
-        tl.atomic_add(grad_phi_ptrs, grad_phi, mask=(offs_n_full[:, None] < N) & mask_k[None, :], sem="relaxed")
-        tl.atomic_add(grad_norm_weight_ptrs, grad_norm_weight, mask=mask_k, sem="relaxed")
-    else: # If not split-M, allocated grad buffers have the same dtype as the input
-        tl.store(grad_phi_ptrs, grad_phi.to(phi.dtype), mask=(offs_n_full[:, None] < N) & mask_k[None, :])
-        tl.store(grad_norm_weight_ptrs, grad_norm_weight.to(norm_weight.dtype), mask=mask_k)
+    tl.atomic_add(grad_phi_ptrs, grad_phi, mask=(offs_n_full[:, None] < N) & mask_k[None, :], sem="relaxed")
+    tl.atomic_add(grad_norm_weight_ptrs, grad_norm_weight, mask=mask_k, sem="relaxed")
 
 
 def scale_config():

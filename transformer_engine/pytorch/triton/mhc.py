@@ -467,8 +467,6 @@ class mHCProjectionOp(torch.autograd.Function):
         else:
             grad_x = torch.empty((M, K), device=device, dtype=x.dtype)
 
-        split_m = M >= 4096
-
         if norm_weight is not None:
             # With norm_weight, we need a fused kernel to perform GEMM and output both phi & norm_weight gradients
             grid = lambda META: (
@@ -499,7 +497,6 @@ class mHCProjectionOp(torch.autograd.Function):
                 stride_grad_norm_weight=1,
                 BLOCK_SIZE_N=32,
                 precision="tf32" if ctx.use_tf32 else "ieee",
-                SPLIT_M=split_m,
             )
             grad_phi = grad_phi.to(phi.dtype)
             grad_norm_weight = grad_norm_weight.to(norm_weight.dtype)
