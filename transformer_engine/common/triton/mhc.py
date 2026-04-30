@@ -118,7 +118,7 @@ def _mhc_projection_fwd_fused(
             cache_modifier=".ca",
         )  # (BLOCK_SIZE_N, BLOCK_SIZE_K)
 
-        ms_acc += tl.sum(x * x, axis=1)
+        ms_acc += tl.sum(x.to(tl.float32) * x.to(tl.float32), axis=1)
 
         # In RMSNorm, mean square should be the mean squrare of the original x, so we need to first accumulate the sum of squares of x
         # before we let x absore norm weight and pass x with norm weight's affine transformation applied to w to do the dot product 
@@ -126,7 +126,7 @@ def _mhc_projection_fwd_fused(
         if HAS_NORM_WEIGHT:
             norm_weight_ptrs = norm_weight_ptr + k_offs * stride_norm_weight
             norm_weight = tl.load(norm_weight_ptrs, mask=mask_k, other=1.0, cache_modifier=".ca") # (BLOCK_SIZE_K,)
-            phi = phi * norm_weight[None, :]
+            phi = phi.to(tl.float32) * norm_weight.to(tl.float32)
         h_acc = tl.dot(
             x.to(phi.dtype), tl.trans(phi, (1, 0)), h_acc, input_precision=precision, out_dtype=tl.float32
         )
@@ -226,7 +226,7 @@ def _mhc_projection_bwd_fused(
     if HAS_NORM_WEIGHT:
         norm_weight_ptrs = norm_weight_ptr + offs_k * stride_norm_weight
         norm_weight = tl.load(norm_weight_ptrs, mask=mask_k, other=0.0, cache_modifier=".ca").to(phi.dtype) # (BLOCK_SIZE_K,)
-        phi = phi * norm_weight[None, :]
+        phi = phi.to(tl.float32) * norm_weight.to(tl.float32)[None, :]
 
     grad_ms = tl.load(
         grad_ms_ptrs, mask=offs_ms < M, other=0.0, cache_modifier=".ca"
@@ -245,6 +245,100 @@ def _mhc_projection_bwd_fused(
         grad_x = grad_x.to(tl.float32) + grad_x_acc.to(tl.float32)
         grad_x = grad_x.to(x.dtype)
     tl.store(grad_x_ptrs, grad_x, mask=mask_m[:, None] & mask_k[None, :])
+
+@triton.autotune(
+    configs=projection_config_bwd(),
+    key=["M", "K"],
+)
+@triton.jit
+def _mhc_projection_bwd_fused_norm_weight(
+    x_ptr, # (M, K)
+    grad_H_ptr, # (M, 32)
+    phi_ptr, # (N, K), N=24 in our case since n = 4
+    norm_weight_ptr, # (K,)
+    grad_phi_ptr, # (N, K), N=24 in our case since n = 4
+    grad_norm_weight_ptr, # (K,)
+    M,
+    N,
+    K,
+    stride_xm,
+    stride_xk: tl.constexpr,
+    stride_grad_Hm: tl.constexpr,
+    stride_grad_Hn: tl.constexpr,
+    stride_phin,
+    stride_phik: tl.constexpr,
+    stride_norm_weight: tl.constexpr,
+    stride_grad_phin,
+    stride_grad_phik: tl.constexpr,
+    stride_grad_norm_weight: tl.constexpr,
+    # Meta-parameters
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_K: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    precision: tl.constexpr,
+):
+    pid_k = tl.program_id(axis=0)
+
+    tl.assume(pid_k >= 0)
+    tl.assume(stride_xm > 0)
+    tl.assume(stride_xk == 1)
+    tl.assume(stride_grad_Hm == 32)
+    tl.assume(stride_grad_Hn == 1)
+    tl.assume(stride_phin == K)
+    tl.assume(stride_phik == 1)
+    tl.assume(stride_grad_phin == K)
+    tl.assume(stride_grad_phin == stride_phin)
+    tl.assume(stride_grad_phik == 1)
+    tl.assume(stride_grad_norm_weight == 1)
+    tl.assume(stride_norm_weight == 1)
+
+    tl.assume(BLOCK_SIZE_M % 32 == 0)
+    tl.assume(BLOCK_SIZE_K % 32 == 0)
+    tl.assume(BLOCK_SIZE_N == 32)
+
+    offs_k = pid_k * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
+    mask_k = offs_k < K
+    offs_n_full = tl.arange(0, BLOCK_SIZE_N)
+    mask_n = offs_n_full < N
+
+    grad_psi_acc = tl.zeros((BLOCK_SIZE_N, BLOCK_SIZE_K), dtype=tl.float32)
+    # Each block process the whole M dimension by handling BLOCK_SIZE_M at each step
+    for m_idx in range(0, tl.cdiv(M, BLOCK_SIZE_M)):
+        offs_m = m_idx * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+        mask_m = offs_m < M
+        x_ptrs = x_ptr + offs_m[:, None] * stride_xm + offs_k[None, :] * stride_xk
+        x = tl.load(
+            x_ptrs, mask=mask_m[:, None] & mask_k[None, :], other=0.0
+        )  # (STEP_SIZE_M, BLOCK_SIZE_K)
+        grad_H_ptrs = (
+            grad_H_ptr + offs_m[:, None] * stride_grad_Hm + offs_n_full[None, :] * stride_grad_Hn
+        )
+        grad_H = tl.load(
+            grad_H_ptrs, mask=mask_m[:, None] & mask_n[None, :], other=0.0
+        )  # (STEP_SIZE_M, BLOCK_SIZE_N)
+
+        grad_psi_acc = tl.dot(
+            tl.trans(grad_H, (1, 0)), x.to(grad_H.dtype), acc=grad_psi_acc, out_dtype=tl.float32, input_precision=precision
+        )
+
+    
+    phi_ptrs = phi_ptr + offs_n_full[:, None] * stride_phin + offs_k[None, :] * stride_phik
+    phi = tl.load(
+        phi_ptrs, mask=(offs_n_full[:, None] < N) & mask_k[None, :], other=0.0
+    )  # (BLOCK_SIZE_N, BLOCK_SIZE_K)
+    norm_weight_ptrs = norm_weight_ptr + offs_k * stride_norm_weight
+    norm_weight = tl.load(norm_weight_ptrs, mask=mask_k, other=0.0, cache_modifier=".ca").to(phi.dtype) # (BLOCK_SIZE_K,)
+
+    # Keep grad_psi in SRAM and get grad_phi & grad_norm_weight
+    grad_phi = grad_psi_acc * norm_weight[None, :].to(grad_psi_acc.dtype) # (32, BLOCK_SIZE_K)
+    grad_norm_weight = tl.sum(grad_psi_acc * phi.to(grad_psi_acc.dtype), axis=0) # (BLOCK_SIZE_K,)
+    grad_phi = grad_phi.to(phi.dtype)
+    grad_norm_weight = grad_norm_weight.to(norm_weight.dtype)
+
+    grad_phi_ptrs = grad_phi_ptr + offs_n_full[:, None] * stride_grad_phin + offs_k[None, :] * stride_grad_phik
+    tl.store(grad_phi_ptrs, grad_phi, mask=(offs_n_full[:, None] < N) & mask_k[None, :])
+    grad_norm_weight_ptrs = grad_norm_weight_ptr + offs_k * stride_grad_norm_weight
+    tl.store(grad_norm_weight_ptrs, grad_norm_weight, mask=mask_k)
 
 
 def scale_config():

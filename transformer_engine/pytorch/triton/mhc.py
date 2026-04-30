@@ -19,6 +19,7 @@ from transformer_engine.common.triton.mhc import (
     _mhc_aggregate_bwd,
     _mhc_projection_fwd_fused,
     _mhc_projection_bwd_fused,
+    _mhc_projection_bwd_fused_norm_weight,
     _mhc_sinkhorn_fwd_fused,
     _mhc_sinkhorn_fwd_fused_recompute,
     _mhc_sinkhorn_bwd_fused,
@@ -378,6 +379,14 @@ class mHCProjectionOp(torch.autograd.Function):
             triton.cdiv(K, META["BLOCK_SIZE_K"]),
         )
 
+        precision = "tf32" if ctx.use_tf32 else "ieee"
+        # With norm_weight, inside the triton kernel we will promote phi to fp32 because we want better precision for phi * norm_weight
+        # However, due to https://github.com/triton-lang/triton/issues/10176, promoting to fp32 inside the kernel
+        # will cause triton to take tf32 precision and ignore the specified ieee precision, causing tests to fail due to worse accuracy.
+        # So here we use tf32x3 which is at least better than tf32 to make the tests pass
+        if precision == "ieee" and norm_weight is not None:
+            precision = "tf32x3"
+
         _mhc_projection_fwd_fused[grid](
             x_ptr=x,  # (M, K)
             phi_ptr=phi,  # (N, K)
@@ -396,7 +405,7 @@ class mHCProjectionOp(torch.autograd.Function):
             stride_ms=1,
             stride_norm_weight=1,
             BLOCK_SIZE_N=32,
-            precision="tf32" if use_tf32 else "ieee",
+            precision=precision,
             HAS_NORM_WEIGHT=norm_weight is not None,
         )
 
@@ -410,8 +419,14 @@ class mHCProjectionOp(torch.autograd.Function):
         """
         The backward pass of the fused projection operation. Computes gradients for x and phi.
 
-        grad_phi = grad_H^T @ x, truncated to the first N rows.
-        grad_x = grad_H @ phi + 2 * x * grad_ms / K, where the second term is the gradient contribution from
+        - grad_psi = grad_H^T @ x: (2n + n^2, M) @ (M, nC) = (2n + n^2, nC), where grad_H's last dim is padded to 32
+        If norm_weight is None: 
+        - grad_phi = grad_psi
+        Otherwise, 
+        - grad_phi = grad_psi * norm_weight: (2n + n^2, nC) * (nC,) = (2n + n^2, nC)
+        - grad_norm_weight = sum(grad_psi * phi, dim=0): ((2n + n^2, nC) * (2n + n^2, nC)).sum(dim=0) -> (nC,)
+        
+        - grad_x = grad_H @ phi + 2 * x * grad_ms / K, where the second term is the gradient contribution from
         the mean square computation fused in the forward pass.
 
         Parameters:
@@ -445,9 +460,34 @@ class mHCProjectionOp(torch.autograd.Function):
         if norm_weight is not None:
             # (2n + n^2, M) @ (M, nC) = (2n + n^2, nC); grad_H's last dim is padded to 32
             grad_psi = general_gemm(x.to(grad_H.dtype), grad_H, out_dtype=torch.float32, layout="NT")[0][:N, :]
-            grad_psi = grad_psi.to(phi.dtype)
-            grad_phi = grad_psi * norm_weight[None, :]
-            grad_norm_weight = (grad_psi * phi).sum(dim=0).to(norm_weight.dtype)
+            # (2n + n^2, nC) * (1, nC) -> (2n + n^2, nC)
+            grad_phi = grad_psi * norm_weight[None, :].to(grad_psi.dtype).to(phi.dtype)
+            # ((2n + n^2, nC) * (2n + n^2, nC)).sum(dim=0) -> (nC,)
+            grad_norm_weight = (grad_psi * phi.to(grad_psi.dtype)).sum(dim=0).to(norm_weight.dtype)
+            # grid = lambda META: (triton.cdiv(K, META["BLOCK_SIZE_K"]),)
+            # grad_phi = torch.empty((N, K), device=device, dtype=phi.dtype)
+            # grad_norm_weight = torch.empty((K,), device=device, dtype=norm_weight.dtype)
+            # _mhc_projection_bwd_fused_norm_weight[grid](
+            #     x_ptr=x, # (M, K)
+            #     grad_H_ptr=grad_H,  # (M, 32)
+            #     phi_ptr=phi,  # (N, K)
+            #     grad_phi_ptr=grad_phi,  # (N, K)
+            #     grad_norm_weight_ptr=grad_norm_weight,  # (K,)
+            #     M=M,
+            #     N=N,
+            #     K=K,
+            #     stride_xm=K,
+            #     stride_xk=1,
+            #     stride_grad_Hm=32,
+            #     stride_grad_Hn=1,
+            #     stride_phin=K,
+            #     stride_phik=1,
+            #     stride_grad_phin=K,
+            #     stride_grad_phik=1,
+            #     stride_grad_norm_weight=1,
+            #     BLOCK_SIZE_N=32,
+            #     precision="tf32" if ctx.use_tf32 else "ieee",
+            # )
         else:
             grad_phi = general_gemm(x.to(grad_H.dtype), grad_H, out_dtype=torch.float32, layout="NT")[0][:N, :]
             grad_phi = grad_phi.to(phi.dtype)
@@ -458,6 +498,11 @@ class mHCProjectionOp(torch.autograd.Function):
             triton.cdiv(M, META["BLOCK_SIZE_M"]),
             triton.cdiv(K, META["BLOCK_SIZE_K"]),
         )
+
+        precision = "tf32" if ctx.use_tf32 else "ieee"
+        # Have to use the same precision as fwd
+        if precision == "ieee" and norm_weight is not None:
+            precision = "tf32x3"
 
         _mhc_projection_bwd_fused[grid](
             x_ptr=x,
@@ -482,7 +527,7 @@ class mHCProjectionOp(torch.autograd.Function):
             stride_grad_hn=1,
             stride_grad_ms=1,
             BLOCK_SIZE_N=32,
-            precision="tf32" if ctx.use_tf32 else "ieee",
+            precision=precision,
             FUSE_GRAD_X_ACC=fuse_grad_x_acc,
             HAS_NORM_WEIGHT=norm_weight is not None,
         )

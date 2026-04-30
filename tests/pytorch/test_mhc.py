@@ -37,9 +37,9 @@ def mhc_projection_ref(x, phi, norm_weight):
     x_fp32 = x.to(torch.float32)
     ms = (x_fp32 * x_fp32).mean(dim=1)
 
-    if norm_weight is not None:
-        phi = phi * norm_weight[None, :]
     phi_fp32 = phi.to(torch.float32)
+    if norm_weight is not None:
+        phi_fp32 = phi_fp32 * norm_weight.to(torch.float32)[None, :]
     Hs = x_fp32 @ phi_fp32.T  # (M, 2n + n^2)
 
     return Hs, ms
@@ -346,7 +346,7 @@ def test_mhc_scale(cfg: MHCConfig, dtype):
 
 
 @pytest.mark.parametrize("cfg", mhc_configs, ids=MHCConfig.desc)
-@pytest.mark.parametrize("dtype", [torch.float32], ids=["fp32"])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
 @pytest.mark.parametrize("has_norm_weight", [False, True], ids=["false", "true"])
 def test_mhc_rmsnorm(cfg: MHCConfig, dtype, has_norm_weight):
     # Verify if the fused kernel is equivalent to applying RMSNorm in the normal order
@@ -390,11 +390,17 @@ def test_mhc_rmsnorm(cfg: MHCConfig, dtype, has_norm_weight):
 
     def mhc_combined(x_ref, phi_ref, alpha_ref, beta_ref, norm_weight_ref):
         # Check if after spliting RMSNorm to two steps in projection and scaling,
-        # theresult is close to applying RMSNorm in the correct order
-        x_fp32 = x_ref.to(torch.float32)
-        w_fp32 = None if norm_weight_ref is None else norm_weight_ref.to(torch.float32)
-        x_rmsnorm = F.rms_norm(x_fp32, normalized_shape=(nC,), weight=w_fp32)
-        H = x_rmsnorm @ phi_ref.to(torch.float32).T
+        # the result is close to applying RMSNorm in the correct order.
+        # Run RMSNorm in fp32 so the bf16 case has the same precision pattern as the
+        # kernel/ref (F.rms_norm on bf16 input would round x_rmsnorm back to bf16).
+        eps = torch.finfo(torch.float32).eps
+        norm_weight_fp32 = (
+            norm_weight_ref.to(torch.float32) if norm_weight_ref is not None else None
+        )
+        x_rmsnorm = F.rms_norm(
+            x_ref.to(torch.float32), normalized_shape=(nC,), weight=norm_weight_fp32, eps=eps
+        )
+        H = x_rmsnorm @ phi_ref.T.to(torch.float32)
         H_pre = H[:, :n]
         H_post = H[:, n : 2 * n]
         H_res = H[:, 2 * n :]
