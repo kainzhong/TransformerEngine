@@ -40,15 +40,16 @@ def mhc_projection_ref(x, phi, norm_weight):
     """
     x_dtype = x.dtype
 
+    x_fp32 = x.to(torch.float32)
+    ms = (x_fp32 * x_fp32).mean(dim=1)
+
     if norm_weight is not None:
-        x = x * norm_weight[None, :]
+        phi = phi * norm_weight[None, :]
 
     x = x.to(torch.float32)
     phi = phi.to(torch.float32)
 
     Hs = x @ phi.T  # (M, 2n + n^2)
-
-    ms = (x * x).mean(dim=1)
 
     return Hs, ms
 
@@ -319,14 +320,14 @@ def test_mhc_projection(cfg: MHCConfig, dtypes, has_norm_weight):
 
     torch.testing.assert_close(fused_out_Hs, ref_out_Hs, **tols)
     torch.testing.assert_close(fused_out_ms, ref_out_ms, **tols)
-    # (ref_out_Hs.sum() + ref_out_ms.sum()).backward()
-    # (fused_out_Hs.sum() + fused_out_ms.sum()).backward()
+    (ref_out_Hs.sum() + ref_out_ms.sum()).backward()
+    (fused_out_Hs.sum() + fused_out_ms.sum()).backward()
 
-    # torch.testing.assert_close(x.grad, x_ref.grad, **tols)
-    # torch.testing.assert_close(phi.grad, phi_ref.grad, **tols)
+    torch.testing.assert_close(x.grad, x_ref.grad, **tols)
+    torch.testing.assert_close(phi.grad, phi_ref.grad, **tols)
 
-    # if has_norm_weight:
-    #     torch.testing.assert_close(norm_weight.grad, norm_weight_ref.grad, **tols)
+    if has_norm_weight:
+        torch.testing.assert_close(norm_weight.grad, norm_weight_ref.grad, **tols)
 
 @pytest.mark.parametrize("cfg", mhc_configs, ids=MHCConfig.desc)
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
@@ -367,7 +368,9 @@ def test_mhc_scale(cfg: MHCConfig, dtype):
 
 @pytest.mark.parametrize("cfg", mhc_configs, ids=MHCConfig.desc)
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
-def test_mhc_combined(cfg: MHCConfig, dtype):
+@pytest.mark.parametrize("has_norm_weight", [False, True], ids=["false", "true"])
+def test_mhc_rmsnorm(cfg: MHCConfig, dtype, has_norm_weight):
+    # Verify if the fused kernel is equivalent to applying RMSNorm in the normal order
     reset_rng_states()
 
     s, b, C, n = cfg.s, cfg.b, cfg.C, cfg.n
@@ -389,8 +392,15 @@ def test_mhc_combined(cfg: MHCConfig, dtype):
     alpha_ref = alpha.detach().clone().requires_grad_(True)
     beta_ref = beta.detach().clone().requires_grad_(True)
 
-    ref_out_H, ref_out_r = mhc_projection_ref(x_ref, phi_ref)
-    fused_out_H_padded, fused_out_r = mhc_fused_projection(x, phi, use_tf32)
+    if has_norm_weight:
+        norm_weight = torch.randn(nC, device="cuda", requires_grad=True, dtype=x_dtype)
+        norm_weight_ref = norm_weight.detach().clone().requires_grad_(True)
+    else:
+        norm_weight = None
+        norm_weight_ref = None
+
+    ref_out_H, ref_out_r = mhc_projection_ref(x_ref, phi_ref, norm_weight_ref)
+    fused_out_H_padded, fused_out_r = mhc_fused_projection(x, phi, norm_weight, use_tf32)
 
     ref_H_pre, ref_H_post, ref_H_res = mhc_scale_ref(
         ref_out_H[:, :N], alpha_ref, beta_ref, ref_out_r, n
@@ -405,10 +415,11 @@ def test_mhc_combined(cfg: MHCConfig, dtype):
         phi_ref = phi_ref.to(torch.float32)
         alpha_ref = alpha_ref.to(torch.float32)
         beta_ref = beta_ref.to(torch.float32)
+        norm_weight_ref = norm_weight_ref.to(torch.float32) if norm_weight_ref is not None else None
 
         # Check if after spliting RMSNorm to two steps in projection and scaling,
         # theresult is close to applying RMSNorm in the correct order
-        x_rmsnorm = F.rms_norm(x_ref, normalized_shape=(nC,))
+        x_rmsnorm = F.rms_norm(x_ref, normalized_shape=(nC,), weight=norm_weight_ref)
         H = x_rmsnorm @ phi_ref.T
         H_pre = H[:, :n]
         H_post = H[:, n : 2 * n]

@@ -125,8 +125,8 @@ def _mhc_projection_fwd_fused(
         # to generate H. This is the correct way to fuse H = RMSNorm(x) @ phi.T.
         if HAS_NORM_WEIGHT:
             norm_weight_ptrs = norm_weight_ptr + k_offs * stride_norm_weight
-            norm_weight = tl.load(norm_weight_ptrs, mask=mask_k, other=1.0, cache_modifier=".ca").to(x.dtype)
-            x = x * norm_weight[None, :]
+            norm_weight = tl.load(norm_weight_ptrs, mask=mask_k, other=1.0, cache_modifier=".ca").to(phi.dtype)
+            phi = phi * norm_weight[None, :]
         h_acc = tl.dot(
             x.to(phi.dtype), tl.trans(phi, (1, 0)), h_acc, input_precision=precision, out_dtype=tl.float32
         )
@@ -225,7 +225,7 @@ def _mhc_projection_bwd_fused(
 
     if HAS_NORM_WEIGHT:
         norm_weight_ptrs = norm_weight_ptr + offs_k * stride_norm_weight
-        norm_weight = tl.load(norm_weight_ptrs, mask=mask_k, other=1.0, cache_modifier=".ca")
+        norm_weight = tl.load(norm_weight_ptrs, mask=mask_k, other=0.0, cache_modifier=".ca").to(phi.dtype) # (BLOCK_SIZE_K,)
         phi = phi * norm_weight[None, :]
 
     grad_ms = tl.load(
