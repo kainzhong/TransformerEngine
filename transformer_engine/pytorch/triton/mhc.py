@@ -290,6 +290,15 @@ def mhc_fused_projection(x: torch.Tensor, phi: torch.Tensor, norm_weight: torch.
     H = x @ phi^T: (M, K) @ (K, N) -> (M, N), which is padded to (M, 32) for better memory access pattern in the next kernels.
     ms = mean(x^2, dim=-1): (M,)
 
+    If norm_weight is provided, it will be absorbed into phi. In this case, the operation becomes:
+    Projection:
+    - H = x @ (phi.T * norm_weight) = x @ phi.T * norm_weight
+    - ms = mean(x^2, dim=-1)
+    - H = H / sqrt(ms) = x @ (phi.T * norm_weight) / sqrt(ms), where this step is fused into `mhc_fused_scale`
+    which is equivalent to performing the computation in the normal order:
+    - x_normalized = RMSNorm(x) = x * norm_weight / sqrt(ms)
+    - H = x_normalized @ phi.T = (x / sqrt(ms) @ phi.T) * norm_weight
+
     Note: the current implementation only supports n=4
 
     Parameters
@@ -333,6 +342,7 @@ class mHCProjectionOp(torch.autograd.Function):
     def forward(ctx, x, phi, norm_weight=None, use_tf32=True):
         """
         The forward pass of the fused projection operation. Computes H = x @ phi^T and the mean
+        If norm_weight is provided, it will be absorbd by phi
         square ms = mean(x^2, dim=-1) for RMSNorm in a single fused kernel.
 
         Parameters:
