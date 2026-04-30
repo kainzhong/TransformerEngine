@@ -465,37 +465,35 @@ class mHCProjectionOp(torch.autograd.Function):
             grad_x = torch.empty((M, K), device=device, dtype=x.dtype)
 
         if norm_weight is not None:
-            # (2n + n^2, M) @ (M, nC) = (2n + n^2, nC); grad_H's last dim is padded to 32
-            grad_psi = general_gemm(x.to(grad_H.dtype), grad_H, out_dtype=torch.float32, layout="NT")[0][:N, :]
-            # (2n + n^2, nC) * (1, nC) -> (2n + n^2, nC)
-            grad_phi = grad_psi * norm_weight[None, :].to(grad_psi.dtype).to(phi.dtype)
-            # ((2n + n^2, nC) * (2n + n^2, nC)).sum(dim=0) -> (nC,)
-            grad_norm_weight = (grad_psi * phi.to(grad_psi.dtype)).sum(dim=0).to(norm_weight.dtype)
-            # grid = lambda META: (triton.cdiv(K, META["BLOCK_SIZE_K"]),)
-            # grad_phi = torch.empty((N, K), device=device, dtype=phi.dtype)
-            # grad_norm_weight = torch.empty((K,), device=device, dtype=norm_weight.dtype)
-            # _mhc_projection_bwd_fused_norm_weight[grid](
-            #     x_ptr=x, # (M, K)
-            #     grad_H_ptr=grad_H,  # (M, 32)
-            #     phi_ptr=phi,  # (N, K)
-            #     grad_phi_ptr=grad_phi,  # (N, K)
-            #     grad_norm_weight_ptr=grad_norm_weight,  # (K,)
-            #     M=M,
-            #     N=N,
-            #     K=K,
-            #     stride_xm=K,
-            #     stride_xk=1,
-            #     stride_grad_Hm=32,
-            #     stride_grad_Hn=1,
-            #     stride_phin=K,
-            #     stride_phik=1,
-            #     stride_grad_phin=K,
-            #     stride_grad_phik=1,
-            #     stride_grad_norm_weight=1,
-            #     BLOCK_SIZE_N=32,
-            #     precision="tf32" if ctx.use_tf32 else "ieee",
-            # )
+            # With norm_weight, we need a fused kernel to perform GEMM and output both phi & norm_weight gradients
+            grid = lambda META: (triton.cdiv(K, META["BLOCK_SIZE_K"]),)
+            grad_phi = torch.empty_like(phi)
+            grad_norm_weight = torch.empty_like(norm_weight)
+            _mhc_projection_bwd_fused_norm_weight[grid](
+                x_ptr=x, # (M, K)
+                grad_H_ptr=grad_H,  # (M, 32)
+                phi_ptr=phi,  # (N, K)
+                norm_weight_ptr=norm_weight,  # (K,)
+                grad_phi_ptr=grad_phi,  # (N, K)
+                grad_norm_weight_ptr=grad_norm_weight,  # (K,)
+                M=M,
+                N=N,
+                K=K,
+                stride_xm=K,
+                stride_xk=1,
+                stride_grad_Hm=32,
+                stride_grad_Hn=1,
+                stride_phin=K,
+                stride_phik=1,
+                stride_norm_weight=1,
+                stride_grad_phin=K,
+                stride_grad_phik=1,
+                stride_grad_norm_weight=1,
+                BLOCK_SIZE_N=32,
+                precision="tf32" if ctx.use_tf32 else "ieee",
+            )
         else:
+            # Without norm_weight, this is only a GEMM with no fusion needed so we let cuBLAS handle it
             grad_phi = general_gemm(x.to(grad_H.dtype), grad_H, out_dtype=torch.float32, layout="NT")[0][:N, :]
             grad_phi = grad_phi.to(phi.dtype)
             grad_norm_weight = None
