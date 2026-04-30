@@ -432,9 +432,6 @@ class mHCProjectionOp(torch.autograd.Function):
         Otherwise, 
         - grad_phi = grad_psi * norm_weight: (2n + n^2, nC) * (nC,) = (2n + n^2, nC)
         - grad_norm_weight = sum(grad_psi * phi, dim=0): ((2n + n^2, nC) * (2n + n^2, nC)).sum(dim=0) -> (nC,)
-        Reorder a bit:
-        - grad_phi = grad_H^T @ x * norm_weight
-        - grad_norm_weight = sum((grad_H^T @ x) * phi, dim=0)
         
         - grad_x = grad_H @ phi + 2 * x * grad_ms / K, where the second term is the gradient contribution from
         the mean square computation fused in the forward pass.
@@ -467,16 +464,17 @@ class mHCProjectionOp(torch.autograd.Function):
         else:
             grad_x = torch.empty((M, K), device=device, dtype=x.dtype)
 
-        split_m = M >= 4096
-
         if norm_weight is not None:
-            # With norm_weight, we need a fused kernel to perform GEMM and output both phi & norm_weight gradients
-            grid = lambda META: (
-                triton.cdiv(K, META["BLOCK_SIZE_K"]),
-                triton.cdiv(M, META["BLOCK_SIZE_M"]),
-            )
-            grad_phi = torch.zeros_like(phi, dtype=torch.float32)
-            grad_norm_weight = torch.zeros_like(norm_weight, dtype=torch.float32)
+            # # (2n + n^2, M) @ (M, nC) = (2n + n^2, nC); grad_H's last dim is padded to 32
+            # grad_psi = general_gemm(x.to(grad_H.dtype), grad_H, out_dtype=torch.float32, layout="NT")[0][:N, :]
+            # # (2n + n^2, nC) * (1, nC) -> (2n + n^2, nC)
+            # grad_phi = grad_psi * norm_weight[None, :].to(grad_psi.dtype).to(phi.dtype)
+            # # ((2n + n^2, nC) * (2n + n^2, nC)).sum(dim=0) -> (nC,)
+            # grad_norm_weight = (grad_psi * phi.to(grad_psi.dtype)).sum(dim=0).to(norm_weight.dtype)
+
+            grid = lambda META: (triton.cdiv(K, META["BLOCK_SIZE_K"]),)
+            grad_phi = torch.empty_like(phi)
+            grad_norm_weight = torch.empty_like(norm_weight)
             _mhc_projection_bwd_fused_norm_weight[grid](
                 x_ptr=x, # (M, K)
                 grad_H_ptr=grad_H,  # (M, 32)
@@ -499,12 +497,8 @@ class mHCProjectionOp(torch.autograd.Function):
                 stride_grad_norm_weight=1,
                 BLOCK_SIZE_N=32,
                 precision="tf32" if ctx.use_tf32 else "ieee",
-                SPLIT_M=split_m,
             )
-            grad_phi = grad_phi.to(phi.dtype)
-            grad_norm_weight = grad_norm_weight.to(norm_weight.dtype)
         else:
-            # Without norm_weight, this is only a GEMM with no fusion needed so we let cuBLAS handle it
             grad_phi = general_gemm(x.to(grad_H.dtype), grad_H, out_dtype=torch.float32, layout="NT")[0][:N, :]
             grad_phi = grad_phi.to(phi.dtype)
             grad_norm_weight = None
