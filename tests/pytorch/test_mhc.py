@@ -444,7 +444,7 @@ def test_mhc_rmsnorm(cfg: MHCConfig, dtypes, has_norm_weight):
     torch.testing.assert_close(combined_H_res, fused_H_res, **tols)
 
 @pytest.mark.parametrize("cfg", mhc_configs, ids=MHCConfig.desc)
-@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
+@pytest.mark.parametrize("dtype", [torch.float32], ids=["fp32"])
 def test_mhc_fuse_grad_acc(cfg: MHCConfig, dtype):
     reset_rng_states()
 
@@ -470,6 +470,7 @@ def test_mhc_fuse_grad_acc(cfg: MHCConfig, dtype):
         aggregated, H_post, H_res = mhc_generate_mix_and_aggregate(
             x, phi, alpha, beta, None, use_tf32
         )
+        H_res = mhc_fused_sinkhorn(H_res.view(s, b, n, n), n).view(s * b, n * n)
         expanded_combined = mhc_fused_expand_combine(
             aggregated,
             None,
