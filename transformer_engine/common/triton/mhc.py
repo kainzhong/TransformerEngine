@@ -470,8 +470,8 @@ def _mhc_scale_fwd_fused(
 def _mhc_scale_bwd_fused(
     grad_out_ptr,
     out_ptr,  # (M, 2n + n^2), which is padded to (M, 32) in the last dimension
-    grad_h_ptr,
-    h_ptr,  # (M, 2n + n^2), which is padded to (M, 32) in the last dimension
+    grad_H_ptr,
+    H_ptr,  # (M, 2n + n^2), which is padded to (M, 32) in the last dimension
     grad_a_ptr,
     a_ptr,  # (3,)
     grad_b_ptr,  # (2n + n^2,)
@@ -483,10 +483,10 @@ def _mhc_scale_bwd_fused(
     stride_grad_out_n,
     stride_out_m,
     stride_out_n,
-    stride_grad_hm,
-    stride_grad_hn,
-    stride_hm,
-    stride_hn,
+    stride_grad_Hm,
+    stride_grad_Hn,
+    stride_Hm,
+    stride_Hn,
     stride_grad_a,
     stride_a,
     stride_grad_b,
@@ -504,10 +504,10 @@ def _mhc_scale_bwd_fused(
     tl.assume(stride_grad_out_n == 1)
     tl.assume(stride_out_m == 32)
     tl.assume(stride_out_n == 1)
-    tl.assume(stride_grad_hm == 32)
-    tl.assume(stride_grad_hn == 1)
-    tl.assume(stride_hm == 32)
-    tl.assume(stride_hn == 1)
+    tl.assume(stride_grad_Hm == 32)
+    tl.assume(stride_grad_Hn == 1)
+    tl.assume(stride_Hm == 32)
+    tl.assume(stride_Hn == 1)
     tl.assume(stride_grad_a == 1)
     tl.assume(stride_a == 1)
     tl.assume(stride_grad_b == 1)
@@ -547,21 +547,21 @@ def _mhc_scale_bwd_fused(
         mask=mask_m[:, None] & mask_n[None, :],
         other=0.0,
     )  # (BLOCK_SIZE_M, BLOCK_SIZE_N)
-    h = tl.load(
-        h_ptr + offs_m[:, None] * stride_hm + cols[None, :] * stride_hn,
+    H = tl.load(
+        H_ptr + offs_m[:, None] * stride_Hm + cols[None, :] * stride_Hn,
         mask=mask_m[:, None] & mask_n[None, :],
         other=0.0,
     )  # (BLOCK_SIZE_M, BLOCK_SIZE_N)
 
     # Gradiient of H before H_pre and H_post go through sigmoid
     grad_out_out = grad_out * out
-    grad_h_pre = grad_out_out * (1 - out)
-    grad_h_post = grad_out_out * 0.5 * (2 - out)
-    grad_h = grad_out
-    grad_h = tl.where(cols[None, :] < n, grad_h_pre, grad_h)
-    grad_h = tl.where((cols[None, :] >= n) & (cols[None, :] < 2 * n), grad_h_post, grad_h)
+    grad_H_pre = grad_out_out * (1 - out)
+    grad_H_post = grad_out_out * 0.5 * (2 - out)
+    grad_H = grad_out
+    grad_H = tl.where(cols[None, :] < n, grad_H_pre, grad_H)
+    grad_H = tl.where((cols[None, :] >= n) & (cols[None, :] < 2 * n), grad_H_post, grad_H)
 
-    grad_a = tl.sum(h * grad_h / rms[:, None], axis=0).to(a.dtype)
+    grad_a = tl.sum(H * grad_H / rms[:, None], axis=0).to(a.dtype)
     # Write grad_a[0:4].sum to grad_a_ptr[0], grad_a[4:8].sum to grad_a_ptr[1], and grad_a[8:24].sum to grad_a_ptr[2]
     tl.atomic_add(grad_a_ptr, tl.where(cols[None, :] < n, grad_a, 0.0).sum(), sem="relaxed")
     tl.atomic_add(
@@ -575,17 +575,17 @@ def _mhc_scale_bwd_fused(
         sem="relaxed",
     )
 
-    grad_b = tl.sum(grad_h, axis=0).to(a.dtype)
+    grad_b = tl.sum(grad_H, axis=0).to(a.dtype)
     tl.atomic_add(grad_b_ptr + cols * stride_grad_b, grad_b, mask=cols < N, sem="relaxed")
 
-    grad_rms = (tl.sum((-grad_h * h * a[None, :]), axis=1) / (rms * rms)).to(rms.dtype)
+    grad_rms = (tl.sum((-grad_H * H * a[None, :]), axis=1) / (rms * rms)).to(rms.dtype)
     grad_ms = grad_rms / (2 * rms)
     tl.store(grad_ms_ptr + ms_offsets * stride_grad_ms, grad_ms, mask=ms_mask)
 
-    grad_h = a[None, :] * grad_h / rms[:, None]
+    grad_H = a[None, :] * grad_H / rms[:, None]
     tl.store(
-        grad_h_ptr + offs_m[:, None] * stride_grad_hm + cols[None, :] * stride_grad_hn,
-        grad_h,
+        grad_H_ptr + offs_m[:, None] * stride_grad_Hm + cols[None, :] * stride_grad_Hn,
+        grad_H,
         mask=mask_m[:, None] & mask_n[None, :],
     )
 

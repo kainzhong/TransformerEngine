@@ -63,6 +63,8 @@ def mhc_generate_mix_and_aggregate(x: torch.Tensor, phi: torch.Tensor, alpha: to
     phi : torch.Tensor
         projection matrix of shape (N, nC), where N=2n+n*n (=24 for n=4), and nC is the hidden dimension after expansion (n times of C),
         dtype is torch.float16 or torch.float32
+        Note: If user wants to use the main grad optimization for Megatron-LM, phi should be padded to (32, nC) so we can accumulate to its main grad buffer during the GEMM, 
+              which will padded N to 32 for better memory accessing pattern. 
     norm_weight : torch.Tensor or None
         optional, the weight for RMSNorm, of shape (K,), which is the learnable per-element affine parameters (gamma) applied to RMSNorm
         dtype is torch.float16 or torch.float32
@@ -105,7 +107,6 @@ def mhc_generate_mix_and_aggregate(x: torch.Tensor, phi: torch.Tensor, alpha: to
     H_res = mhc_fused_sinkhorn(H_res, n, recompute_hist=True, iters=20)
     out = mhc_fused_aggregate(x, H_pre.view(s, b, n), n, use_tf32=use_tf32)
     return out, H_post, H_res
-
 
 def mhc_fused_sinkhorn(
     H_res: torch.Tensor, n: int = 4, recompute_hist: bool = True, iters: int = 20
@@ -310,6 +311,8 @@ def mhc_fused_projection(x: torch.Tensor, phi: torch.Tensor, norm_weight: torch.
     phi : torch.Tensor
         projection matrix of shape (N, K), where N=2n+n*n (=24 for n=4)
         dtype is torch.float16 or torch.float32
+        Note: If user wants to use the main grad optimization for Megatron-LM, phi should be padded to (32, K) so we can accumulate to its main grad buffer during the GEMM, 
+              which will padded N to 32 for better memory accessing pattern. 
     norm_weight : torch.Tensor or None
         optional, the weight for RMSNorm, of shape (K,), which is the learnable per-element affine parameters (gamma) applied to RMSNorm
         dtype is torch.float16 or torch.float32
@@ -327,8 +330,8 @@ def mhc_fused_projection(x: torch.Tensor, phi: torch.Tensor, norm_weight: torch.
         with dtype float32
     """
     assert (
-        phi.shape[0] == 24
-    ), "Currently only n=4 is supported, which means phi should have 24 in its first dimension"
+        phi.shape[0] == 24 or (phi.shape[0] == 32 and hasattr(phi, 'main_grad'))
+    ), "Currently only n=4 is supported, which means phi should have 24 (or 32 if you padded phi) in its first dimension"
     check_deterministic("mhc_fused_projection")
     H, ms = mHCProjectionOp.apply(x, phi, norm_weight, use_tf32)
     return H, ms
@@ -349,7 +352,8 @@ class mHCProjectionOp(torch.autograd.Function):
         Parameters:
         ctx : The context object.
         x (tensor): The input tensor of shape (M, K), where M=s*b is the flattened batch dimension and K=nC is the hidden dimension after expansion.
-        phi (tensor): The projection matrix of shape (N, K), where N=2n+n*n (=24 for n=4).
+        phi (tensor): The projection matrix of shape (N, K), where N=2n+n*n (=24 for n=4). 
+            If user wants to use the main grad optimization for Megatron-LM, phi should be padded to (32, K) so we can accumulate to its main grad buffer during the GEMM
         norm_weight (tensor or None): Optional, or tensor of shape (K,). RMSNorm's learnable per-element affine parameters
         use_tf32 (bool): Whether to use TF32 precision for matmul operations. If False, uses IEEE for better precision.
 
@@ -418,6 +422,8 @@ class mHCProjectionOp(torch.autograd.Function):
         ctx.save_for_backward(x, phi, ms, norm_weight)
         ctx.phi_dtype = phi.dtype
         ctx.precision = precision
+        ctx.phi_main_grad = getattr(phi, 'main_grad', None)
+        ctx.norm_weight_main_grad = getattr(norm_weight, 'main_grad', None)
 
         return H, ms  # Keep both in fp32, which will be passed to sigmoid in mHCScaleFusedOp
 
@@ -473,8 +479,16 @@ class mHCProjectionOp(torch.autograd.Function):
                 triton.cdiv(K, META["BLOCK_SIZE_K"]),
                 triton.cdiv(M, META["BLOCK_SIZE_M"]),
             )
-            grad_phi = torch.zeros_like(phi, dtype=torch.float32)
-            grad_norm_weight = torch.zeros_like(norm_weight, dtype=torch.float32)
+
+            if ctx.phi_main_grad is not None and ctx.phi_main_grad.shape == phi.shape:
+                grad_phi = ctx.phi_main_grad
+            else:
+                grad_phi = torch.zeros_like(phi, dtype=torch.float32)
+            if ctx.norm_weight_main_grad is not None:
+                grad_norm_weight = ctx.norm_weight_main_grad
+            else:
+                grad_norm_weight = torch.zeros_like(norm_weight, dtype=torch.float32)
+
             _mhc_projection_bwd_fused_norm_weight[grid](
                 x_ptr=x, # (M, K)
                 grad_H_ptr=grad_H,  # (M, 32)
@@ -498,12 +512,22 @@ class mHCProjectionOp(torch.autograd.Function):
                 BLOCK_SIZE_N=32,
                 precision="tf32" if ctx.use_tf32 else "ieee",
             )
-            grad_phi = grad_phi.to(phi.dtype)
-            grad_norm_weight = grad_norm_weight.to(norm_weight.dtype)
+
+            if ctx.phi_main_grad is not None:
+                grad_phi = None
+            else:
+                grad_phi = grad_phi.to(phi.dtype)
+            if ctx.norm_weight_main_grad is not None:
+                grad_norm_weight = None
+            else:
+                grad_norm_weight = grad_norm_weight.to(norm_weight.dtype)
         else:
             # Without norm_weight, this is only a GEMM with no fusion needed so we let cuBLAS handle it
-            grad_phi = general_gemm(x.to(grad_H.dtype), grad_H, out_dtype=torch.float32, layout="NT")[0][:N, :]
-            grad_phi = grad_phi.to(phi.dtype)
+            if ctx.phi_main_grad is not None:
+                grad_phi = general_gemm(x.to(grad_H.dtype), grad_H, out_dtype=torch.float32, layout="NT", accumulate=True, out=ctx.phi_main_grad)[0]
+            else:
+                grad_phi = general_gemm(x.to(grad_H.dtype), grad_H, out_dtype=torch.float32, layout="NT")[0][:N, :]
+                grad_phi = grad_phi.to(phi.dtype)
             grad_norm_weight = None
 
         # pylint: disable=unnecessary-lambda-assignment
@@ -575,6 +599,8 @@ class mHCScaleFusedOp(torch.autograd.Function):
 
         ctx.dtype = H.dtype
         H = H.to(torch.float32)
+        ctx.alpha_main_grad = getattr(alpha, 'main_grad', None)
+        ctx.beta_main_grad = getattr(beta, 'main_grad', None)
         alpha = alpha.to(torch.float32)
         beta = beta.to(torch.float32)
         ms = ms.to(torch.float32)
@@ -633,20 +659,23 @@ class mHCScaleFusedOp(torch.autograd.Function):
         n = ctx.n
 
         grad_out = grad_out.contiguous()
-        grad_out = grad_out.to(torch.float32)
 
         M, _ = grad_out.shape
         N = 2 * n + n * n
 
-        grad_h = torch.zeros(
-            (M, 32), device=grad_out.device, dtype=grad_out.dtype
-        )  # Pad the grad_h to 32 in the last dimension
-        grad_alpha = torch.zeros((3,), device=grad_out.device, dtype=grad_out.dtype)
-        grad_beta_padded = torch.zeros((1, 32), device=grad_out.device, dtype=grad_out.dtype)
-        grad_beta = grad_beta_padded[
-            :, :N
-        ]  # Use only the first N elements for grad_beta, the rest are just padding
-        grad_ms = torch.zeros((M,), device=grad_out.device, dtype=grad_out.dtype)
+        grad_H = torch.zeros(
+            (M, 32), device=grad_out.device, dtype=H.dtype
+        )  # Pad the grad_H to 32 in the last dimension
+
+        if ctx.alpha_main_grad is not None:
+            grad_alpha = ctx.alpha_main_grad
+        else:
+            grad_alpha = torch.zeros((3,), device=grad_out.device, dtype=torch.float32)
+        if ctx.beta_main_grad is not None:
+            grad_beta = ctx.beta_main_grad
+        else:
+            grad_beta = torch.zeros((1, N), device=grad_out.device, dtype=torch.float32)
+        grad_ms = torch.zeros((M,), device=grad_out.device, dtype=ms.dtype)
 
         # pylint: disable=unnecessary-lambda-assignment
         grid = lambda META: (triton.cdiv(M, META["BLOCK_SIZE_M"]),)
@@ -654,8 +683,8 @@ class mHCScaleFusedOp(torch.autograd.Function):
         _mhc_scale_bwd_fused[grid](
             grad_out_ptr=grad_out,
             out_ptr=out,
-            grad_h_ptr=grad_h,
-            h_ptr=H,
+            grad_H_ptr=grad_H,
+            H_ptr=H,
             grad_a_ptr=grad_alpha,
             a_ptr=alpha,
             grad_b_ptr=grad_beta,
@@ -667,10 +696,10 @@ class mHCScaleFusedOp(torch.autograd.Function):
             stride_grad_out_n=1,
             stride_out_m=32,
             stride_out_n=1,
-            stride_grad_hm=32,
-            stride_grad_hn=1,
-            stride_hm=32,
-            stride_hn=1,
+            stride_grad_Hm=32,
+            stride_grad_Hn=1,
+            stride_Hm=32,
+            stride_Hn=1,
             stride_grad_a=1,
             stride_a=1,
             stride_grad_b=1,
@@ -680,11 +709,20 @@ class mHCScaleFusedOp(torch.autograd.Function):
             eps=torch.finfo(ms.dtype).eps,
         )
 
+        if ctx.alpha_main_grad is not None:
+            grad_alpha = None
+        else:
+            grad_alpha = grad_alpha.to(alpha.dtype)
+        if ctx.beta_main_grad is not None:
+            grad_beta = None
+        else:            
+            grad_beta = grad_beta.to(alpha.dtype) # alpha and beta should have the same dtype
+
         return (
-            grad_h.to(ctx.dtype),
-            grad_alpha.to(ctx.dtype),
-            grad_beta.to(ctx.dtype),
-            grad_ms.to(ctx.dtype),
+            grad_H,
+            grad_alpha,
+            grad_beta,
+            grad_ms,
             None,
         )
 
