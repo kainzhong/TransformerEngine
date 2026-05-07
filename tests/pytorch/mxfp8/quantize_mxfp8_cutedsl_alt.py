@@ -150,6 +150,17 @@ def cvt_f32_to_fp8e5m2(val: Float32, *, loc=None, ip=None) -> Int32:
 
 
 @dsl_user_op
+def tanh_approx(val: Float32, *, loc=None, ip=None) -> Float32:
+    """`tanh.approx.f32` — fast tanh approximation. Matches CUDA `__tanhf`."""
+    return Float32(llvm.inline_asm(
+        T.f32(),
+        [val.ir_value(loc=loc, ip=ip)],
+        "tanh.approx.f32 $0, $1;",
+        "=f,f", has_side_effects=False, is_align_stack=False,
+        asm_dialect=llvm.AsmDialect.AD_ATT))
+
+
+@dsl_user_op
 def pack_f32x2(lo: Float32, hi: Float32, *, loc=None, ip=None) -> Int64:
     """Pack two f32 scalars into a single 64-bit register (`floatx2` layout).
 
@@ -227,6 +238,19 @@ def _build_packed16_kit(in_fmt: str):
             # left shift.
             return _bitcast_i32_to_f32(
                 (bits >> Int32(16)) << Int32(16), loc=loc, ip=ip)
+
+        @dsl_user_op
+        def truncate_f32(val: Float32, *, loc=None, ip=None) -> Float32:
+            """Round f32 to bf16 precision (round-to-nearest-even), keep f32.
+            Matches C++'s `static_cast<float>(static_cast<bf16>(elt))`."""
+            bf16_bits = Int16(llvm.inline_asm(
+                T.i16(), [val.ir_value(loc=loc, ip=ip)],
+                "cvt.rn.bf16.f32 $0, $1;",
+                "=h,f", has_side_effects=False, is_align_stack=False,
+                asm_dialect=llvm.AsmDialect.AD_ATT))
+            i32 = Int32(mlir_arith.extui(
+                T.i32(), bf16_bits.ir_value(loc=loc, ip=ip), loc=loc, ip=ip))
+            return _bitcast_i32_to_f32(i32 << Int32(16), loc=loc, ip=ip)
     else:
         # f16 has its own bit layout; widening requires `cvt.f32.f16`.
         @dsl_user_op
@@ -249,6 +273,20 @@ def _build_packed16_kit(in_fmt: str):
             hi_i16 = Int16(mlir_arith.trunci(
                 T.i16(), hi_shifted.ir_value(loc=loc, ip=ip), loc=loc, ip=ip))
             return bits_to_f32(hi_i16, loc=loc, ip=ip)
+
+        @dsl_user_op
+        def truncate_f32(val: Float32, *, loc=None, ip=None) -> Float32:
+            """Round f32 to f16 precision, keep f32."""
+            f16_bits = Int16(llvm.inline_asm(
+                T.i16(), [val.ir_value(loc=loc, ip=ip)],
+                "cvt.rn.f16.f32 $0, $1;",
+                "=h,f", has_side_effects=False, is_align_stack=False,
+                asm_dialect=llvm.AsmDialect.AD_ATT))
+            return Float32(llvm.inline_asm(
+                T.f32(), [f16_bits.ir_value(loc=loc, ip=ip)],
+                "cvt.f32.f16 $0, $1;",
+                "=f,h", has_side_effects=False, is_align_stack=False,
+                asm_dialect=llvm.AsmDialect.AD_ATT))
 
     def _build_mul_cvt(out_fmt: str):
         """Build a fused `<in_fmt>x2 * f32x2 → fp8<out_fmt>x2` PTX wrapper.
@@ -300,6 +338,7 @@ def _build_packed16_kit(in_fmt: str):
         bits_to_f32=bits_to_f32,
         x2_lo_to_f32=x2_lo_to_f32,
         x2_hi_to_f32=x2_hi_to_f32,
+        truncate_f32=truncate_f32,
         mul_cvt_to_fp8x2=mul_cvt_to_fp8x2,
     )
 
@@ -318,6 +357,49 @@ def _packed16_kit(dtype):
     if dtype is cutlass.Float16:
         return _F16_KIT
     return _BF16_KIT
+
+
+# ---------------------------------------------------------------------------
+# Forward-activation registry
+#
+# Each entry is a Float32 → Float32 callable applied per element before the
+# MXFP8 amax + cast. Selection is by Python string at JIT trace time, so the
+# const-expr machinery treats `cfg.activation` like a C++ template argument
+# — no runtime branch in the inner loop, separate kernel cached per choice.
+#
+# Math primitives match CUDA fast-math intrinsics so outputs are bit-exact
+# with PyTorch's CUDA implementations of the same activations:
+#   tanh   -> tanh.approx.f32 (== __tanhf)
+#   exp(x) -> exp2.approx.f32(x · log2(e)) (== __expf)
+# ---------------------------------------------------------------------------
+def _act_relu(x: Float32) -> Float32:
+    return cute.arch.fmax(x, Float32(0.0))
+
+
+def _act_gelu(x: Float32) -> Float32:
+    """Tanh-approximation GELU. Constants and operator grouping match TE's
+    `transformer_engine/common/util/math.h::gelu` exactly (factored form
+    `x · (0.5 + 0.5·tanh(x·(a + b·x²)))`) so quantized output is bit-exact
+    against the C++ fused IS_ACT path. Uses `cute.math.tanh(fastmath=False)`
+    rather than the `tanh.approx.f32` PTX intrinsic — TE compiles activation
+    kernels without `--use_fast_math` by default, so its `tanhf` is the
+    IEEE-precise expansion."""
+    A = Float32(0.79788456)       # sqrt(2/π) truncated to TE's 8-digit literal
+    B = Float32(0.03567741)       # = sqrt(2/π) · 0.044715, same truncation
+    return x * (Float32(0.5) + Float32(0.5) * cute.math.tanh(x * (A + B * x * x)))
+
+
+def _act_silu(x: Float32) -> Float32:
+    """SiLU/Swish: x · σ(x) = x / (1 + e^-x).
+    Matches TE's `silu` (`val / (1 + expf(-val))`)."""
+    return x / (Float32(1.0) + cute.arch.exp(-x))
+
+
+_ACTIVATIONS = {
+    "relu": _act_relu,
+    "gelu": _act_gelu,
+    "silu": _act_silu,
+}
 
 
 @dsl_user_op
@@ -375,7 +457,8 @@ def _cvt_f32x2_to_fp8x2(fp8_dtype: str):
 # ---------------------------------------------------------------------------
 class MXFP8QuantizeConfig:
     def __init__(self, dtype, M, N, fp8_dtype="e4m3", rowwise=True, colwise=False,
-                 with_gemm_swizzled_scales=False, with_amax=False):
+                 with_gemm_swizzled_scales=False, with_amax=False,
+                 activation=None):
         self.dtype = dtype
         self.M = M
         self.N = N
@@ -386,6 +469,14 @@ class MXFP8QuantizeConfig:
         # When True, kernel reduces max(|x|) across the full tensor and atomic-
         # maxes into a caller-provided 1-element f32 (delayed-scaling FP8).
         self.with_amax = with_amax
+        # Optional fused forward activation. When set, the kernel applies
+        # OP(x) per element before amax+cast; matches C++'s IS_ACT path.
+        # Must be a key in `_ACTIVATIONS` (or None for plain quantize).
+        if activation is not None and activation not in _ACTIVATIONS:
+            raise ValueError(
+                f"unknown activation {activation!r}; expected one of "
+                f"{sorted(_ACTIVATIONS)} or None")
+        self.activation = activation
         self.max_norm_rcp = FP8E4M3_MAX_NORM_RCP if fp8_dtype == "e4m3" else FP8E5M2_MAX_NORM_RCP
 
 
@@ -869,10 +960,14 @@ class MXFP8QuantizeSmemKernel:
 
         # 0. Load the 32-element column from smem into registers once (matches
         # C++'s `in_colwise_IType[i]` cache). Amax and cast both reuse these.
-        # For 16-bit packed inputs (bf16/fp16) we stash raw bits and run amax
-        # via the format's fused `max.xorsign.abs.<fmt>` PTX; otherwise fall
-        # back to the scalar f32 path.
-        if cutlass.const_expr(_is_packed16(cfg.dtype)):
+        # Path selection:
+        #   - 16-bit input WITHOUT activation: packed-x2 amax in IType, fast.
+        #   - everything else (16-bit + activation, OR fp32 input): scalar
+        #     f32 path. With activation, apply OP and (for 16-bit input)
+        #     round-trip through IType to match C++'s `static_cast<IType>(elt)`
+        #     numerical truncation before amax/cast.
+        has_act = cutlass.const_expr(cfg.activation is not None)
+        if cutlass.const_expr(_is_packed16(cfg.dtype) and cfg.activation is None):
             kit = _packed16_kit(cfg.dtype)
             sX_i16 = cute.make_tensor(
                 cute.recast_ptr(sX_tile.iterator, dtype=Int16),
@@ -886,6 +981,15 @@ class MXFP8QuantizeSmemKernel:
             amax_c = fabs_f32(kit.bits_to_f32(amax_bits))
         else:
             in_c = [Float32(sX_flat[i, tidx]) for i in range(SCALE_DIM)]
+            if cutlass.const_expr(cfg.activation is not None):
+                op = _ACTIVATIONS[cfg.activation]
+                if cutlass.const_expr(_is_packed16(cfg.dtype)):
+                    kit_act = _packed16_kit(cfg.dtype)
+                    for i in cutlass.range_constexpr(SCALE_DIM):
+                        in_c[i] = kit_act.truncate_f32(op(in_c[i]))
+                else:
+                    for i in cutlass.range_constexpr(SCALE_DIM):
+                        in_c[i] = op(in_c[i])
             amax_c = Float32(0.0)
             for i in cutlass.range_constexpr(SCALE_DIM):
                 amax_c = cute.arch.fmax(amax_c, fabs_f32(in_c[i]))
@@ -900,12 +1004,13 @@ class MXFP8QuantizeSmemKernel:
         # flushes the whole (TILE_Y, TILE_X) tile with a TMA S2G.
         inv_scale_c = exp2f_rcp(biased_exp_c)
         cvt_to_fp8 = _cvt_f32_to_fp8(cfg.fp8_dtype)
-        if cutlass.const_expr(_is_packed16(cfg.dtype)):
+        if cutlass.const_expr(_is_packed16(cfg.dtype) and cfg.activation is None):
             kit_cast = _packed16_kit(cfg.dtype)
             for i in cutlass.range_constexpr(SCALE_DIM):
                 v_f32 = kit_cast.bits_to_f32(in_c[i])
                 sO_col_flat[i, tidx] = Uint8(cvt_to_fp8(v_f32 * inv_scale_c))
         else:
+            # in_c[i] is already Float32 in the activation/f32 path.
             for i in cutlass.range_constexpr(SCALE_DIM):
                 sO_col_flat[i, tidx] = Uint8(cvt_to_fp8(in_c[i] * inv_scale_c))
 
@@ -966,7 +1071,11 @@ class MXFP8QuantizeSmemKernel:
             ),
         )
 
-        if cutlass.const_expr(_is_packed16(cfg.dtype)):
+        # Path selection mirrors _process_colwise: the packed-x2 fast path
+        # only applies when there's no fused activation. Otherwise we widen
+        # to f32, apply OP, optionally truncate through IType for bit-exact
+        # match with C++, and then run scalar f32 amax + cast.
+        if cutlass.const_expr(_is_packed16(cfg.dtype) and cfg.activation is None):
             kit = _packed16_kit(cfg.dtype)
             # Read 4 consecutive 16-bit elts per wave as TWO packed-x2 Int32s;
             # each ld.shared.b32 covers 2 elements. The cache `in_r[w][k]` is
@@ -1009,6 +1118,17 @@ class MXFP8QuantizeSmemKernel:
                 swz = ((w + bank_group) * PACK_SIZE) % SCALE_DIM
                 for e in cutlass.range_constexpr(PACK_SIZE):
                     in_r[w][e] = Float32(sX_rw[tid_Y, tid_X, swz + e])
+            if cutlass.const_expr(cfg.activation is not None):
+                op = _ACTIVATIONS[cfg.activation]
+                if cutlass.const_expr(_is_packed16(cfg.dtype)):
+                    kit_act = _packed16_kit(cfg.dtype)
+                    for w in cutlass.range_constexpr(WAVES):
+                        for e in cutlass.range_constexpr(PACK_SIZE):
+                            in_r[w][e] = kit_act.truncate_f32(op(in_r[w][e]))
+                else:
+                    for w in cutlass.range_constexpr(WAVES):
+                        for e in cutlass.range_constexpr(PACK_SIZE):
+                            in_r[w][e] = op(in_r[w][e])
             amax_r = Float32(0.0)
             for w in cutlass.range_constexpr(WAVES):
                 for e in cutlass.range_constexpr(PACK_SIZE):
@@ -1022,7 +1142,7 @@ class MXFP8QuantizeSmemKernel:
         # 3. scale + packed fp8 cast → smem as one u32 per wave.
         inv_scale_r = exp2f_rcp(biased_exp_r)
         cvt_f32x2 = _cvt_f32x2_to_fp8x2(cfg.fp8_dtype)
-        if cutlass.const_expr(_is_packed16(cfg.dtype)):
+        if cutlass.const_expr(_is_packed16(cfg.dtype) and cfg.activation is None):
             kit_cast = _packed16_kit(cfg.dtype)
             mul_cvt_x2 = kit_cast.mul_cvt_to_fp8x2(cfg.fp8_dtype)
             # Pack `(inv_scale_r, inv_scale_r)` as a single 64-bit f32x2 once;
@@ -1031,7 +1151,7 @@ class MXFP8QuantizeSmemKernel:
 
         for w in cutlass.range_constexpr(WAVES):
             swz = ((w + bank_group) * PACK_SIZE) % SCALE_DIM
-            if cutlass.const_expr(_is_packed16(cfg.dtype)):
+            if cutlass.const_expr(_is_packed16(cfg.dtype) and cfg.activation is None):
                 # One fused PTX per <fmt>x2 pair: <fmt>x2 × f32x2 → fp8x2.
                 # Byte layout: byte[0]=fp8(lo * s), byte[1]=fp8(hi * s).
                 p01 = mul_cvt_x2(in_r[w][0], scale_2x)
@@ -1062,7 +1182,7 @@ _compile_cache: dict = {}
 
 def _get_compiled_kernel(cfg, stream):
     key = (cfg.dtype, cfg.M, cfg.N, cfg.fp8_dtype, cfg.rowwise, cfg.colwise,
-           cfg.with_gemm_swizzled_scales, cfg.with_amax)
+           cfg.with_gemm_swizzled_scales, cfg.with_amax, cfg.activation)
     if key not in _compile_cache:
         kernel_obj = MXFP8QuantizeSmemKernel(cfg)
         u8_ptr = make_ptr(Uint8, 16, cute.AddressSpace.gmem, assumed_align=16)
@@ -1112,6 +1232,7 @@ def quantize_mxfp8_cutedsl(
     with_gemm_swizzled_scales: bool = False,
     noop: torch.Tensor = None,
     amax: torch.Tensor = None,
+    activation: str = None,
 ) -> dict:
     """Quantize a 2D tensor to MXFP8 format using CuTeDSL kernels with smem tiling.
 
@@ -1172,7 +1293,7 @@ def quantize_mxfp8_cutedsl(
     # Single unified kernel launch — loads global memory once for both directions
     cfg = MXFP8QuantizeConfig(cutlass_dtype, M, N, fp8_dtype, rowwise=rowwise, colwise=colwise,
                                with_gemm_swizzled_scales=with_gemm_swizzled_scales,
-                               with_amax=with_amax)
+                               with_amax=with_amax, activation=activation)
     compiled = _get_compiled_kernel(cfg, stream)
 
     # For unused directions, point to the other direction's buffer (never written)
