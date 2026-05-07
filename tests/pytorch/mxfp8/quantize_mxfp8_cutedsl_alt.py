@@ -415,6 +415,7 @@ class MXFP8QuantizeSmemKernel:
         x_ptr,
         out_row_ptr, scale_row_ptr,
         out_col_ptr, scale_col_ptr,
+        noop_ptr,
         M, max_norm_rcp, stream,
         scaling_type="rowwise", # "rowwise", "colwise", or "bidimensional"
     ):
@@ -423,6 +424,10 @@ class MXFP8QuantizeSmemKernel:
         num_scale_rows = cfg.M // SCALE_DIM
 
         mX = cute.make_tensor(x_ptr, cute.make_layout((M, cfg.N), stride=(cfg.N, 1)))
+        # 1-element noop flag in gmem — the kernel reads this once and skips
+        # all work if it's 1.0. Wrapper passes a zero-init dummy when caller
+        # didn't supply a real flag, so the kernel always sees a valid ptr.
+        mNoop = cute.make_tensor(noop_ptr, cute.make_layout(1))
 
         # Rowwise output tensors
         mO_row = cute.make_tensor(out_row_ptr, cute.make_layout((M, cfg.N), stride=(cfg.N, 1)))
@@ -502,7 +507,7 @@ class MXFP8QuantizeSmemKernel:
         block = [THREADS_PER_CHUNK,]
 
         self.kernel(
-            mX, mO_row, mS_row, mO_col, mS_col,
+            mX, mO_row, mS_row, mO_col, mS_col, mNoop,
             max_norm_rcp, mX.element_type,
             tma_atom, tma_src,
             tma_atom_out_row, tma_dst_out_row,
@@ -520,6 +525,38 @@ class MXFP8QuantizeSmemKernel:
         mS_row, # (M, N // 32):(N // 32, 1), rowwise scale tensor (uint8)
         mO_col, # (M, N):(N, 1), colwise quantized output tensor (uint8)
         mS_col, # (M // 32, N):(N, 1), colwise scale tensor (uint8)
+        mNoop,  # (1,) f32 — skip all work if mNoop[0] == 1.0
+        max_norm_rcp,
+        dtype: cutlass.Constexpr[Type[cutlass.Numeric]],
+        tma_atom, tma_src,
+        tma_atom_out_row, tma_dst_out_row,
+        tma_atom_out_col, tma_dst_out_col,
+    ):
+        # ---- noop early-exit ----------------------------------------------
+        # Skip the entire kernel if the framework signalled "no-op" via a
+        # 1-element f32 flag in gmem. Used by CUDA Graphs / MoE to gate work
+        # without a host-GPU sync. All threads in the CTA see the same value
+        # → uniform branch, no divergence, no setup to unwind since this runs
+        # before any smem alloc / mbarrier init.
+        #
+        # CuTeDSL forbids a runtime `return` inside @cute.kernel, so we wrap
+        # the body in `_kernel_main` and just guard the call here.
+        # Bitcast f32 → i32 so we can compare against 1.0's bit pattern via
+        # the well-tested int-compare path.
+        noop_bits = _bitcast_f32_to_i32(mNoop[0])
+        if noop_bits != Int32(0x3F800000):
+            self._kernel_main(
+                mX, mO_row, mS_row, mO_col, mS_col,
+                max_norm_rcp, dtype,
+                tma_atom, tma_src,
+                tma_atom_out_row, tma_dst_out_row,
+                tma_atom_out_col, tma_dst_out_col,
+            )
+
+    @cute.jit
+    def _kernel_main(
+        self,
+        mX, mO_row, mS_row, mO_col, mS_col,
         max_norm_rcp,
         dtype: cutlass.Constexpr[Type[cutlass.Numeric]],
         tma_atom, tma_src,
@@ -969,11 +1006,13 @@ def _get_compiled_kernel(cfg, stream):
     if key not in _compile_cache:
         kernel_obj = MXFP8QuantizeSmemKernel(cfg)
         u8_ptr = make_ptr(Uint8, 16, cute.AddressSpace.gmem, assumed_align=16)
+        f32_ptr = make_ptr(Float32, 16, cute.AddressSpace.gmem, assumed_align=4)
         compiled = cute.compile[(GPUArch("sm_100a"),)](
             kernel_obj,
             make_ptr(cfg.dtype, 16, cute.AddressSpace.gmem, assumed_align=16),
             u8_ptr, u8_ptr,   # rowwise data, scale
             u8_ptr, u8_ptr,   # colwise data, scale
+            f32_ptr,          # noop flag (1-element f32)
             Int32(1), Float32(cfg.max_norm_rcp), stream,
         )
         _compile_cache[key] = compiled
@@ -990,14 +1029,36 @@ _torch_to_cutlass_dtype = {
 }
 
 
+_NOOP_DUMMY_CACHE: dict = {}
+
+
+def _noop_dummy_for(device):
+    """Reusable zero-init 1-element f32 buffer per device, for callers that
+    don't pass an explicit `noop` flag. Caching avoids re-allocating per call."""
+    key = str(device)
+    buf = _NOOP_DUMMY_CACHE.get(key)
+    if buf is None:
+        buf = torch.zeros(1, dtype=torch.float32, device=device)
+        _NOOP_DUMMY_CACHE[key] = buf
+    return buf
+
+
 def quantize_mxfp8_cutedsl(
     x: torch.Tensor,
     fp8_dtype: str = "e4m3",
     rowwise: bool = True,
     colwise: bool = False,
     with_gemm_swizzled_scales: bool = False,
+    noop: torch.Tensor = None,
 ) -> dict:
-    """Quantize a 2D tensor to MXFP8 format using CuTeDSL kernels with smem tiling."""
+    """Quantize a 2D tensor to MXFP8 format using CuTeDSL kernels with smem tiling.
+
+    Args:
+        noop: optional 1-element f32 cuda tensor. If `noop[0] == 1.0` at launch
+            time, the kernel returns immediately and output buffers are left as
+            allocated (uninitialised). Used for CUDA-Graph-friendly skip — see
+            `swizzle_demo.svg`-adjacent docs / the C++ reference for semantics.
+    """
     # print(f"Input tensor: shape={x.shape}, dtype={x.dtype}, device={x.device}")
     assert x.is_cuda and x.is_contiguous() and x.ndim == 2
     M, N = x.shape
@@ -1011,6 +1072,12 @@ def quantize_mxfp8_cutedsl(
         assert M % 128 == 0 and N % 128 == 0, (
             f"with_gemm_swizzled_scales requires M and N multiples of 128, "
             f"got M={M}, N={N}")
+    if noop is None:
+        noop = _noop_dummy_for(x.device)
+    else:
+        assert noop.is_cuda and noop.dtype == torch.float32 and noop.numel() == 1, (
+            f"noop must be a 1-element float32 cuda tensor, got "
+            f"shape={tuple(noop.shape)}, dtype={noop.dtype}")
 
     cutlass_dtype = _torch_to_cutlass_dtype[x.dtype]
     max_norm_rcp = FP8E4M3_MAX_NORM_RCP if fp8_dtype == "e4m3" else FP8E5M2_MAX_NORM_RCP
@@ -1044,6 +1111,7 @@ def quantize_mxfp8_cutedsl(
         _ptr(result["rowwise_scale"]) if rowwise else _ptr(dummy_scale),
         _ptr(result["colwise_data"]) if colwise else _ptr(dummy),
         _ptr(result["colwise_scale"]) if colwise else _ptr(dummy_scale),
+        make_ptr(Float32, noop.data_ptr()),
         Int32(M), Float32(max_norm_rcp), stream,
     )
 
