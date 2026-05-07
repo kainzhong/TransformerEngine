@@ -61,6 +61,7 @@ TILE_X = 64
 
 # CTA size
 THREADS_PER_CHUNK = 64
+NUM_WARPS = THREADS_PER_CHUNK // 32
 
 # FP8E4M3 max representable value
 FP8E4M3_MAX_NORM = 448.0
@@ -374,7 +375,7 @@ def _cvt_f32x2_to_fp8x2(fp8_dtype: str):
 # ---------------------------------------------------------------------------
 class MXFP8QuantizeConfig:
     def __init__(self, dtype, M, N, fp8_dtype="e4m3", rowwise=True, colwise=False,
-                 with_gemm_swizzled_scales=False):
+                 with_gemm_swizzled_scales=False, with_amax=False):
         self.dtype = dtype
         self.M = M
         self.N = N
@@ -382,6 +383,9 @@ class MXFP8QuantizeConfig:
         self.rowwise = rowwise
         self.colwise = colwise
         self.with_gemm_swizzled_scales = with_gemm_swizzled_scales
+        # When True, kernel reduces max(|x|) across the full tensor and atomic-
+        # maxes into a caller-provided 1-element f32 (delayed-scaling FP8).
+        self.with_amax = with_amax
         self.max_norm_rcp = FP8E4M3_MAX_NORM_RCP if fp8_dtype == "e4m3" else FP8E5M2_MAX_NORM_RCP
 
 
@@ -415,7 +419,7 @@ class MXFP8QuantizeSmemKernel:
         x_ptr,
         out_row_ptr, scale_row_ptr,
         out_col_ptr, scale_col_ptr,
-        noop_ptr,
+        noop_ptr, amax_ptr,
         M, max_norm_rcp, stream,
         scaling_type="rowwise", # "rowwise", "colwise", or "bidimensional"
     ):
@@ -428,6 +432,9 @@ class MXFP8QuantizeSmemKernel:
         # all work if it's 1.0. Wrapper passes a zero-init dummy when caller
         # didn't supply a real flag, so the kernel always sees a valid ptr.
         mNoop = cute.make_tensor(noop_ptr, cute.make_layout(1))
+        # 1-element global amax accumulator. Used only when cfg.with_amax —
+        # otherwise wrapper passes a dummy and the kernel skips the reduction.
+        mAmax = cute.make_tensor(amax_ptr, cute.make_layout(1))
 
         # Rowwise output tensors
         mO_row = cute.make_tensor(out_row_ptr, cute.make_layout((M, cfg.N), stride=(cfg.N, 1)))
@@ -507,7 +514,7 @@ class MXFP8QuantizeSmemKernel:
         block = [THREADS_PER_CHUNK,]
 
         self.kernel(
-            mX, mO_row, mS_row, mO_col, mS_col, mNoop,
+            mX, mO_row, mS_row, mO_col, mS_col, mNoop, mAmax,
             max_norm_rcp, mX.element_type,
             tma_atom, tma_src,
             tma_atom_out_row, tma_dst_out_row,
@@ -526,6 +533,7 @@ class MXFP8QuantizeSmemKernel:
         mO_col, # (M, N):(N, 1), colwise quantized output tensor (uint8)
         mS_col, # (M // 32, N):(N, 1), colwise scale tensor (uint8)
         mNoop,  # (1,) f32 — skip all work if mNoop[0] == 1.0
+        mAmax,  # (1,) f32 — global amax accumulator (only used if cfg.with_amax)
         max_norm_rcp,
         dtype: cutlass.Constexpr[Type[cutlass.Numeric]],
         tma_atom, tma_src,
@@ -546,7 +554,7 @@ class MXFP8QuantizeSmemKernel:
         noop_bits = _bitcast_f32_to_i32(mNoop[0])
         if noop_bits != Int32(0x3F800000):
             self._kernel_main(
-                mX, mO_row, mS_row, mO_col, mS_col,
+                mX, mO_row, mS_row, mO_col, mS_col, mAmax,
                 max_norm_rcp, dtype,
                 tma_atom, tma_src,
                 tma_atom_out_row, tma_dst_out_row,
@@ -556,7 +564,7 @@ class MXFP8QuantizeSmemKernel:
     @cute.jit
     def _kernel_main(
         self,
-        mX, mO_row, mS_row, mO_col, mS_col,
+        mX, mO_row, mS_row, mO_col, mS_col, mAmax,
         max_norm_rcp,
         dtype: cutlass.Constexpr[Type[cutlass.Numeric]],
         tma_atom, tma_src,
@@ -570,6 +578,9 @@ class MXFP8QuantizeSmemKernel:
         # bumps per-CTA smem from 12 KB to 16 KB, which drops occupancy and
         # regresses the single-direction path by ~8-10% at 16384^2. Match
         # C++ and only allocate what the active pass actually uses.
+        # sAmax holds one f32 per warp for the cross-warp amax reduction —
+        # negligible (8 bytes for NUM_WARPS=2) and we always allocate so the
+        # struct doesn't fork on a 4th const-expr (cfg.with_amax) dimension.
         if cutlass.const_expr(cfg.rowwise and cfg.colwise):
             @cute.struct
             class SharedStorage:
@@ -583,6 +594,7 @@ class MXFP8QuantizeSmemKernel:
                 sO_col: cute.struct.Align[
                     cute.struct.MemRange[Uint8, TILE_Y * TILE_X * NUM_STAGES], 128
                 ]
+                sAmax: cute.struct.MemRange[Float32, NUM_WARPS]
         elif cutlass.const_expr(cfg.rowwise):
             @cute.struct
             class SharedStorage:
@@ -593,6 +605,7 @@ class MXFP8QuantizeSmemKernel:
                 sO_row: cute.struct.Align[
                     cute.struct.MemRange[Uint8, TILE_Y * TILE_X * NUM_STAGES], 128
                 ]
+                sAmax: cute.struct.MemRange[Float32, NUM_WARPS]
         else:
             @cute.struct
             class SharedStorage:
@@ -603,6 +616,7 @@ class MXFP8QuantizeSmemKernel:
                 sO_col: cute.struct.Align[
                     cute.struct.MemRange[Uint8, TILE_Y * TILE_X * NUM_STAGES], 128
                 ]
+                sAmax: cute.struct.MemRange[Float32, NUM_WARPS]
         smem = cutlass.utils.SmemAllocator()
         storage = smem.allocate(SharedStorage)
 
@@ -732,6 +746,13 @@ class MXFP8QuantizeSmemKernel:
                 mainloop_pipeline.producer_commit(prod_state)
                 prod_state.advance()
 
+        # Per-thread amax accumulator across all stages of this CTA. Combined
+        # with the per-warp redux + cross-warp shmem reduce + atomic at the
+        # bottom to produce a global max(|x|) in mAmax. Initialised to 0
+        # since amax is non-negative.
+        if cutlass.const_expr(cfg.with_amax):
+            block_amax = Float32(0.0)
+
         # ---- Consumer: all threads quantize each completed tile. ----
         for stage in cutlass.range(num_tiles, unroll=1):
             mainloop_pipeline.consumer_wait(cons_state)
@@ -740,16 +761,20 @@ class MXFP8QuantizeSmemKernel:
 
             if cutlass.const_expr(cfg.colwise):
                 sO_col_tile = sO_col[(None, cons_state.index)]
-                self._process_colwise(
+                amax_c = self._process_colwise(
                     sX_tile, sO_col_tile, base_row, bidx, tidx,
                     mS_col, max_norm_rcp,
                 )
+                if cutlass.const_expr(cfg.with_amax):
+                    block_amax = cute.arch.fmax(block_amax, amax_c)
             if cutlass.const_expr(cfg.rowwise):
                 sO_row_tile = sO_row[(None, cons_state.index)]
-                self._process_rowwise(
+                amax_r = self._process_rowwise(
                     sX_tile, sO_row_tile, base_row, bidx, tidx,
                     mS_row, max_norm_rcp,
                 )
+                if cutlass.const_expr(cfg.with_amax):
+                    block_amax = cute.arch.fmax(block_amax, amax_r)
 
             # Make all smem stores (sO_row and/or sO_col) visible to the TMA
             # async proxy, then block-sync so warp 0 sees the fences from all
@@ -783,6 +808,33 @@ class MXFP8QuantizeSmemKernel:
         # Wait for in-flight TMA stores so data is visible to the host
         # before the kernel returns.
         cute.arch.cp_async_bulk_wait_group(0, read=False)
+
+        # ---- amax block reduction + cross-CTA atomic ----------------------
+        # 1) intra-warp: redux.sync.fmax.f32 (sm_80+, single instruction).
+        # 2) cross-warp: NUM_WARPS shmem floats + sync_threads.
+        # 3) cross-CTA: int-atomic-max on the f32 bit pattern. Since amax is
+        #    always ≥ 0, IEEE-754 bit ordering on positives matches float
+        #    magnitude ordering, so atomic_max on i32 bits gives the right
+        #    result. (atomic_max_float32 also exists but its pointer
+        #    normalisation is broken as of this CuTeDSL build.)
+        if cutlass.const_expr(cfg.with_amax):
+            warp_amax = cute.arch.warp_redux_sync(block_amax, kind="fmax")
+            sAmax = storage.sAmax.get_tensor(cute.make_layout(NUM_WARPS))
+            lane_idx = tidx % 32
+            if lane_idx == 0:
+                sAmax[warp_idx] = warp_amax
+            cute.arch.sync_threads()
+            if tidx == 0:
+                cta_amax = Float32(0.0)
+                for w in cutlass.range_constexpr(NUM_WARPS):
+                    cta_amax = cute.arch.fmax(cta_amax, sAmax[w])
+                amax_i32 = cute.make_tensor(
+                    cute.recast_ptr(mAmax.iterator, dtype=Int32),
+                    cute.make_layout(1),
+                )
+                cute.arch.atomic_max(
+                    amax_i32.iterator, _bitcast_f32_to_i32(cta_amax),
+                )
 
 
     @cute.jit
@@ -856,6 +908,10 @@ class MXFP8QuantizeSmemKernel:
         else:
             for i in cutlass.range_constexpr(SCALE_DIM):
                 sO_col_flat[i, tidx] = Uint8(cvt_to_fp8(in_c[i] * inv_scale_c))
+
+        # Per-thread amax over the 32-elt column. Caller folds across stages
+        # for the global per-tensor amax (only when cfg.with_amax).
+        return amax_c
 
     @cute.jit
     def _process_rowwise(
@@ -993,6 +1049,10 @@ class MXFP8QuantizeSmemKernel:
             quad = (p23 << Int32(16)) | p01
             sO_u32[tid_Y, (col_base_local + swz) // 4] = Uint32(quad)
 
+        # Per-thread amax over the thread's 32-elt scale block. Caller folds
+        # across stages for the global per-tensor amax (only when with_amax).
+        return amax_r
+
 
 # ---------------------------------------------------------------------------
 # Compilation cache
@@ -1002,7 +1062,7 @@ _compile_cache: dict = {}
 
 def _get_compiled_kernel(cfg, stream):
     key = (cfg.dtype, cfg.M, cfg.N, cfg.fp8_dtype, cfg.rowwise, cfg.colwise,
-           cfg.with_gemm_swizzled_scales)
+           cfg.with_gemm_swizzled_scales, cfg.with_amax)
     if key not in _compile_cache:
         kernel_obj = MXFP8QuantizeSmemKernel(cfg)
         u8_ptr = make_ptr(Uint8, 16, cute.AddressSpace.gmem, assumed_align=16)
@@ -1013,6 +1073,7 @@ def _get_compiled_kernel(cfg, stream):
             u8_ptr, u8_ptr,   # rowwise data, scale
             u8_ptr, u8_ptr,   # colwise data, scale
             f32_ptr,          # noop flag (1-element f32)
+            f32_ptr,          # amax accumulator (1-element f32)
             Int32(1), Float32(cfg.max_norm_rcp), stream,
         )
         _compile_cache[key] = compiled
@@ -1050,6 +1111,7 @@ def quantize_mxfp8_cutedsl(
     colwise: bool = False,
     with_gemm_swizzled_scales: bool = False,
     noop: torch.Tensor = None,
+    amax: torch.Tensor = None,
 ) -> dict:
     """Quantize a 2D tensor to MXFP8 format using CuTeDSL kernels with smem tiling.
 
@@ -1058,6 +1120,11 @@ def quantize_mxfp8_cutedsl(
             time, the kernel returns immediately and output buffers are left as
             allocated (uninitialised). Used for CUDA-Graph-friendly skip — see
             `swizzle_demo.svg`-adjacent docs / the C++ reference for semantics.
+        amax: optional 1-element f32 cuda tensor. When supplied, the kernel
+            atomic-maxes max(|x|) over the whole tensor into amax[0] (across
+            all CTAs). Used by delayed-scaling FP8 modes that need a per-tensor
+            amax alongside the per-32-element MXFP8 scales. Caller is
+            responsible for initialising amax (e.g. to 0.0) before launch.
     """
     # print(f"Input tensor: shape={x.shape}, dtype={x.dtype}, device={x.device}")
     assert x.is_cuda and x.is_contiguous() and x.ndim == 2
@@ -1078,6 +1145,15 @@ def quantize_mxfp8_cutedsl(
         assert noop.is_cuda and noop.dtype == torch.float32 and noop.numel() == 1, (
             f"noop must be a 1-element float32 cuda tensor, got "
             f"shape={tuple(noop.shape)}, dtype={noop.dtype}")
+    with_amax = amax is not None
+    if with_amax:
+        assert amax.is_cuda and amax.dtype == torch.float32 and amax.numel() == 1, (
+            f"amax must be a 1-element float32 cuda tensor, got "
+            f"shape={tuple(amax.shape)}, dtype={amax.dtype}")
+    else:
+        # Reuse the noop dummy slot — the kernel never reads/writes it when
+        # cfg.with_amax is False, so any non-null pointer is fine.
+        amax = _noop_dummy_for(x.device)
 
     cutlass_dtype = _torch_to_cutlass_dtype[x.dtype]
     max_norm_rcp = FP8E4M3_MAX_NORM_RCP if fp8_dtype == "e4m3" else FP8E5M2_MAX_NORM_RCP
@@ -1095,7 +1171,8 @@ def quantize_mxfp8_cutedsl(
 
     # Single unified kernel launch — loads global memory once for both directions
     cfg = MXFP8QuantizeConfig(cutlass_dtype, M, N, fp8_dtype, rowwise=rowwise, colwise=colwise,
-                               with_gemm_swizzled_scales=with_gemm_swizzled_scales)
+                               with_gemm_swizzled_scales=with_gemm_swizzled_scales,
+                               with_amax=with_amax)
     compiled = _get_compiled_kernel(cfg, stream)
 
     # For unused directions, point to the other direction's buffer (never written)
@@ -1112,6 +1189,7 @@ def quantize_mxfp8_cutedsl(
         _ptr(result["colwise_data"]) if colwise else _ptr(dummy),
         _ptr(result["colwise_scale"]) if colwise else _ptr(dummy_scale),
         make_ptr(Float32, noop.data_ptr()),
+        make_ptr(Float32, amax.data_ptr()),
         Int32(M), Float32(max_norm_rcp), stream,
     )
 
