@@ -369,31 +369,6 @@ def _cvt_f32x2_to_fp8x2(fp8_dtype: str):
     return cvt_f32x2_to_fp8e4m3x2
 
 
-@dsl_user_op
-def gemm_swizzled_scale_idx(i: Int32, j: Int32, num_tiles_X: Int32,
-                             *, loc=None, ip=None) -> Int32:
-    """Convert compact scale indices (i, j) to GEMM-swizzled linear index.
-
-    Matches swizzle.cuh::gemm_swizzled_scale_idx.
-    Layout: 128×4 tiles, internal ordering per cuBLAS MXFP8 spec:
-        (row_in_tile % 32) * 16 + (row_in_tile // 32) * 4 + col_in_tile
-    """
-    TILE_DIM_X = Int32(4)
-    TILE_DIM_Y = Int32(128)
-    TILE_SIZE = Int32(512)   # 4 * 128
-
-    tile_idx_X = j // TILE_DIM_X
-    tile_idx_Y = i // TILE_DIM_Y
-    idx_in_tile_X = j % TILE_DIM_X
-    idx_in_tile_Y = i % TILE_DIM_Y
-
-    idx = (tile_idx_Y * num_tiles_X + tile_idx_X) * TILE_SIZE
-    idx = idx + (idx_in_tile_Y % Int32(32)) * Int32(16)
-    idx = idx + (idx_in_tile_Y // Int32(32)) * Int32(4)
-    idx = idx + idx_in_tile_X
-    return idx
-
-
 # ---------------------------------------------------------------------------
 # Kernel configuration
 # ---------------------------------------------------------------------------
@@ -452,10 +427,24 @@ class MXFP8QuantizeSmemKernel:
         # Rowwise output tensors
         mO_row = cute.make_tensor(out_row_ptr, cute.make_layout((M, cfg.N), stride=(cfg.N, 1)))
         if cutlass.const_expr(cfg.with_gemm_swizzled_scales):
-            # Flat 1D scale tensor for swizzled writes
+            # Bake the cuBLAS MXFP8 scale-block swizzle into the tensor's
+            # cute layout — same logical (M, num_scale_cols) shape, but the
+            # bytes are reshuffled per the cuBLAS spec
+            # (https://docs.nvidia.com/cuda/cublas/#d-block-scaling-factors-layout).
+            # See tests/pytorch/mxfp8/swizzle_demo.svg for a visual.
+            #
+            # Decompose row i = i_lo + 32 * (i_hi + 4 * tile_Y), col j = j_lo + 4 * tile_X.
+            # Within one 128x4 tile, byte offset = i_lo*16 + i_hi*4 + j_lo.
+            # Tile-major outer dims add (tile_Y * num_tiles_X + tile_X) * 512.
+            num_tiles_M = (cfg.M + 127) // 128
+            num_tiles_SC = (num_scale_cols + 3) // 4   # = ceil(N / 128)
             mS_row = cute.make_tensor(
                 scale_row_ptr,
-                cute.make_layout((M * num_scale_cols,), stride=(1,)))
+                cute.make_layout(
+                    ((32, 4, num_tiles_M), (4, num_tiles_SC)),
+                    stride=((16, 4, num_tiles_SC * 512), (1, 512)),
+                ),
+            )
         else:
             mS_row = cute.make_tensor(
                 scale_row_ptr,
@@ -464,15 +453,22 @@ class MXFP8QuantizeSmemKernel:
         # Colwise output tensors
         mO_col = cute.make_tensor(out_col_ptr, cute.make_layout((M, cfg.N), stride=(cfg.N, 1)))
         if cutlass.const_expr(cfg.with_gemm_swizzled_scales):
+            # Same swizzle, but the 128-extent and 4-extent axes swap roles:
+            # the col axis (range cfg.N) gets the 32×4 inner decomp, the
+            # scale-row axis (range num_scale_rows) gets the 4-extent dim.
+            num_tiles_SR = (num_scale_rows + 3) // 4   # = ceil(M / 128)
+            num_tiles_N = (cfg.N + 127) // 128
             mS_col = cute.make_tensor(
                 scale_col_ptr,
-                cute.make_layout((num_scale_rows * cfg.N,), stride=(1,)))
+                cute.make_layout(
+                    ((4, num_tiles_SR), (32, 4, num_tiles_N)),
+                    stride=((1, 512), (16, 4, num_tiles_SR * 512)),
+                ),
+            )
         else:
             mS_col = cute.make_tensor(
                 scale_col_ptr,
                 cute.make_layout((num_scale_rows, cfg.N), stride=(cfg.N, 1)))
-            
-        # print(f"mX: {mX}\nmO_row: {mO_row}, mS_row: {mS_row}\nmO_col: {mO_col}, mS_col: {mS_col}\n")
 
         # Declare TMA descriptors on the host side.
         # make_tiled_tma_atom returns the UNTILED gmem tensor with basis strides.
@@ -805,17 +801,11 @@ class MXFP8QuantizeSmemKernel:
             for i in cutlass.range_constexpr(SCALE_DIM):
                 amax_c = cute.arch.fmax(amax_c, fabs_f32(in_c[i]))
 
-        # 2. E8M0 scale → gmem.
+        # 2. E8M0 scale → gmem. mS_col's layout already encodes the swizzle
+        # when cfg.with_gemm_swizzled_scales=True, so 2D access just works.
         biased_exp_c = float_to_e8m0(amax_c * max_norm_rcp)
         scale_row = base_row // SCALE_DIM
-        if cutlass.const_expr(cfg.with_gemm_swizzled_scales):
-            num_row_tiles = (cfg.M + 127) // 128
-            sw_idx = gemm_swizzled_scale_idx(
-                Int32(col_global), Int32(scale_row), Int32(num_row_tiles),
-            )
-            mS_col[sw_idx] = Uint8(biased_exp_c)
-        else:
-            mS_col[scale_row, col_global] = Uint8(biased_exp_c)
+        mS_col[scale_row, col_global] = Uint8(biased_exp_c)
 
         # 3. scale + FP8 cast → smem (one byte per (row, tidx)). Caller
         # flushes the whole (TILE_Y, TILE_X) tile with a TMA S2G.
@@ -931,16 +921,10 @@ class MXFP8QuantizeSmemKernel:
                 for e in cutlass.range_constexpr(PACK_SIZE):
                     amax_r = cute.arch.fmax(amax_r, fabs_f32(in_r[w][e]))
 
-        # 2. E8M0 scale → gmem.
+        # 2. E8M0 scale → gmem. mS_row's layout already encodes the swizzle
+        # when cfg.with_gemm_swizzled_scales=True, so 2D access just works.
         biased_exp_r = float_to_e8m0(amax_r * max_norm_rcp)
-        if cutlass.const_expr(cfg.with_gemm_swizzled_scales):
-            num_col_tiles = (cfg.N + 127) // 128
-            sw_idx = gemm_swizzled_scale_idx(
-                Int32(global_row), Int32(scale_col), Int32(num_col_tiles),
-            )
-            mS_row[sw_idx] = Uint8(biased_exp_r)
-        else:
-            mS_row[global_row, scale_col] = Uint8(biased_exp_r)
+        mS_row[global_row, scale_col] = Uint8(biased_exp_r)
 
         # 3. scale + packed fp8 cast → smem as one u32 per wave.
         inv_scale_r = exp2f_rcp(biased_exp_r)
@@ -1020,6 +1004,13 @@ def quantize_mxfp8_cutedsl(
     assert rowwise or colwise
     assert M % TILE_Y == 0, f"M={M} must be a multiple of {TILE_Y}"
     assert N % TILE_X == 0, f"N={N} must be a multiple of {TILE_X}"
+    if with_gemm_swizzled_scales:
+        # Swizzled tile is 128×4 in (M, N/32) → requires M and N to be
+        # multiples of 128 to avoid partial-tile padding (which the host
+        # would have to memset).
+        assert M % 128 == 0 and N % 128 == 0, (
+            f"with_gemm_swizzled_scales requires M and N multiples of 128, "
+            f"got M={M}, N={N}")
 
     cutlass_dtype = _torch_to_cutlass_dtype[x.dtype]
     max_norm_rcp = FP8E4M3_MAX_NORM_RCP if fp8_dtype == "e4m3" else FP8E5M2_MAX_NORM_RCP
