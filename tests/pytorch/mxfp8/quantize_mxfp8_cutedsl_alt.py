@@ -395,11 +395,63 @@ def _act_silu(x: Float32) -> Float32:
     return x / (Float32(1.0) + cute.arch.exp(-x))
 
 
+# ---- Backward (derivative) activations ----
+# Used by IS_DACT paths: kernel computes `elt = grad_y · dOP(act_in)`. The
+# entries below take `act_in` and return the derivative of the activation
+# evaluated at it; the kernel multiplies by `grad_y` afterwards. Constants
+# match TE's `transformer_engine/common/util/math.h` exactly so quantized
+# output is bit-equal to `tex.dgelu`/`tex.dsilu`/`tex.drelu`.
+@dsl_user_op
+def _act_drelu(x: Float32, *, loc=None, ip=None) -> Float32:
+    """drelu(x) = x > 0 ? 1.0 : 0.0 (NaN → 0 per IEEE OGT). Matches TE's drelu."""
+    pred = mlir_arith.cmpf(
+        mlir_arith.CmpFPredicate.OGT,
+        x.ir_value(loc=loc, ip=ip),
+        Float32(0.0).ir_value(loc=loc, ip=ip),
+        loc=loc, ip=ip,
+    )
+    return Float32(mlir_arith.select(
+        pred,
+        Float32(1.0).ir_value(loc=loc, ip=ip),
+        Float32(0.0).ir_value(loc=loc, ip=ip),
+        loc=loc, ip=ip,
+    ))
+
+
+def _act_dgelu(x: Float32) -> Float32:
+    """tanh-approximation GELU derivative.
+    Mirrors TE's dgelu: tanh(`A·x·(1 + κ·x²)`) — note the inner-arg shape
+    differs slightly from forward gelu's `x·(A + B·x²)` form (κ vs B); this
+    is TE's exact source, preserved for bit-exact match."""
+    A = Float32(0.79788456)
+    KAPPA = Float32(0.044715)
+    C = Float32(0.1070322243)   # = 3·κ·A, full-precision constant TE uses
+    inner = A * x * (Float32(1.0) + KAPPA * x * x)
+    tanh_out = cute.math.tanh(inner)
+    one_minus_tanh_sq = Float32(1.0) - tanh_out * tanh_out
+    return (Float32(0.5) * x * (one_minus_tanh_sq * (A + C * x * x))
+            + Float32(0.5) * (Float32(1.0) + tanh_out))
+
+
+def _act_dsilu(x: Float32) -> Float32:
+    """dsilu(x) = x · σ(x) · (1 - σ(x)) + σ(x). Matches TE's dsilu."""
+    s = Float32(1.0) / (Float32(1.0) + cute.arch.exp(-x))
+    return x * s * (Float32(1.0) - s) + s
+
+
 _ACTIVATIONS = {
     "relu": _act_relu,
     "gelu": _act_gelu,
     "silu": _act_silu,
+    "drelu": _act_drelu,
+    "dgelu": _act_dgelu,
+    "dsilu": _act_dsilu,
 }
+
+
+def _is_derivative_activation(name) -> bool:
+    """True if `name` is one of the registered backward (derivative) activations."""
+    return isinstance(name, str) and name.startswith("d") and name in _ACTIVATIONS
 
 
 @dsl_user_op
@@ -469,14 +521,19 @@ class MXFP8QuantizeConfig:
         # When True, kernel reduces max(|x|) across the full tensor and atomic-
         # maxes into a caller-provided 1-element f32 (delayed-scaling FP8).
         self.with_amax = with_amax
-        # Optional fused forward activation. When set, the kernel applies
-        # OP(x) per element before amax+cast; matches C++'s IS_ACT path.
-        # Must be a key in `_ACTIVATIONS` (or None for plain quantize).
+        # Optional fused activation. When set, the kernel applies OP per
+        # element before amax+cast. The "d"-prefixed entries are derivative
+        # activations — these select the IS_DACT path which loads a second
+        # input tensor (the saved forward `act_input`) and computes
+        # `elt = grad · dOP(act_in)`. Plain entries select the IS_ACT path.
         if activation is not None and activation not in _ACTIVATIONS:
             raise ValueError(
                 f"unknown activation {activation!r}; expected one of "
                 f"{sorted(_ACTIVATIONS)} or None")
         self.activation = activation
+        # Derived flag — fully determined by the activation name. The kernel
+        # entry point reads this to dispatch IS_DACT vs IS_ACT/none.
+        self.is_dact = _is_derivative_activation(activation)
         self.max_norm_rcp = FP8E4M3_MAX_NORM_RCP if fp8_dtype == "e4m3" else FP8E5M2_MAX_NORM_RCP
 
 
@@ -508,6 +565,7 @@ class MXFP8QuantizeSmemKernel:
     def __call__(
         self,
         x_ptr,
+        act_in_ptr,
         out_row_ptr, scale_row_ptr,
         out_col_ptr, scale_col_ptr,
         noop_ptr, amax_ptr,
@@ -519,6 +577,11 @@ class MXFP8QuantizeSmemKernel:
         num_scale_rows = cfg.M // SCALE_DIM
 
         mX = cute.make_tensor(x_ptr, cute.make_layout((M, cfg.N), stride=(cfg.N, 1)))
+        # Saved forward input for the IS_DACT path. Wrapper passes
+        # `act_input.data_ptr()` when caller supplied one and a dummy (==
+        # x.data_ptr()) otherwise — the kernel's IS_DACT branch is the only
+        # site that reads from this tensor, so a dummy is harmless.
+        mActIn = cute.make_tensor(act_in_ptr, cute.make_layout((M, cfg.N), stride=(cfg.N, 1)))
         # 1-element noop flag in gmem — the kernel reads this once and skips
         # all work if it's 1.0. Wrapper passes a zero-init dummy when caller
         # didn't supply a real flag, so the kernel always sees a valid ptr.
@@ -585,6 +648,12 @@ class MXFP8QuantizeSmemKernel:
         tma_atom, tma_src = cute.nvgpu.cpasync.make_tiled_tma_atom(
             op_load, mX, smem_tile_layout, cta_tiler, num_multicast=1,
         )
+        # Second input descriptor — only consumed by the IS_DACT path. When
+        # not is_dact, the wrapper aliases this onto x's data ptr so the
+        # descriptor is well-formed but never read.
+        tma_atom_act, tma_src_act = cute.nvgpu.cpasync.make_tiled_tma_atom(
+            op_load, mActIn, smem_tile_layout, cta_tiler, num_multicast=1,
+        )
 
         # Output: TMA S2G (uint8 smem → gmem) for both directions. Creating
         # both atoms unconditionally — if a direction is disabled the kernel
@@ -608,6 +677,7 @@ class MXFP8QuantizeSmemKernel:
             mX, mO_row, mS_row, mO_col, mS_col, mNoop, mAmax,
             max_norm_rcp, mX.element_type,
             tma_atom, tma_src,
+            tma_atom_act, tma_src_act,
             tma_atom_out_row, tma_dst_out_row,
             tma_atom_out_col, tma_dst_out_col,
         ).launch(
@@ -628,9 +698,12 @@ class MXFP8QuantizeSmemKernel:
         max_norm_rcp,
         dtype: cutlass.Constexpr[Type[cutlass.Numeric]],
         tma_atom, tma_src,
+        tma_atom_act, tma_src_act,   # only used by the IS_DACT path
         tma_atom_out_row, tma_dst_out_row,
         tma_atom_out_col, tma_dst_out_col,
     ):
+        cfg = self.cfg
+
         # ---- noop early-exit ----------------------------------------------
         # Skip the entire kernel if the framework signalled "no-op" via a
         # 1-element f32 flag in gmem. Used by CUDA Graphs / MoE to gate work
@@ -639,18 +712,32 @@ class MXFP8QuantizeSmemKernel:
         # before any smem alloc / mbarrier init.
         #
         # CuTeDSL forbids a runtime `return` inside @cute.kernel, so we wrap
-        # the body in `_kernel_main` and just guard the call here.
+        # the body in `_kernel_main*` and just guard the call here.
         # Bitcast f32 → i32 so we can compare against 1.0's bit pattern via
         # the well-tested int-compare path.
         noop_bits = _bitcast_f32_to_i32(mNoop[0])
         if noop_bits != Int32(0x3F800000):
-            self._kernel_main(
-                mX, mO_row, mS_row, mO_col, mS_col, mAmax,
-                max_norm_rcp, dtype,
-                tma_atom, tma_src,
-                tma_atom_out_row, tma_dst_out_row,
-                tma_atom_out_col, tma_dst_out_col,
-            )
+            # IS_DACT (backward activation) needs a paired G2S TMA load and a
+            # different inner compute (`elt = grad · dOP(act_in)`), so it
+            # gets its own top-level body — no nested const-expr branches
+            # threaded through the producer/consumer of the IS_ACT/plain path.
+            if cutlass.const_expr(cfg.is_dact):
+                self._kernel_main_dact(
+                    mX, mO_row, mS_row, mO_col, mS_col, mAmax,
+                    max_norm_rcp, dtype,
+                    tma_atom, tma_src,
+                    tma_atom_act, tma_src_act,
+                    tma_atom_out_row, tma_dst_out_row,
+                    tma_atom_out_col, tma_dst_out_col,
+                )
+            else:
+                self._kernel_main(
+                    mX, mO_row, mS_row, mO_col, mS_col, mAmax,
+                    max_norm_rcp, dtype,
+                    tma_atom, tma_src,
+                    tma_atom_out_row, tma_dst_out_row,
+                    tma_atom_out_col, tma_dst_out_col,
+                )
 
     @cute.jit
     def _kernel_main(
@@ -929,6 +1016,269 @@ class MXFP8QuantizeSmemKernel:
 
 
     @cute.jit
+    def _kernel_main_dact(
+        self,
+        mX, mO_row, mS_row, mO_col, mS_col, mAmax,
+        max_norm_rcp,
+        dtype: cutlass.Constexpr[Type[cutlass.Numeric]],
+        tma_atom, tma_src,
+        tma_atom_act, tma_src_act,
+        tma_atom_out_row, tma_dst_out_row,
+        tma_atom_out_col, tma_dst_out_col,
+    ):
+        """IS_DACT (backward activation) variant of `_kernel_main`.
+
+        Differs from the non-DACT body in three structural places, each
+        kept top-level (no nested const-expr through one shared loop):
+          - SharedStorage adds `sX_act` for the saved forward input.
+          - Pipeline `tx_count = 2 * tile_bytes` since each stage issues
+            two paired G2S copies that share one mbarrier.
+          - Producer issues 2 `cute.copy` calls per stage; consumer reads
+            from both `sX` (grad_y) and `sX_act` (forward `x`) and applies
+            `elt = grad_y · dOP(x)` via `_process_*_dact`.
+        """
+        cfg = self.cfg
+
+        # SharedStorage: same shape as non-DACT plus `sX_act`.
+        if cutlass.const_expr(cfg.rowwise and cfg.colwise):
+            @cute.struct
+            class SharedStorage:
+                mbar_storage: cute.struct.MemRange[cute.Int64, 2 * NUM_STAGES]
+                sX: cute.struct.Align[
+                    cute.struct.MemRange[dtype, TILE_Y * TILE_X * NUM_STAGES], 128
+                ]
+                sX_act: cute.struct.Align[
+                    cute.struct.MemRange[dtype, TILE_Y * TILE_X * NUM_STAGES], 128
+                ]
+                sO_row: cute.struct.Align[
+                    cute.struct.MemRange[Uint8, TILE_Y * TILE_X * NUM_STAGES], 128
+                ]
+                sO_col: cute.struct.Align[
+                    cute.struct.MemRange[Uint8, TILE_Y * TILE_X * NUM_STAGES], 128
+                ]
+                sAmax: cute.struct.MemRange[Float32, NUM_WARPS]
+        elif cutlass.const_expr(cfg.rowwise):
+            @cute.struct
+            class SharedStorage:
+                mbar_storage: cute.struct.MemRange[cute.Int64, 2 * NUM_STAGES]
+                sX: cute.struct.Align[
+                    cute.struct.MemRange[dtype, TILE_Y * TILE_X * NUM_STAGES], 128
+                ]
+                sX_act: cute.struct.Align[
+                    cute.struct.MemRange[dtype, TILE_Y * TILE_X * NUM_STAGES], 128
+                ]
+                sO_row: cute.struct.Align[
+                    cute.struct.MemRange[Uint8, TILE_Y * TILE_X * NUM_STAGES], 128
+                ]
+                sAmax: cute.struct.MemRange[Float32, NUM_WARPS]
+        else:
+            @cute.struct
+            class SharedStorage:
+                mbar_storage: cute.struct.MemRange[cute.Int64, 2 * NUM_STAGES]
+                sX: cute.struct.Align[
+                    cute.struct.MemRange[dtype, TILE_Y * TILE_X * NUM_STAGES], 128
+                ]
+                sX_act: cute.struct.Align[
+                    cute.struct.MemRange[dtype, TILE_Y * TILE_X * NUM_STAGES], 128
+                ]
+                sO_col: cute.struct.Align[
+                    cute.struct.MemRange[Uint8, TILE_Y * TILE_X * NUM_STAGES], 128
+                ]
+                sAmax: cute.struct.MemRange[Float32, NUM_WARPS]
+        smem = cutlass.utils.SmemAllocator()
+        storage = smem.allocate(SharedStorage)
+
+        sX = storage.sX.get_tensor(
+            cute.make_layout(
+                ((TILE_Y, TILE_X), NUM_STAGES),
+                stride=((TILE_X, 1), TILE_Y * TILE_X),
+            )
+        )
+        sX_act = storage.sX_act.get_tensor(
+            cute.make_layout(
+                ((TILE_Y, TILE_X), NUM_STAGES),
+                stride=((TILE_X, 1), TILE_Y * TILE_X),
+            )
+        )
+        if cutlass.const_expr(cfg.rowwise):
+            sO_row = storage.sO_row.get_tensor(
+                cute.make_layout(
+                    ((TILE_Y, TILE_X), NUM_STAGES),
+                    stride=((TILE_X, 1), TILE_Y * TILE_X),
+                )
+            )
+        if cutlass.const_expr(cfg.colwise):
+            sO_col = storage.sO_col.get_tensor(
+                cute.make_layout(
+                    ((TILE_Y, TILE_X), NUM_STAGES),
+                    stride=((TILE_X, 1), TILE_Y * TILE_X),
+                )
+            )
+
+        warp_idx = cute.arch.warp_idx()
+        warp_idx = cute.arch.make_warp_uniform(warp_idx)
+
+        if warp_idx == 0:
+            cute.nvgpu.cpasync.prefetch_descriptor(tma_atom)
+            cute.nvgpu.cpasync.prefetch_descriptor(tma_atom_act)
+
+        tidx, _, _ = cute.arch.thread_idx()
+        bidx, bidy, _ = cute.arch.block_idx()
+
+        producer_group = pipeline.CooperativeGroup(pipeline.Agent.Thread, 1)
+        num_warps = THREADS_PER_CHUNK // 32
+        consumer_group = pipeline.CooperativeGroup(pipeline.Agent.Thread, num_warps)
+
+        # Doubled tx_count — each stage's mbarrier expects bytes from BOTH
+        # cute.copy ops (grad and act_in). The two TMAs share one barrier
+        # and individually contribute their bytes via the hardware path.
+        tx_count = 2 * (TILE_Y * TILE_X * dtype.width // 8)
+
+        mainloop_pipeline = pipeline.PipelineTmaAsync.create(
+            barrier_storage=storage.mbar_storage.data_ptr(),
+            num_stages=NUM_STAGES,
+            producer_group=producer_group,
+            consumer_group=consumer_group,
+            tx_count=tx_count,
+            cta_layout_vmnk=None,
+        )
+
+        prod_state = pipeline.make_pipeline_state(
+            pipeline.PipelineUserType.Producer, NUM_STAGES
+        )
+        cons_state = pipeline.make_pipeline_state(
+            pipeline.PipelineUserType.Consumer, NUM_STAGES
+        )
+
+        M = mX.shape[0]
+        N = mX.shape[1]
+        num_tiles = cutlass.min(
+            NUM_TILES,
+            cute.ceil_div(M - bidy * TILE_Y * NUM_TILES, TILE_Y),
+        )
+
+        gX_tiled = cute.zipped_divide(tma_src, (TILE_Y, TILE_X))
+        gActIn_tiled = cute.zipped_divide(tma_src_act, (TILE_Y, TILE_X))
+
+        tXsX, tXgX = cute.nvgpu.cpasync.tma_partition(
+            tma_atom, 0, cute.make_layout(1), sX, gX_tiled,
+        )
+        tXsX_act, tXgActIn = cute.nvgpu.cpasync.tma_partition(
+            tma_atom_act, 0, cute.make_layout(1), sX_act, gActIn_tiled,
+        )
+
+        if cutlass.const_expr(cfg.rowwise):
+            gO_row_tiled = cute.zipped_divide(tma_dst_out_row, (TILE_Y, TILE_X))
+            tXsO_row, tXgO_row = cute.nvgpu.cpasync.tma_partition(
+                tma_atom_out_row, 0, cute.make_layout(1), sO_row, gO_row_tiled,
+            )
+        if cutlass.const_expr(cfg.colwise):
+            gO_col_tiled = cute.zipped_divide(tma_dst_out_col, (TILE_Y, TILE_X))
+            tXsO_col, tXgO_col = cute.nvgpu.cpasync.tma_partition(
+                tma_atom_out_col, 0, cute.make_layout(1), sO_col, gO_col_tiled,
+            )
+
+        cute.arch.sync_threads()
+
+        # ---- Producer: warp 0 issues TWO TMA copies per tile, sharing the
+        # same barrier. With tx_count = 2 * tile_bytes, the barrier is
+        # satisfied only when both copies have completed.
+        if warp_idx == 0:
+            for stage in cutlass.range(num_tiles, unroll=1):
+                mainloop_pipeline.producer_acquire(prod_state)
+                tile_y = bidy * NUM_TILES + stage
+                barrier = mainloop_pipeline.producer_get_barrier(prod_state)
+                cute.copy(
+                    tma_atom,
+                    tXgX[(None, (tile_y, bidx))],
+                    tXsX[(None, prod_state.index)],
+                    tma_bar_ptr=barrier,
+                )
+                cute.copy(
+                    tma_atom_act,
+                    tXgActIn[(None, (tile_y, bidx))],
+                    tXsX_act[(None, prod_state.index)],
+                    tma_bar_ptr=barrier,
+                )
+                mainloop_pipeline.producer_commit(prod_state)
+                prod_state.advance()
+
+        if cutlass.const_expr(cfg.with_amax):
+            block_amax = Float32(0.0)
+
+        # ---- Consumer: process each completed tile, reading both inputs.
+        for stage in cutlass.range(num_tiles, unroll=1):
+            mainloop_pipeline.consumer_wait(cons_state)
+            sX_tile = sX[(None, cons_state.index)]
+            sX_act_tile = sX_act[(None, cons_state.index)]
+            base_row = (bidy * NUM_TILES + stage) * TILE_Y
+
+            if cutlass.const_expr(cfg.colwise):
+                sO_col_tile = sO_col[(None, cons_state.index)]
+                amax_c = self._process_colwise_dact(
+                    sX_tile, sX_act_tile, sO_col_tile,
+                    base_row, bidx, tidx, mS_col, max_norm_rcp,
+                )
+                if cutlass.const_expr(cfg.with_amax):
+                    block_amax = cute.arch.fmax(block_amax, amax_c)
+            if cutlass.const_expr(cfg.rowwise):
+                sO_row_tile = sO_row[(None, cons_state.index)]
+                amax_r = self._process_rowwise_dact(
+                    sX_tile, sX_act_tile, sO_row_tile,
+                    base_row, bidx, tidx, mS_row, max_norm_rcp,
+                )
+                if cutlass.const_expr(cfg.with_amax):
+                    block_amax = cute.arch.fmax(block_amax, amax_r)
+
+            cute.arch.fence_proxy(
+                cute.arch.ProxyKind.async_shared,
+                space=cute.arch.SharedSpace.shared_cta,
+            )
+            cute.arch.sync_threads()
+
+            if warp_idx == 0:
+                tile_y = bidy * NUM_TILES + stage
+                if cutlass.const_expr(cfg.rowwise):
+                    cute.copy(
+                        tma_atom_out_row,
+                        tXsO_row[(None, cons_state.index)],
+                        tXgO_row[(None, (tile_y, bidx))],
+                    )
+                if cutlass.const_expr(cfg.colwise):
+                    cute.copy(
+                        tma_atom_out_col,
+                        tXsO_col[(None, cons_state.index)],
+                        tXgO_col[(None, (tile_y, bidx))],
+                    )
+                cute.arch.cp_async_bulk_commit_group()
+
+            mainloop_pipeline.consumer_release(cons_state)
+            cons_state.advance()
+
+        cute.arch.cp_async_bulk_wait_group(0, read=False)
+
+        # Same amax epilogue as _kernel_main — fmax over warps then atomic.
+        if cutlass.const_expr(cfg.with_amax):
+            warp_amax = cute.arch.warp_redux_sync(block_amax, kind="fmax")
+            sAmax = storage.sAmax.get_tensor(cute.make_layout(NUM_WARPS))
+            lane_idx = tidx % 32
+            if lane_idx == 0:
+                sAmax[warp_idx] = warp_amax
+            cute.arch.sync_threads()
+            if tidx == 0:
+                cta_amax = Float32(0.0)
+                for w in cutlass.range_constexpr(NUM_WARPS):
+                    cta_amax = cute.arch.fmax(cta_amax, sAmax[w])
+                amax_i32 = cute.make_tensor(
+                    cute.recast_ptr(mAmax.iterator, dtype=Int32),
+                    cute.make_layout(1),
+                )
+                cute.arch.atomic_max(
+                    amax_i32.iterator, _bitcast_f32_to_i32(cta_amax),
+                )
+
+
+    @cute.jit
     def _process_colwise(
         self,
         sX_tile,        # (TILE_Y, TILE_X) bf16/fp16 smem view, post-TMA
@@ -1173,6 +1523,148 @@ class MXFP8QuantizeSmemKernel:
         # across stages for the global per-tensor amax (only when with_amax).
         return amax_r
 
+    @cute.jit
+    def _process_colwise_dact(
+        self,
+        sX_tile,         # (TILE_Y, TILE_X) — grad_y in IType
+        sX_act_tile,     # (TILE_Y, TILE_X) — saved forward `x` in IType
+        sO_col_tile,     # (TILE_Y, TILE_X) uint8 colwise FP8 output
+        base_row, bidx, tidx,
+        mS_col, max_norm_rcp,
+    ):
+        """IS_DACT colwise pass: `elt = grad_y · dOP(act_in)`. Always takes
+        the scalar f32 path (the bf16/fp16 fast path doesn't apply once we
+        need to evaluate dOP in f32). Mirrors `_process_colwise` for
+        scaling/cast/amax bookkeeping."""
+        cfg = self.cfg
+        block_off_X = bidx * TILE_X
+        col_global = block_off_X + tidx
+
+        sX_flat = cute.make_tensor(
+            sX_tile.iterator,
+            cute.make_layout((TILE_Y, TILE_X), stride=(TILE_X, 1)),
+        )
+        sX_act_flat = cute.make_tensor(
+            sX_act_tile.iterator,
+            cute.make_layout((TILE_Y, TILE_X), stride=(TILE_X, 1)),
+        )
+        sO_col_flat = cute.make_tensor(
+            sO_col_tile.iterator,
+            cute.make_layout((TILE_Y, TILE_X), stride=(TILE_X, 1)),
+        )
+
+        op = _ACTIVATIONS[cfg.activation]   # the derivative function
+        # Load both inputs as f32, compute elt = grad · dOP(act_in), then
+        # truncate through IType for bf16/fp16 to match C++ behaviour.
+        in_c = []
+        kit = _packed16_kit(cfg.dtype) if _is_packed16(cfg.dtype) else None
+        for i in cutlass.range_constexpr(SCALE_DIM):
+            grad = Float32(sX_flat[i, tidx])
+            actin = Float32(sX_act_flat[i, tidx])
+            elt = grad * op(actin)
+            if cutlass.const_expr(_is_packed16(cfg.dtype)):
+                elt = kit.truncate_f32(elt)
+            in_c.append(elt)
+
+        amax_c = Float32(0.0)
+        for i in cutlass.range_constexpr(SCALE_DIM):
+            amax_c = cute.arch.fmax(amax_c, fabs_f32(in_c[i]))
+
+        # E8M0 scale → gmem (mS_col layout encodes swizzle if requested).
+        biased_exp_c = float_to_e8m0(amax_c * max_norm_rcp)
+        scale_row = base_row // SCALE_DIM
+        mS_col[scale_row, col_global] = Uint8(biased_exp_c)
+
+        # Scale + FP8 cast → smem.
+        inv_scale_c = exp2f_rcp(biased_exp_c)
+        cvt_to_fp8 = _cvt_f32_to_fp8(cfg.fp8_dtype)
+        for i in cutlass.range_constexpr(SCALE_DIM):
+            sO_col_flat[i, tidx] = Uint8(cvt_to_fp8(in_c[i] * inv_scale_c))
+
+        return amax_c
+
+    @cute.jit
+    def _process_rowwise_dact(
+        self,
+        sX_tile,
+        sX_act_tile,
+        sO_row_tile,
+        base_row, bidx, tidx,
+        mS_row, max_norm_rcp,
+    ):
+        """IS_DACT rowwise pass: `elt = grad_y · dOP(act_in)`. Same thread
+        layout / wave / bank-swizzle as `_process_rowwise`, scalar f32 path.
+        """
+        cfg = self.cfg
+
+        rowwise_thread_layout = cute.make_layout((TILE_Y, 2), stride=(2, 1))
+        tid_Y, tid_X = rowwise_thread_layout.get_flat_coord(tidx)
+        bank_group = (tidx % THREADS_PER_WARP) // THREADS_PER_BANK
+
+        global_row = base_row + tid_Y
+        scale_col = bidx * 2 + tid_X
+        col_base_local = tid_X * SCALE_DIM
+
+        sO_u32_ptr = cute.recast_ptr(sO_row_tile.iterator, dtype=Uint32)
+        sO_u32 = cute.make_tensor(
+            sO_u32_ptr,
+            cute.make_layout(
+                (TILE_Y, TILE_X // 4), stride=(TILE_X // 4, 1),
+            ),
+        )
+
+        sX_rw = cute.make_tensor(
+            sX_tile.iterator,
+            cute.make_layout(
+                (TILE_Y, 2, SCALE_DIM),
+                stride=(TILE_X, SCALE_DIM, 1),
+            ),
+        )
+        sX_act_rw = cute.make_tensor(
+            sX_act_tile.iterator,
+            cute.make_layout(
+                (TILE_Y, 2, SCALE_DIM),
+                stride=(TILE_X, SCALE_DIM, 1),
+            ),
+        )
+
+        op = _ACTIVATIONS[cfg.activation]
+        kit = _packed16_kit(cfg.dtype) if _is_packed16(cfg.dtype) else None
+
+        in_r = [[None] * PACK_SIZE for _ in range(WAVES)]
+        for w in cutlass.range_constexpr(WAVES):
+            swz = ((w + bank_group) * PACK_SIZE) % SCALE_DIM
+            for e in cutlass.range_constexpr(PACK_SIZE):
+                grad = Float32(sX_rw[tid_Y, tid_X, swz + e])
+                actin = Float32(sX_act_rw[tid_Y, tid_X, swz + e])
+                elt = grad * op(actin)
+                if cutlass.const_expr(_is_packed16(cfg.dtype)):
+                    elt = kit.truncate_f32(elt)
+                in_r[w][e] = elt
+
+        amax_r = Float32(0.0)
+        for w in cutlass.range_constexpr(WAVES):
+            for e in cutlass.range_constexpr(PACK_SIZE):
+                amax_r = cute.arch.fmax(amax_r, fabs_f32(in_r[w][e]))
+
+        biased_exp_r = float_to_e8m0(amax_r * max_norm_rcp)
+        mS_row[global_row, scale_col] = Uint8(biased_exp_r)
+
+        inv_scale_r = exp2f_rcp(biased_exp_r)
+        cvt_f32x2 = _cvt_f32x2_to_fp8x2(cfg.fp8_dtype)
+        for w in cutlass.range_constexpr(WAVES):
+            swz = ((w + bank_group) * PACK_SIZE) % SCALE_DIM
+            v0 = in_r[w][0] * inv_scale_r
+            v1 = in_r[w][1] * inv_scale_r
+            v2 = in_r[w][2] * inv_scale_r
+            v3 = in_r[w][3] * inv_scale_r
+            p01 = cvt_f32x2(v1, v0)
+            p23 = cvt_f32x2(v3, v2)
+            quad = (p23 << Int32(16)) | p01
+            sO_u32[tid_Y, (col_base_local + swz) // 4] = Uint32(quad)
+
+        return amax_r
+
 
 # ---------------------------------------------------------------------------
 # Compilation cache
@@ -1187,9 +1679,11 @@ def _get_compiled_kernel(cfg, stream):
         kernel_obj = MXFP8QuantizeSmemKernel(cfg)
         u8_ptr = make_ptr(Uint8, 16, cute.AddressSpace.gmem, assumed_align=16)
         f32_ptr = make_ptr(Float32, 16, cute.AddressSpace.gmem, assumed_align=4)
+        in_ptr = make_ptr(cfg.dtype, 16, cute.AddressSpace.gmem, assumed_align=16)
         compiled = cute.compile[(GPUArch("sm_100a"),)](
             kernel_obj,
-            make_ptr(cfg.dtype, 16, cute.AddressSpace.gmem, assumed_align=16),
+            in_ptr,           # x_ptr (grad_y when IS_DACT)
+            in_ptr,           # act_in_ptr (== x_ptr alias when not IS_DACT)
             u8_ptr, u8_ptr,   # rowwise data, scale
             u8_ptr, u8_ptr,   # colwise data, scale
             f32_ptr,          # noop flag (1-element f32)
@@ -1233,10 +1727,17 @@ def quantize_mxfp8_cutedsl(
     noop: torch.Tensor = None,
     amax: torch.Tensor = None,
     activation: str = None,
+    act_input: torch.Tensor = None,
 ) -> dict:
     """Quantize a 2D tensor to MXFP8 format using CuTeDSL kernels with smem tiling.
 
     Args:
+        activation: forward fused activation ('relu'/'gelu'/'silu') or
+            backward derivative ('drelu'/'dgelu'/'dsilu'), or None.
+        act_input: REQUIRED when activation is a derivative. Holds the
+            saved forward input `x` from the forward pass; the kernel
+            evaluates `dOP(act_input)` and multiplies by `x` (the upstream
+            grad). Same shape & dtype as `x`. Ignored otherwise.
         noop: optional 1-element f32 cuda tensor. If `noop[0] == 1.0` at launch
             time, the kernel returns immediately and output buffers are left as
             allocated (uninitialised). Used for CUDA-Graph-friendly skip — see
@@ -1275,6 +1776,21 @@ def quantize_mxfp8_cutedsl(
         # Reuse the noop dummy slot — the kernel never reads/writes it when
         # cfg.with_amax is False, so any non-null pointer is fine.
         amax = _noop_dummy_for(x.device)
+    is_dact = _is_derivative_activation(activation)
+    if is_dact:
+        assert act_input is not None, (
+            f"activation={activation!r} is a derivative — caller must pass "
+            f"act_input (saved forward x).")
+        assert act_input.is_cuda and act_input.shape == x.shape and \
+               act_input.dtype == x.dtype and act_input.is_contiguous(), (
+            f"act_input must be a contiguous {x.dtype} cuda tensor with "
+            f"shape={tuple(x.shape)}, got shape={tuple(act_input.shape)}, "
+            f"dtype={act_input.dtype}")
+    else:
+        # Alias to x — the kernel ignores act_in_ptr in non-DACT paths, so
+        # any valid (well-formed) pointer is fine. Aliasing avoids needing
+        # a same-size dummy buffer.
+        act_input = x
 
     cutlass_dtype = _torch_to_cutlass_dtype[x.dtype]
     max_norm_rcp = FP8E4M3_MAX_NORM_RCP if fp8_dtype == "e4m3" else FP8E5M2_MAX_NORM_RCP
@@ -1305,6 +1821,7 @@ def quantize_mxfp8_cutedsl(
 
     compiled(
         make_ptr(cutlass_dtype, x.data_ptr()),
+        make_ptr(cutlass_dtype, act_input.data_ptr()),
         _ptr(result["rowwise_data"]) if rowwise else _ptr(dummy),
         _ptr(result["rowwise_scale"]) if rowwise else _ptr(dummy_scale),
         _ptr(result["colwise_data"]) if colwise else _ptr(dummy),
