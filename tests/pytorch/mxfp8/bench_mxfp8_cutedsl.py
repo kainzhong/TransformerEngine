@@ -49,14 +49,85 @@ def parse_shapes(shapes_str: str):
     return shapes
 
 
-def reference_quantize(x, rowwise, colwise):
-    """C++ kernel path via TE's MXFP8Quantizer."""
-    q = MXFP8Quantizer(
-        fp8_dtype=tex.DType.kFloat8E4M3,
+_TEX_FORWARD_ACT = {"gelu": tex.gelu, "silu": tex.silu, "relu": tex.relu}
+_TEX_BACKWARD_ACT = {"dgelu": tex.dgelu, "dsilu": tex.dsilu, "drelu": tex.drelu}
+_TEX_DBIAS_DACT = {
+    "dbias_dgelu": tex.dbias_dgelu,
+    "dbias_dsilu": tex.dbias_dsilu,
+    "dbias_drelu": tex.dbias_drelu,
+}
+
+# combo → (needs_act_input, dsl_activation_kwarg, dsl_compute_dbias)
+COMBOS = {
+    # Plain quantize — matches MXFP8Quantizer(...).__call__.
+    "plain":         (False, None,    False),
+    # Forward fused activation — tex.<name>.
+    "gelu":          (False, "gelu",  False),
+    "silu":          (False, "silu",  False),
+    "relu":          (False, "relu",  False),
+    # Backward activation only — tex.<name>(grad, act_in, q).
+    "dgelu":         (True,  "dgelu", False),
+    "dsilu":         (True,  "dsilu", False),
+    "drelu":         (True,  "drelu", False),
+    # Backward activation + bias gradient — tex.dbias_<name>(grad, act_in, q).
+    "dbias_dgelu":   (True,  "dgelu", True),
+    "dbias_dsilu":   (True,  "dsilu", True),
+    "dbias_drelu":   (True,  "drelu", True),
+}
+
+
+_FP8_DTYPES = {
+    "e4m3": tex.DType.kFloat8E4M3,
+    "e5m2": tex.DType.kFloat8E5M2,
+}
+_TORCH_IN_DTYPES = {
+    "bf16": torch.bfloat16,
+    "fp16": torch.float16,
+    "fp32": torch.float32,
+}
+
+
+def make_reference_fn(combo, x, act_in, rowwise, colwise,
+                      fp8_dtype="e4m3", swizzle=False, with_amax=False):
+    """Return a 0-arg callable that invokes the C++ TE reference for `combo`."""
+    quantizer = MXFP8Quantizer(
+        fp8_dtype=_FP8_DTYPES[fp8_dtype],
         rowwise=rowwise,
         columnwise=colwise,
     )
-    return q(x)
+    if swizzle:
+        quantizer.optimize_for_gemm = True
+    # TE's MXFP8Quantizer doesn't expose a per-tensor amax knob via Python
+    # (only via the C++ tensor.amax pointer). The DSL path-with-amax is
+    # benchmarked against TE's plain path; the extra DSL work is the warp
+    # redux + atomic. Caller passes with_amax=True only on the DSL side.
+    if combo == "plain":
+        return lambda: quantizer(x)
+    if combo in _TEX_FORWARD_ACT:
+        op = _TEX_FORWARD_ACT[combo]
+        return lambda: op(x, quantizer)
+    if combo in _TEX_BACKWARD_ACT:
+        op = _TEX_BACKWARD_ACT[combo]
+        return lambda: op(x, act_in, quantizer)
+    if combo in _TEX_DBIAS_DACT:
+        op = _TEX_DBIAS_DACT[combo]
+        return lambda: op(x, act_in, quantizer)
+    raise ValueError(f"unknown combo {combo!r}")
+
+
+def make_dsl_fn(combo, x, act_in, rowwise, colwise,
+                fp8_dtype="e4m3", swizzle=False, amax=None):
+    """Return a 0-arg callable that invokes the CuTeDSL kernel for `combo`."""
+    _, activation, compute_dbias = COMBOS[combo]
+    kwargs = dict(rowwise=rowwise, colwise=colwise,
+                  fp8_dtype=fp8_dtype,
+                  with_gemm_swizzled_scales=swizzle,
+                  amax=amax)
+    if activation is None:
+        return lambda: quantize_mxfp8_cutedsl(x, **kwargs)
+    kwargs.update(activation=activation, act_input=act_in,
+                  compute_dbias=compute_dbias)
+    return lambda: quantize_mxfp8_cutedsl(x, **kwargs)
 
 
 def bench_once(name, fn, warmup, iters):
@@ -82,43 +153,73 @@ def bench_once(name, fn, warmup, iters):
     return total_ms / iters
 
 
-def bench_shape(M, N, rowwise, colwise, warmup, iters):
+def bench_shape(M, N, rowwise, colwise, warmup, iters, combo="plain",
+                in_dtype="bf16", fp8_dtype="e4m3", swizzle=False,
+                with_amax=False):
     torch.manual_seed(0)
     torch.cuda.manual_seed(0)
-    x = torch.randn(M, N, dtype=torch.bfloat16, device="cuda")
+    in_dt = _TORCH_IN_DTYPES[in_dtype]
+    x = torch.randn(M, N, dtype=in_dt, device="cuda")
+    needs_act_input, _, has_dbias = COMBOS[combo]
+    act_in = (torch.randn(M, N, dtype=in_dt, device="cuda")
+              if needs_act_input else None)
+    amax_buf = (torch.zeros(1, dtype=torch.float32, device="cuda")
+                if with_amax else None)
 
     dir_label = "both" if (rowwise and colwise) else ("row" if rowwise else "col")
+    tag = f"{combo}_{in_dtype}_{fp8_dtype}"
+    if swizzle:
+        tag += "_sw"
+    if with_amax:
+        tag += "_am"
 
     # Per-shape outer NVTX range so each shape is clearly grouped in the timeline
-    nvtx.range_push(f"shape_{M}x{N}_{dir_label}")
+    nvtx.range_push(f"shape_{M}x{N}_{dir_label}_{tag}")
+
+    ref_fn = make_reference_fn(combo, x, act_in, rowwise, colwise,
+                               fp8_dtype=fp8_dtype, swizzle=swizzle,
+                               with_amax=with_amax)
+    dsl_fn = make_dsl_fn(combo, x, act_in, rowwise, colwise,
+                         fp8_dtype=fp8_dtype, swizzle=swizzle,
+                         amax=amax_buf)
 
     # Warm the CuTeDSL JIT cache once (not counted against bench)
     nvtx.range_push("warm_jit")
-    quantize_mxfp8_cutedsl(x, rowwise=rowwise, colwise=colwise)
+    dsl_fn()
     torch.cuda.synchronize()
     nvtx.range_pop()
 
     ref_ms = bench_once(
-        f"cpp_ref_{M}x{N}_{dir_label}",
-        lambda: reference_quantize(x, rowwise, colwise),
-        warmup, iters,
+        f"cpp_ref_{M}x{N}_{dir_label}_{tag}",
+        ref_fn, warmup, iters,
     )
 
     dsl_ms = bench_once(
-        f"cutedsl_{M}x{N}_{dir_label}",
-        lambda: quantize_mxfp8_cutedsl(x, rowwise=rowwise, colwise=colwise),
-        warmup, iters,
+        f"cutedsl_{M}x{N}_{dir_label}_{tag}",
+        dsl_fn, warmup, iters,
     )
 
     nvtx.range_pop()  # close shape_ range
 
-    bytes_in = x.numel() * x.element_size()
-    bytes_out = M * N * 1  # FP8 is 1 byte
-    bytes_scale = (M * (N // 32)) if rowwise else 0
-    bytes_scale += ((M // 32) * N) if colwise else 0
-    if rowwise and colwise:
-        bytes_out *= 2
-    total_bytes = bytes_in + bytes_out + bytes_scale
+    in_bytes_per_elt = x.element_size()
+    bytes_in = M * N * in_bytes_per_elt
+    if needs_act_input:
+        bytes_in += M * N * in_bytes_per_elt
+    bytes_out = 0
+    bytes_scale = 0
+    if rowwise:
+        bytes_out += M * N * 1                # rowwise FP8 data (uint8)
+        bytes_scale += M * (N // 32)          # rowwise e8m0 scales
+    if colwise:
+        bytes_out += M * N * 1                # colwise FP8 data
+        bytes_scale += (M // 32) * N          # colwise e8m0 scales
+    bytes_dbias = 0
+    if has_dbias:
+        # Approximate: workspace = blocks_Y · N · 4 (f32). The reduce step
+        # reads it back and writes a tiny dbias[N] in input dtype.
+        blocks_Y = (M + 63) // 64
+        bytes_dbias = blocks_Y * N * 4 + N * in_bytes_per_elt
+    total_bytes = bytes_in + bytes_out + bytes_scale + bytes_dbias
 
     def bw(ms):
         return total_bytes / (ms * 1e-3) / 1e9  # GB/s
@@ -126,6 +227,8 @@ def bench_shape(M, N, rowwise, colwise, warmup, iters):
     return {
         "shape": (M, N),
         "dir": dir_label,
+        "combo": combo,
+        "tag": tag,
         "ref_ms": ref_ms,
         "dsl_ms": dsl_ms,
         "ref_bw": bw(ref_ms),
@@ -149,6 +252,24 @@ def main():
     parser.add_argument("--direction", choices=["row", "col", "both", "all"],
                         default="all",
                         help="Which direction(s) to benchmark")
+    parser.add_argument("--combo", type=str, default="plain",
+                        choices=sorted(COMBOS),
+                        help=f"Operation: one of {sorted(COMBOS)}. "
+                             "Use 'all' to sweep multiple at once.")
+    parser.add_argument("--combos", type=str, default=None,
+                        help="Comma-separated list of combos (overrides --combo)")
+    parser.add_argument("--in-dtype", type=str, default="bf16",
+                        choices=sorted(_TORCH_IN_DTYPES))
+    parser.add_argument("--in-dtypes", type=str, default=None,
+                        help="Comma-separated list of input dtypes")
+    parser.add_argument("--fp8", type=str, default="e4m3",
+                        choices=sorted(_FP8_DTYPES))
+    parser.add_argument("--fp8s", type=str, default=None,
+                        help="Comma-separated list of fp8 output dtypes")
+    parser.add_argument("--swizzle", action="store_true",
+                        help="Enable WITH_GEMM_SWIZZLED_SCALES")
+    parser.add_argument("--with-amax", action="store_true",
+                        help="Enable per-tensor amax accumulation (DSL only)")
     parser.add_argument("--preset", type=str, default=None,
                         choices=sorted(SHAPE_PRESETS),
                         help=f"Shape preset: one of {sorted(SHAPE_PRESETS)}")
@@ -182,8 +303,26 @@ def main():
     else:
         dirs = [("both", True, True)]
 
-    print(f"Benchmarking {len(shapes)} shape(s) × {len(dirs)} direction(s)")
+    if args.combos:
+        combos = [c.strip() for c in args.combos.split(",")]
+        for c in combos:
+            if c not in COMBOS:
+                print(f"unknown combo: {c}", file=sys.stderr)
+                return 1
+    else:
+        combos = [args.combo]
+
+    in_dtypes = ([d.strip() for d in args.in_dtypes.split(",")]
+                 if args.in_dtypes else [args.in_dtype])
+    fp8s = ([d.strip() for d in args.fp8s.split(",")]
+            if args.fp8s else [args.fp8])
+
+    print(f"Benchmarking {len(shapes)} shape(s) × {len(dirs)} direction(s) × "
+          f"{len(combos)} combo(s) × {len(in_dtypes)} in-dtype × "
+          f"{len(fp8s)} fp8")
     print(f"  warmup={args.warmup} iters={args.iters}")
+    print(f"  combos: {combos}  in_dtypes: {in_dtypes}  fp8: {fp8s}  "
+          f"swizzle={args.swizzle}  with_amax={args.with_amax}")
     for m, n in shapes:
         print(f"  - {m}x{n}")
     print()
@@ -192,33 +331,39 @@ def main():
     torch.cuda.profiler.start()
 
     results = []
-    for M, N in shapes:
-        for _, rw, cw in dirs:
-            r = bench_shape(M, N, rw, cw, args.warmup, args.iters)
-            results.append(r)
+    for combo in combos:
+        for in_dtype in in_dtypes:
+            for fp8 in fp8s:
+                for M, N in shapes:
+                    for _, rw, cw in dirs:
+                        r = bench_shape(M, N, rw, cw, args.warmup, args.iters,
+                                        combo, in_dtype=in_dtype, fp8_dtype=fp8,
+                                        swizzle=args.swizzle,
+                                        with_amax=args.with_amax)
+                        results.append(r)
 
     torch.cuda.profiler.stop()
 
     # Print summary
     print()
-    print(f"{'shape':>12}  {'dir':>4}  {'C++ us':>9}  {'DSL us':>9}  "
+    print(f"{'tag':>34}  {'shape':>12}  {'dir':>4}  {'C++ us':>9}  {'DSL us':>9}  "
           f"{'C++ GB/s':>9}  {'DSL GB/s':>9}  {'DSL/C++':>7}")
-    print("-" * 80)
+    print("-" * 110)
     for r in results:
         M, N = r["shape"]
         speedup = r["ref_ms"] / r["dsl_ms"]
-        print(f"{M:6d}x{N:<5d}  {r['dir']:>4}  "
+        print(f"{r['tag']:>34}  {M:6d}x{N:<5d}  {r['dir']:>4}  "
               f"{r['ref_ms']*1000:9.2f}  {r['dsl_ms']*1000:9.2f}  "
               f"{r['ref_bw']:9.1f}  {r['dsl_bw']:9.1f}  {speedup:6.2f}x")
 
     if args.csv:
         with open(args.csv, "w", newline="") as f:
             w = csv.writer(f)
-            w.writerow(["M", "N", "dir", "ref_us", "dsl_us",
+            w.writerow(["tag", "combo", "M", "N", "dir", "ref_us", "dsl_us",
                         "ref_gbps", "dsl_gbps", "speedup", "bytes"])
             for r in results:
                 M, N = r["shape"]
-                w.writerow([M, N, r["dir"],
+                w.writerow([r["tag"], r["combo"], M, N, r["dir"],
                             f"{r['ref_ms']*1000:.3f}",
                             f"{r['dsl_ms']*1000:.3f}",
                             f"{r['ref_bw']:.2f}",
