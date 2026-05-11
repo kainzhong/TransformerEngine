@@ -1,0 +1,346 @@
+<svg viewBox="0 0 1100 1309" xmlns="http://www.w3.org/2000/svg" font-family="sans-serif">
+  <rect width="1100" height="1309" fill="#fafafa"/>
+  <text x="20" y="32" font-size="20" font-weight="bold" fill="#1f2937">MXFP8 CuTeDSL — DSL / C++ kernel-only ratio by direction</text>
+  <text x="20" y="54" font-size="13" fill="#4b5563">DSL faster ↑ above 1.0   ·   DSL slower ↓ below 1.0   ·   bf16 → e4m3   ·   nsys cuda_gpu_kern_sum, B200, 10 warmup + 100 iters</text>
+  <g transform="translate(20, 70)">
+    <rect x="0" y="0" width="14" height="14" fill="#22c55e" stroke="#15803d"/>
+    <text x="20" y="11" font-size="11" fill="#374151">OP = relu</text>
+    <rect x="130" y="0" width="14" height="14" fill="#3b82f6" stroke="#1d4ed8"/>
+    <text x="150" y="11" font-size="11" fill="#374151">OP = gelu</text>
+    <rect x="260" y="0" width="14" height="14" fill="#f59e0b" stroke="#b45309"/>
+    <text x="280" y="11" font-size="11" fill="#374151">OP = silu</text>
+    <rect x="390" y="0" width="14" height="14" fill="#6b7280" stroke="#374151"/>
+    <text x="410" y="11" font-size="11" fill="#374151">no activation</text>
+    <rect x="540" y="0" width="14" height="14" fill="#374151" fill-opacity="0.55" stroke="#1f2937"/>
+    <text x="560" y="11" font-size="11" fill="#374151">4k²</text>
+    <rect x="615" y="0" width="14" height="14" fill="#374151" fill-opacity="0.78" stroke="#1f2937"/>
+    <text x="635" y="11" font-size="11" fill="#374151">8k²</text>
+    <rect x="690" y="0" width="14" height="14" fill="#374151" fill-opacity="1.0" stroke="#1f2937"/>
+    <text x="710" y="11" font-size="11" fill="#374151">16k²</text>
+  </g>
+  <text x="20" y="93" font-size="11" fill="#4b5563" font-style="italic">IS_ACT[op]: forward act(x) + cast      ·      IS_DACT[op]: grad · d_act(act_in) + cast      ·      IS_DBIAS: also reduce sum over M to produce db</text>
+<g transform="translate(15, 115)">
+  <rect width="1070" height="380" fill="#ffffff" stroke="#e5e7eb"/>
+  <text x="535.0" y="28" font-size="14" font-weight="bold" text-anchor="middle" fill="#1f2937">Direction = row   (rowwise FP8 only)</text>
+  <line x1="80" y1="50" x2="80" y2="290" stroke="#9ca3af" stroke-width="1"/>
+  <g font-size="10" fill="#6b7280" text-anchor="end">
+    <text x="74" y="294.0">0.0</text>
+    <text x="74" y="219.0">0.5</text>
+    <text x="74" y="144.0">1.0</text>
+    <text x="74" y="69.0">1.5</text>
+  </g>
+  <g stroke="#e5e7eb" stroke-width="0.5">
+    <line x1="80" y1="290.0" x2="1050" y2="290.0"/>
+    <line x1="80" y1="215.0" x2="1050" y2="215.0"/>
+    <line x1="80" y1="65.0" x2="1050" y2="65.0"/>
+  </g>
+  <line x1="80" y1="140.0" x2="1050" y2="140.0" stroke="#374151" stroke-width="1" stroke-dasharray="4,3"/>
+  <text x="1054" y="144.0" font-size="10" fill="#374151">1.0</text>
+  <rect x="86.0" y="148.2" width="27.0" height="141.8" fill="#6b7280" stroke="#374151" fill-opacity="0.55"/>
+  <text x="99.5" y="144.2" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">0.94</text>
+  <rect x="115.0" y="147.2" width="27.0" height="142.8" fill="#6b7280" stroke="#374151" fill-opacity="0.78"/>
+  <text x="128.5" y="143.2" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">0.95</text>
+  <rect x="144.0" y="147.5" width="27.0" height="142.5" fill="#6b7280" stroke="#374151" fill-opacity="1.0"/>
+  <text x="157.5" y="143.5" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">0.95</text>
+  <g transform="translate(128.5, 302) rotate(-25)">
+    <text font-size="10" fill="#374151" text-anchor="end">(no flags)</text>
+  </g>
+  <rect x="183.0" y="117.5" width="27.0" height="172.5" fill="#22c55e" stroke="#15803d" fill-opacity="0.55"/>
+  <text x="196.5" y="113.5" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">1.15</text>
+  <rect x="212.0" y="107.8" width="27.0" height="182.2" fill="#22c55e" stroke="#15803d" fill-opacity="0.78"/>
+  <text x="225.5" y="103.8" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">1.22</text>
+  <rect x="241.0" y="104.4" width="27.0" height="185.6" fill="#22c55e" stroke="#15803d" fill-opacity="1.0"/>
+  <text x="254.5" y="100.4" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">1.24</text>
+  <g transform="translate(225.5, 302) rotate(-25)">
+    <text font-size="10" fill="#374151" text-anchor="end">IS_ACT[relu]</text>
+  </g>
+  <rect x="280.0" y="116.2" width="27.0" height="173.8" fill="#3b82f6" stroke="#1d4ed8" fill-opacity="0.55"/>
+  <text x="293.5" y="112.2" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">1.16</text>
+  <rect x="309.0" y="109.6" width="27.0" height="180.4" fill="#3b82f6" stroke="#1d4ed8" fill-opacity="0.78"/>
+  <text x="322.5" y="105.6" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">1.20</text>
+  <rect x="338.0" y="109.2" width="27.0" height="180.8" fill="#3b82f6" stroke="#1d4ed8" fill-opacity="1.0"/>
+  <text x="351.5" y="105.2" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">1.21</text>
+  <g transform="translate(322.5, 302) rotate(-25)">
+    <text font-size="10" fill="#374151" text-anchor="end">IS_ACT[gelu]</text>
+  </g>
+  <rect x="377.0" y="109.1" width="27.0" height="180.9" fill="#f59e0b" stroke="#b45309" fill-opacity="0.55"/>
+  <text x="390.5" y="105.1" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">1.21</text>
+  <rect x="406.0" y="97.7" width="27.0" height="192.3" fill="#f59e0b" stroke="#b45309" fill-opacity="0.78"/>
+  <text x="419.5" y="93.7" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">1.28</text>
+  <rect x="435.0" y="96.1" width="27.0" height="193.9" fill="#f59e0b" stroke="#b45309" fill-opacity="1.0"/>
+  <text x="448.5" y="92.1" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">1.29</text>
+  <g transform="translate(419.5, 302) rotate(-25)">
+    <text font-size="10" fill="#374151" text-anchor="end">IS_ACT[silu]</text>
+  </g>
+  <rect x="474.0" y="107.6" width="27.0" height="182.4" fill="#22c55e" stroke="#15803d" fill-opacity="0.55"/>
+  <text x="487.5" y="103.6" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">1.22</text>
+  <rect x="503.0" y="108.5" width="27.0" height="181.5" fill="#22c55e" stroke="#15803d" fill-opacity="0.78"/>
+  <text x="516.5" y="104.5" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">1.21</text>
+  <rect x="532.0" y="106.2" width="27.0" height="183.8" fill="#22c55e" stroke="#15803d" fill-opacity="1.0"/>
+  <text x="545.5" y="102.2" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">1.23</text>
+  <g transform="translate(516.5, 302) rotate(-25)">
+    <text font-size="10" fill="#374151" text-anchor="end">IS_DACT[relu]</text>
+  </g>
+  <rect x="571.0" y="105.6" width="27.0" height="184.4" fill="#3b82f6" stroke="#1d4ed8" fill-opacity="0.55"/>
+  <text x="584.5" y="101.6" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">1.23</text>
+  <rect x="600.0" y="107.2" width="27.0" height="182.8" fill="#3b82f6" stroke="#1d4ed8" fill-opacity="0.78"/>
+  <text x="613.5" y="103.2" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">1.22</text>
+  <rect x="629.0" y="109.7" width="27.0" height="180.3" fill="#3b82f6" stroke="#1d4ed8" fill-opacity="1.0"/>
+  <text x="642.5" y="105.7" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">1.20</text>
+  <g transform="translate(613.5, 302) rotate(-25)">
+    <text font-size="10" fill="#374151" text-anchor="end">IS_DACT[gelu]</text>
+  </g>
+  <rect x="668.0" y="119.0" width="27.0" height="171.0" fill="#f59e0b" stroke="#b45309" fill-opacity="0.55"/>
+  <text x="681.5" y="115.0" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">1.14</text>
+  <rect x="697.0" y="104.4" width="27.0" height="185.6" fill="#f59e0b" stroke="#b45309" fill-opacity="0.78"/>
+  <text x="710.5" y="100.4" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">1.24</text>
+  <rect x="726.0" y="108.4" width="27.0" height="181.6" fill="#f59e0b" stroke="#b45309" fill-opacity="1.0"/>
+  <text x="739.5" y="104.4" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">1.21</text>
+  <g transform="translate(710.5, 302) rotate(-25)">
+    <text font-size="10" fill="#374151" text-anchor="end">IS_DACT[silu]</text>
+  </g>
+  <rect x="765.0" y="118.0" width="27.0" height="172.0" fill="#22c55e" stroke="#15803d" fill-opacity="0.55"/>
+  <text x="778.5" y="114.0" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">1.15</text>
+  <rect x="794.0" y="131.0" width="27.0" height="159.0" fill="#22c55e" stroke="#15803d" fill-opacity="0.78"/>
+  <text x="807.5" y="127.0" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">1.06</text>
+  <rect x="823.0" y="132.2" width="27.0" height="157.8" fill="#22c55e" stroke="#15803d" fill-opacity="1.0"/>
+  <text x="836.5" y="128.2" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">1.05</text>
+  <g transform="translate(807.5, 302) rotate(-25)">
+    <text font-size="10" fill="#374151" text-anchor="end">IS_DACT[relu] + IS_DBIAS</text>
+  </g>
+  <rect x="862.0" y="113.2" width="27.0" height="176.8" fill="#3b82f6" stroke="#1d4ed8" fill-opacity="0.55"/>
+  <text x="875.5" y="109.2" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">1.18</text>
+  <rect x="891.0" y="107.0" width="27.0" height="183.0" fill="#3b82f6" stroke="#1d4ed8" fill-opacity="0.78"/>
+  <text x="904.5" y="103.0" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">1.22</text>
+  <rect x="920.0" y="112.4" width="27.0" height="177.6" fill="#3b82f6" stroke="#1d4ed8" fill-opacity="1.0"/>
+  <text x="933.5" y="108.4" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">1.18</text>
+  <g transform="translate(904.5, 302) rotate(-25)">
+    <text font-size="10" fill="#374151" text-anchor="end">IS_DACT[gelu] + IS_DBIAS</text>
+  </g>
+  <rect x="959.0" y="134.5" width="27.0" height="155.5" fill="#f59e0b" stroke="#b45309" fill-opacity="0.55"/>
+  <text x="972.5" y="130.5" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">1.04</text>
+  <rect x="988.0" y="131.3" width="27.0" height="158.7" fill="#f59e0b" stroke="#b45309" fill-opacity="0.78"/>
+  <text x="1001.5" y="127.3" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">1.06</text>
+  <rect x="1017.0" y="132.4" width="27.0" height="157.6" fill="#f59e0b" stroke="#b45309" fill-opacity="1.0"/>
+  <text x="1030.5" y="128.4" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">1.05</text>
+  <g transform="translate(1001.5, 302) rotate(-25)">
+    <text font-size="10" fill="#374151" text-anchor="end">IS_DACT[silu] + IS_DBIAS</text>
+  </g>
+</g>
+<g transform="translate(15, 513)">
+  <rect width="1070" height="380" fill="#ffffff" stroke="#e5e7eb"/>
+  <text x="535.0" y="28" font-size="14" font-weight="bold" text-anchor="middle" fill="#1f2937">Direction = col   (colwise FP8 only)</text>
+  <line x1="80" y1="50" x2="80" y2="290" stroke="#9ca3af" stroke-width="1"/>
+  <g font-size="10" fill="#6b7280" text-anchor="end">
+    <text x="74" y="294.0">0.0</text>
+    <text x="74" y="219.0">0.5</text>
+    <text x="74" y="144.0">1.0</text>
+    <text x="74" y="69.0">1.5</text>
+  </g>
+  <g stroke="#e5e7eb" stroke-width="0.5">
+    <line x1="80" y1="290.0" x2="1050" y2="290.0"/>
+    <line x1="80" y1="215.0" x2="1050" y2="215.0"/>
+    <line x1="80" y1="65.0" x2="1050" y2="65.0"/>
+  </g>
+  <line x1="80" y1="140.0" x2="1050" y2="140.0" stroke="#374151" stroke-width="1" stroke-dasharray="4,3"/>
+  <text x="1054" y="144.0" font-size="10" fill="#374151">1.0</text>
+  <rect x="86.0" y="98.2" width="27.0" height="191.8" fill="#6b7280" stroke="#374151" fill-opacity="0.55"/>
+  <text x="99.5" y="94.2" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">1.28</text>
+  <rect x="115.0" y="88.6" width="27.0" height="201.4" fill="#6b7280" stroke="#374151" fill-opacity="0.78"/>
+  <text x="128.5" y="84.6" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">1.34</text>
+  <rect x="144.0" y="84.5" width="27.0" height="205.5" fill="#6b7280" stroke="#374151" fill-opacity="1.0"/>
+  <text x="157.5" y="80.5" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">1.37</text>
+  <g transform="translate(128.5, 302) rotate(-25)">
+    <text font-size="10" fill="#374151" text-anchor="end">(no flags)</text>
+  </g>
+  <rect x="183.0" y="89.6" width="27.0" height="200.4" fill="#22c55e" stroke="#15803d" fill-opacity="0.55"/>
+  <text x="196.5" y="85.6" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">1.34</text>
+  <rect x="212.0" y="80.8" width="27.0" height="209.2" fill="#22c55e" stroke="#15803d" fill-opacity="0.78"/>
+  <text x="225.5" y="76.8" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">1.40</text>
+  <rect x="241.0" y="76.9" width="27.0" height="213.1" fill="#22c55e" stroke="#15803d" fill-opacity="1.0"/>
+  <text x="254.5" y="72.9" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">1.42</text>
+  <g transform="translate(225.5, 302) rotate(-25)">
+    <text font-size="10" fill="#374151" text-anchor="end">IS_ACT[relu]</text>
+  </g>
+  <rect x="280.0" y="114.4" width="27.0" height="175.6" fill="#3b82f6" stroke="#1d4ed8" fill-opacity="0.55"/>
+  <text x="293.5" y="110.4" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">1.17</text>
+  <rect x="309.0" y="116.0" width="27.0" height="174.0" fill="#3b82f6" stroke="#1d4ed8" fill-opacity="0.78"/>
+  <text x="322.5" y="112.0" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">1.16</text>
+  <rect x="338.0" y="114.5" width="27.0" height="175.5" fill="#3b82f6" stroke="#1d4ed8" fill-opacity="1.0"/>
+  <text x="351.5" y="110.5" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">1.17</text>
+  <g transform="translate(322.5, 302) rotate(-25)">
+    <text font-size="10" fill="#374151" text-anchor="end">IS_ACT[gelu]</text>
+  </g>
+  <rect x="377.0" y="113.0" width="27.0" height="177.0" fill="#f59e0b" stroke="#b45309" fill-opacity="0.55"/>
+  <text x="390.5" y="109.0" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">1.18</text>
+  <rect x="406.0" y="105.5" width="27.0" height="184.5" fill="#f59e0b" stroke="#b45309" fill-opacity="0.78"/>
+  <text x="419.5" y="101.5" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">1.23</text>
+  <rect x="435.0" y="104.4" width="27.0" height="185.6" fill="#f59e0b" stroke="#b45309" fill-opacity="1.0"/>
+  <text x="448.5" y="100.4" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">1.24</text>
+  <g transform="translate(419.5, 302) rotate(-25)">
+    <text font-size="10" fill="#374151" text-anchor="end">IS_ACT[silu]</text>
+  </g>
+  <rect x="474.0" y="90.7" width="27.0" height="199.3" fill="#22c55e" stroke="#15803d" fill-opacity="0.55"/>
+  <text x="487.5" y="86.7" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">1.33</text>
+  <rect x="503.0" y="87.1" width="27.0" height="202.9" fill="#22c55e" stroke="#15803d" fill-opacity="0.78"/>
+  <text x="516.5" y="83.1" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">1.35</text>
+  <rect x="532.0" y="83.8" width="27.0" height="206.2" fill="#22c55e" stroke="#15803d" fill-opacity="1.0"/>
+  <text x="545.5" y="79.8" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">1.38</text>
+  <g transform="translate(516.5, 302) rotate(-25)">
+    <text font-size="10" fill="#374151" text-anchor="end">IS_DACT[relu]</text>
+  </g>
+  <rect x="571.0" y="104.9" width="27.0" height="185.1" fill="#3b82f6" stroke="#1d4ed8" fill-opacity="0.55"/>
+  <text x="584.5" y="100.9" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">1.23</text>
+  <rect x="600.0" y="101.2" width="27.0" height="188.8" fill="#3b82f6" stroke="#1d4ed8" fill-opacity="0.78"/>
+  <text x="613.5" y="97.2" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">1.26</text>
+  <rect x="629.0" y="98.6" width="27.0" height="191.4" fill="#3b82f6" stroke="#1d4ed8" fill-opacity="1.0"/>
+  <text x="642.5" y="94.6" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">1.28</text>
+  <g transform="translate(613.5, 302) rotate(-25)">
+    <text font-size="10" fill="#374151" text-anchor="end">IS_DACT[gelu]</text>
+  </g>
+  <rect x="668.0" y="111.6" width="27.0" height="178.4" fill="#f59e0b" stroke="#b45309" fill-opacity="0.55"/>
+  <text x="681.5" y="107.6" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">1.19</text>
+  <rect x="697.0" y="92.3" width="27.0" height="197.7" fill="#f59e0b" stroke="#b45309" fill-opacity="0.78"/>
+  <text x="710.5" y="88.3" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">1.32</text>
+  <rect x="726.0" y="90.1" width="27.0" height="199.9" fill="#f59e0b" stroke="#b45309" fill-opacity="1.0"/>
+  <text x="739.5" y="86.1" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">1.33</text>
+  <g transform="translate(710.5, 302) rotate(-25)">
+    <text font-size="10" fill="#374151" text-anchor="end">IS_DACT[silu]</text>
+  </g>
+  <rect x="765.0" y="112.4" width="27.0" height="177.6" fill="#22c55e" stroke="#15803d" fill-opacity="0.55"/>
+  <text x="778.5" y="108.4" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">1.18</text>
+  <rect x="794.0" y="110.9" width="27.0" height="179.1" fill="#22c55e" stroke="#15803d" fill-opacity="0.78"/>
+  <text x="807.5" y="106.9" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">1.19</text>
+  <rect x="823.0" y="109.2" width="27.0" height="180.8" fill="#22c55e" stroke="#15803d" fill-opacity="1.0"/>
+  <text x="836.5" y="105.2" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">1.21</text>
+  <g transform="translate(807.5, 302) rotate(-25)">
+    <text font-size="10" fill="#374151" text-anchor="end">IS_DACT[relu] + IS_DBIAS</text>
+  </g>
+  <rect x="862.0" y="100.7" width="27.0" height="189.3" fill="#3b82f6" stroke="#1d4ed8" fill-opacity="0.55"/>
+  <text x="875.5" y="96.7" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">1.26</text>
+  <rect x="891.0" y="93.2" width="27.0" height="196.8" fill="#3b82f6" stroke="#1d4ed8" fill-opacity="0.78"/>
+  <text x="904.5" y="89.2" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">1.31</text>
+  <rect x="920.0" y="91.7" width="27.0" height="198.3" fill="#3b82f6" stroke="#1d4ed8" fill-opacity="1.0"/>
+  <text x="933.5" y="87.7" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">1.32</text>
+  <g transform="translate(904.5, 302) rotate(-25)">
+    <text font-size="10" fill="#374151" text-anchor="end">IS_DACT[gelu] + IS_DBIAS</text>
+  </g>
+  <rect x="959.0" y="114.9" width="27.0" height="175.1" fill="#f59e0b" stroke="#b45309" fill-opacity="0.55"/>
+  <text x="972.5" y="110.9" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">1.17</text>
+  <rect x="988.0" y="95.3" width="27.0" height="194.7" fill="#f59e0b" stroke="#b45309" fill-opacity="0.78"/>
+  <text x="1001.5" y="91.3" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">1.30</text>
+  <rect x="1017.0" y="93.7" width="27.0" height="196.3" fill="#f59e0b" stroke="#b45309" fill-opacity="1.0"/>
+  <text x="1030.5" y="89.7" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">1.31</text>
+  <g transform="translate(1001.5, 302) rotate(-25)">
+    <text font-size="10" fill="#374151" text-anchor="end">IS_DACT[silu] + IS_DBIAS</text>
+  </g>
+</g>
+<g transform="translate(15, 911)">
+  <rect width="1070" height="380" fill="#ffffff" stroke="#e5e7eb"/>
+  <text x="535.0" y="28" font-size="14" font-weight="bold" text-anchor="middle" fill="#1f2937">Direction = both  (bidim — rowwise + colwise FP8)</text>
+  <line x1="80" y1="50" x2="80" y2="290" stroke="#9ca3af" stroke-width="1"/>
+  <g font-size="10" fill="#6b7280" text-anchor="end">
+    <text x="74" y="294.0">0.0</text>
+    <text x="74" y="219.0">0.5</text>
+    <text x="74" y="144.0">1.0</text>
+    <text x="74" y="69.0">1.5</text>
+  </g>
+  <g stroke="#e5e7eb" stroke-width="0.5">
+    <line x1="80" y1="290.0" x2="1050" y2="290.0"/>
+    <line x1="80" y1="215.0" x2="1050" y2="215.0"/>
+    <line x1="80" y1="65.0" x2="1050" y2="65.0"/>
+  </g>
+  <line x1="80" y1="140.0" x2="1050" y2="140.0" stroke="#374151" stroke-width="1" stroke-dasharray="4,3"/>
+  <text x="1054" y="144.0" font-size="10" fill="#374151">1.0</text>
+  <rect x="86.0" y="123.5" width="27.0" height="166.5" fill="#6b7280" stroke="#374151" fill-opacity="0.55"/>
+  <text x="99.5" y="119.5" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">1.11</text>
+  <rect x="115.0" y="119.6" width="27.0" height="170.4" fill="#6b7280" stroke="#374151" fill-opacity="0.78"/>
+  <text x="128.5" y="115.6" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">1.14</text>
+  <rect x="144.0" y="118.6" width="27.0" height="171.4" fill="#6b7280" stroke="#374151" fill-opacity="1.0"/>
+  <text x="157.5" y="114.6" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">1.14</text>
+  <g transform="translate(128.5, 302) rotate(-25)">
+    <text font-size="10" fill="#374151" text-anchor="end">(no flags)</text>
+  </g>
+  <rect x="183.0" y="83.2" width="27.0" height="206.8" fill="#22c55e" stroke="#15803d" fill-opacity="0.55"/>
+  <text x="196.5" y="79.2" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">1.38</text>
+  <rect x="212.0" y="79.3" width="27.0" height="210.7" fill="#22c55e" stroke="#15803d" fill-opacity="0.78"/>
+  <text x="225.5" y="75.3" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">1.41</text>
+  <rect x="241.0" y="76.7" width="27.0" height="213.3" fill="#22c55e" stroke="#15803d" fill-opacity="1.0"/>
+  <text x="254.5" y="72.7" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">1.42</text>
+  <g transform="translate(225.5, 302) rotate(-25)">
+    <text font-size="10" fill="#374151" text-anchor="end">IS_ACT[relu]</text>
+  </g>
+  <rect x="280.0" y="161.8" width="27.0" height="128.2" fill="#3b82f6" stroke="#1d4ed8" fill-opacity="0.55"/>
+  <text x="293.5" y="157.8" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">0.85</text>
+  <rect x="309.0" y="152.8" width="27.0" height="137.2" fill="#3b82f6" stroke="#1d4ed8" fill-opacity="0.78"/>
+  <text x="322.5" y="148.8" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">0.92</text>
+  <rect x="338.0" y="150.7" width="27.0" height="139.3" fill="#3b82f6" stroke="#1d4ed8" fill-opacity="1.0"/>
+  <text x="351.5" y="146.7" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">0.93</text>
+  <g transform="translate(322.5, 302) rotate(-25)">
+    <text font-size="10" fill="#374151" text-anchor="end">IS_ACT[gelu]</text>
+  </g>
+  <rect x="377.0" y="158.8" width="27.0" height="131.2" fill="#f59e0b" stroke="#b45309" fill-opacity="0.55"/>
+  <text x="390.5" y="154.8" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">0.88</text>
+  <rect x="406.0" y="136.9" width="27.0" height="153.1" fill="#f59e0b" stroke="#b45309" fill-opacity="0.78"/>
+  <text x="419.5" y="132.9" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">1.02</text>
+  <rect x="435.0" y="139.7" width="27.0" height="150.3" fill="#f59e0b" stroke="#b45309" fill-opacity="1.0"/>
+  <text x="448.5" y="135.7" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">1.00</text>
+  <g transform="translate(419.5, 302) rotate(-25)">
+    <text font-size="10" fill="#374151" text-anchor="end">IS_ACT[silu]</text>
+  </g>
+  <rect x="474.0" y="97.0" width="27.0" height="193.0" fill="#22c55e" stroke="#15803d" fill-opacity="0.55"/>
+  <text x="487.5" y="93.0" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">1.29</text>
+  <rect x="503.0" y="90.2" width="27.0" height="199.8" fill="#22c55e" stroke="#15803d" fill-opacity="0.78"/>
+  <text x="516.5" y="86.2" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">1.33</text>
+  <rect x="532.0" y="88.1" width="27.0" height="201.9" fill="#22c55e" stroke="#15803d" fill-opacity="1.0"/>
+  <text x="545.5" y="84.1" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">1.35</text>
+  <g transform="translate(516.5, 302) rotate(-25)">
+    <text font-size="10" fill="#374151" text-anchor="end">IS_DACT[relu]</text>
+  </g>
+  <rect x="571.0" y="154.4" width="27.0" height="135.6" fill="#3b82f6" stroke="#1d4ed8" fill-opacity="0.55"/>
+  <text x="584.5" y="150.4" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">0.90</text>
+  <rect x="600.0" y="154.3" width="27.0" height="135.7" fill="#3b82f6" stroke="#1d4ed8" fill-opacity="0.78"/>
+  <text x="613.5" y="150.3" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">0.91</text>
+  <rect x="629.0" y="152.8" width="27.0" height="137.2" fill="#3b82f6" stroke="#1d4ed8" fill-opacity="1.0"/>
+  <text x="642.5" y="148.8" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">0.92</text>
+  <g transform="translate(613.5, 302) rotate(-25)">
+    <text font-size="10" fill="#374151" text-anchor="end">IS_DACT[gelu]</text>
+  </g>
+  <rect x="668.0" y="158.3" width="27.0" height="131.7" fill="#f59e0b" stroke="#b45309" fill-opacity="0.55"/>
+  <text x="681.5" y="154.3" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">0.88</text>
+  <rect x="697.0" y="155.6" width="27.0" height="134.4" fill="#f59e0b" stroke="#b45309" fill-opacity="0.78"/>
+  <text x="710.5" y="151.6" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">0.90</text>
+  <rect x="726.0" y="155.5" width="27.0" height="134.5" fill="#f59e0b" stroke="#b45309" fill-opacity="1.0"/>
+  <text x="739.5" y="151.5" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">0.90</text>
+  <g transform="translate(710.5, 302) rotate(-25)">
+    <text font-size="10" fill="#374151" text-anchor="end">IS_DACT[silu]</text>
+  </g>
+  <rect x="765.0" y="91.9" width="27.0" height="198.1" fill="#22c55e" stroke="#15803d" fill-opacity="0.55"/>
+  <text x="778.5" y="87.9" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">1.32</text>
+  <rect x="794.0" y="86.8" width="27.0" height="203.2" fill="#22c55e" stroke="#15803d" fill-opacity="0.78"/>
+  <text x="807.5" y="82.8" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">1.35</text>
+  <rect x="823.0" y="84.5" width="27.0" height="205.5" fill="#22c55e" stroke="#15803d" fill-opacity="1.0"/>
+  <text x="836.5" y="80.5" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">1.37</text>
+  <g transform="translate(807.5, 302) rotate(-25)">
+    <text font-size="10" fill="#374151" text-anchor="end">IS_DACT[relu] + IS_DBIAS</text>
+  </g>
+  <rect x="862.0" y="156.8" width="27.0" height="133.2" fill="#3b82f6" stroke="#1d4ed8" fill-opacity="0.55"/>
+  <text x="875.5" y="152.8" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">0.89</text>
+  <rect x="891.0" y="154.6" width="27.0" height="135.4" fill="#3b82f6" stroke="#1d4ed8" fill-opacity="0.78"/>
+  <text x="904.5" y="150.6" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">0.90</text>
+  <rect x="920.0" y="152.4" width="27.0" height="137.6" fill="#3b82f6" stroke="#1d4ed8" fill-opacity="1.0"/>
+  <text x="933.5" y="148.4" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">0.92</text>
+  <g transform="translate(904.5, 302) rotate(-25)">
+    <text font-size="10" fill="#374151" text-anchor="end">IS_DACT[gelu] + IS_DBIAS</text>
+  </g>
+  <rect x="959.0" y="165.9" width="27.0" height="124.1" fill="#f59e0b" stroke="#b45309" fill-opacity="0.55"/>
+  <text x="972.5" y="161.9" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">0.83</text>
+  <rect x="988.0" y="164.9" width="27.0" height="125.1" fill="#f59e0b" stroke="#b45309" fill-opacity="0.78"/>
+  <text x="1001.5" y="160.9" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">0.83</text>
+  <rect x="1017.0" y="164.8" width="27.0" height="125.2" fill="#f59e0b" stroke="#b45309" fill-opacity="1.0"/>
+  <text x="1030.5" y="160.8" font-size="8" fill="#1f2937" text-anchor="middle" font-weight="bold">0.83</text>
+  <g transform="translate(1001.5, 302) rotate(-25)">
+    <text font-size="10" fill="#374151" text-anchor="end">IS_DACT[silu] + IS_DBIAS</text>
+  </g>
+</g>
+</svg>
