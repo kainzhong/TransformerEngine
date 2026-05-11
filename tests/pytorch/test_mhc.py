@@ -284,7 +284,7 @@ def get_tols(dtype):
 @pytest.mark.parametrize("has_norm_weight", [False, True], ids=["no_norm_weight", "norm_weight"])
 @pytest.mark.parametrize(
     "use_split_k", [True, False], ids=["split_k", "no_split_k"]
-)  # Disable TF32 to align with reference implementation's precision
+)
 def test_mhc_projection(cfg: MHCConfig, dtypes, has_norm_weight, use_split_k):
     reset_rng_states()
 
@@ -379,7 +379,7 @@ def test_mhc_scale(cfg: MHCConfig, dtype):
 @pytest.mark.parametrize("has_norm_weight", [False, True], ids=["no_norm_weight", "norm_weight"])
 @pytest.mark.parametrize(
     "use_split_k", [True, False], ids=["split_k", "no_split_k"]
-)  # Disable TF32 to align with reference implementation's precision
+)
 def test_mhc_rmsnorm(cfg: MHCConfig, dtypes, has_norm_weight, use_split_k):
     # Verify if the fused kernel is equivalent to applying RMSNorm in the normal order
     reset_rng_states()
