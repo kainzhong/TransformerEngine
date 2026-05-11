@@ -1,222 +1,344 @@
-# MXFP8 Quantization: CuTeDSL vs. C++ Performance Analysis
-
-TODO: test on prenyx B200 and you should see 6TB bandwidth utilization for the non-specialized, for specialized you should see ~7TB
+# MXFP8 Quantization: CuTeDSL vs. C++ Performance
 
 Benchmark of the CuTeDSL MXFP8 quantization kernel against the Transformer
 Engine C++ reference (`MXFP8Quantizer` → `quantize_mxfp8.cuh`) on a single
-NVIDIA GB200 (SM100a, HBM3e).
+NVIDIA GB200 (SM100a, HBM3e). All combos covered by the CuTeDSL kernel
+(plain quantize, forward / backward activation fusion, bias-gradient on
+both path A and path B) are compared.
 
-All figures are per-call kernel time averaged over 100–200 iterations after
-10 warmup calls. See `bench_mxfp8_cutedsl.py` and `run_nsys_profile.sh`.
+The kernel-only feature surface and bit-exactness story are documented in
+[`MXFP8_CUTEDSL_FEATURE_BENCH.md`](MXFP8_CUTEDSL_FEATURE_BENCH.md). This
+file is the methodology + numbers companion.
 
 ## Setup
 
-- **GPU**: NVIDIA GB200 (Blackwell, SM100a), 192 GB HBM3e
-- **Input**: BF16 `(M, N)` tensor
-- **Output**: FP8E4M3 data + E8M0 scales (rowwise, colwise, or both)
-- **Measurement**: `torch.cuda.Event` between warmup and measure phases
+- **GPU**: NVIDIA GB200 (Blackwell, SM100a), 192 GB HBM3e, single CUDA stream
+- **Inputs**: BF16 `(M, N)` tensor (and `act_input` for activation combos)
+- **Output**: FP8E4M3 data + E8M0 scales (rowwise / colwise / bidim per row)
+- **Iterations**: 10 warmup + 100 timed (all numbers below)
+- **Reference**: TE C++ entry points (`MXFP8Quantizer.__call__`,
+  `tex.gelu` / `tex.dgelu` / `tex.dbias_dgelu` / …)
+- **Bench script**: [`bench_mxfp8_cutedsl.py`](bench_mxfp8_cutedsl.py)
+- **Profile driver**: [`run_nsys_profile.sh`](run_nsys_profile.sh)
 
-## Summary table by preset
+## Two measurement methodologies
 
-All times in μs, bandwidth in GB/s. "DSL/C++" is the speedup of CuTeDSL over
-the C++ kernel (`ref_ms / dsl_ms` — values <1.0 mean CuTeDSL is slower).
+The bench script reports both — they answer different questions.
 
-### Tiny (128–512 square)
+| | **Wall-clock (`torch.cuda.Event`)** | **Kernel-only (`nsys cuda_gpu_kern_sum`)** |
+|--|--|--|
+| What it measures | First `cudaEventRecord` → last `cudaEventRecord` of the timed loop, divided by iters | Average GPU runtime of the dominant quantize kernel, extracted from `nsys-rep` |
+| Includes | Python wrapper, `MXFP8Quantizer.__call__` validation, `_get_compiled_kernel` cache lookup, all `make_ptr` calls, kernel launch, kernel run | Kernel only |
+| Excludes | Nothing inside the timed loop | All host-side overhead, cudaLaunchKernel, descriptor construction |
+| When it matters | End-to-end picture for callers who hit the Python entry point each step | Apples-to-apples kernel comparison; hides wrapper differences between TE's `tex.*` and our DSL wrapper |
+| When it lies | When the kernel is short (≤100 µs) and Python overhead dominates | When users actually pay the wrapper cost in production code |
 
-| Shape      | Dir  | C++ μs | DSL μs | C++ GB/s | DSL GB/s | DSL/C++ |
-| ---------- | ---- | -----: | -----: | -------: | -------: | ------: |
-| 128×128    | row  |   38.3 |   50.3 |      1.3 |      1.0 |   0.76× |
-| 128×128    | col  |   36.0 |   42.9 |      1.4 |      1.2 |   0.84× |
-| 128×128    | both |   39.7 |   50.1 |      1.7 |      1.3 |   0.79× |
-| 256×256    | row  |   36.6 |   43.3 |      5.4 |      4.6 |   0.84× |
-| 256×256    | col  |   37.4 |   44.6 |      5.3 |      4.5 |   0.84× |
-| 256×256    | both |   40.6 |   51.5 |      6.6 |      5.2 |   0.79× |
-| 512×512    | row  |   37.6 |   45.4 |     21.1 |     17.5 |   0.83× |
-| 512×512    | col  |   36.1 |   44.2 |     22.0 |     18.0 |   0.82× |
-| 512×512    | both |   40.3 |   51.0 |     26.4 |     20.9 |   0.79× |
+The CuTeDSL wrapper does ~10–20 µs more host-side work per call than
+TE's tightly-tuned `tex.*` entry points (extra Python validation, the
+JIT cache lookup, more `make_ptr` calls for scale tensors and the dbias
+workspace). At 16k² shapes that's noise; at 4k² it's a quarter of the
+total measurement.
 
-### Small (1k–4k square)
+**Treat nsys as authoritative for kernel quality**; treat wall-clock
+as authoritative for "what does the user actually see" in tight
+training loops.
 
-| Shape       | Dir  | C++ μs | DSL μs | C++ GB/s | DSL GB/s | DSL/C++ |
-| ----------- | ---- | -----: | -----: | -------: | -------: | ------: |
-| 1024×1024   | row  |   35.3 |   49.7 |     90.2 |     64.0 |   0.71× |
-| 1024×1024   | col  |   35.1 |   42.8 |     90.5 |     74.3 |   0.82× |
-| 1024×1024   | both |   38.5 |   50.0 |    110.6 |     85.3 |   0.77× |
-| 2048×2048   | row  |   35.1 |   41.6 |    362.1 |    305.5 |   0.84× |
-| 2048×2048   | col  |   35.1 |   43.0 |    362.2 |    295.9 |   0.82× |
-| 2048×2048   | both |   40.8 |   50.1 |    417.8 |    340.1 |   0.81× |
-| 4096×4096   | row  |   36.0 |   43.1 |   1414.4 |   1179.0 |   0.83× |
-| 4096×4096   | col  |   36.0 |   43.5 |   1412.6 |   1169.0 |   0.83× |
-| 4096×4096   | both |   39.3 |   49.2 |   1736.7 |   1385.5 |   0.80× |
+## Where the two methodologies disagree
 
-### Medium (4k–8k)
+### 1. Small shapes (4k²): wall-clock distorts beyond recognition
 
-| Shape       | Dir  | C++ μs | DSL μs | C++ GB/s | DSL GB/s | DSL/C++ |
-| ----------- | ---- | -----: | -----: | -------: | -------: | ------: |
-| 8192×8192   | row  |   38.6 |   72.0 |   5271.8 |   2824.8 |   0.54× |
-| 8192×8192   | col  |   54.3 |   73.7 |   3745.8 |   2761.4 |   0.74× |
-| 8192×8192   | both |   71.8 |  120.1 |   3794.9 |   2269.8 |   0.60× |
-| 8192×4096   | row  |   36.3 |   43.3 |   2800.6 |   2347.7 |   0.84× |
-| 8192×4096   | both |   40.8 |   62.0 |   3339.4 |   2200.1 |   0.66× |
-| 4096×8192   | row  |   36.4 |   44.5 |   2792.0 |   2284.4 |   0.82× |
-| 4096×8192   | both |   40.4 |   62.0 |   3376.1 |   2198.5 |   0.65× |
+`dbias_dgelu` rowwise (path B), 4096×4096:
 
-### Large (16k–32k)
+|             | C++ µs | DSL µs | DSL/C++ |
+|-------------|------:|------:|--------:|
+| Wall-clock  | 63.1  | 94.6  | **0.67×** |
+| Nsys kernel | 51.3  | 43.5  | **1.18×** |
 
-| Shape        | Dir  | C++ μs | DSL μs | C++ GB/s | DSL GB/s | DSL/C++ |
-| ------------ | ---- | -----: | -----: | -------: | -------: | ------: |
-| 16384×8192   | row  |   72.4 |  140.0 |   5615.2 |   2906.8 |   0.52× |
-| 16384×8192   | col  |  104.3 |  143.1 |   3899.6 |   2842.9 |   0.73× |
-| 16384×8192   | both |  138.9 |  236.5 |   3926.6 |   2306.0 |   0.59× |
-| 16384×16384  | row  |  139.9 |  275.9 |   5813.6 |   2949.6 |   0.51× |
-| 16384×16384  | col  |  203.8 |  281.4 |   3992.8 |   2891.8 |   0.72× |
-| 16384×16384  | both |  272.1 |  468.4 |   4008.4 |   2328.1 |   0.58× |
-| 32768×8192   | row  |  140.0 |  274.9 |   5813.6 |   2960.5 |   0.51× |
-| 32768×8192   | col  |  203.8 |  281.1 |   3993.6 |   2894.5 |   0.72× |
-| 32768×8192   | both |  272.1 |  468.1 |   4008.1 |   2329.6 |   0.58× |
+The CuTeDSL kernel is *faster* than TE's; the wall-clock measurement
+makes it look ~75% slower. The difference is wrapper overhead falling
+asymmetrically on a sub-100 µs kernel. Same story across every 4k²
+row — the wall-clock view of "DSL barely beats C++ at small sizes" is
+mostly Python.
 
-### LLM (typical hidden sizes)
+`plain` direction=both, 4096×4096:
 
-| Shape        | Dir  | C++ μs | DSL μs | C++ GB/s | DSL GB/s | DSL/C++ |
-| ------------ | ---- | -----: | -----: | -------: | -------: | ------: |
-| 2048×5120    | row  |   38.8 |   54.9 |    818.9 |    578.7 |   0.71× |
-| 2048×5120    | col  |   37.9 |   41.9 |    839.4 |    758.8 |   0.90× |
-| 2048×5120    | both |   42.2 |   50.3 |   1010.4 |    846.7 |   0.84× |
-| 2048×8192    | both |   40.0 |   51.9 |   1705.2 |   1313.2 |   0.77× |
-| 4096×12288   | both |   55.4 |   93.2 |   3691.0 |   2194.8 |   0.59× |
-| 8192×14336   | both |  120.3 |  204.4 |   3966.7 |   2334.6 |   0.59× |
-| 16384×16384  | both |  272.1 |  468.4 |   4007.2 |   2328.2 |   0.58× |
+|             | C++ µs | DSL µs | DSL/C++ |
+|-------------|------:|------:|--------:|
+| Wall-clock  | 40.6  | 64.1  | **0.63×** |
+| Nsys kernel | 20.0  | 18.0  | **1.11×** |
 
-### Aspect ratio (tall-narrow vs. short-wide)
+Roughly **half** of each wall-clock number for plain 4k² is wrapper
+overhead. nsys confirms the kernels themselves are essentially even.
 
-| Shape        | Dir  | C++ μs | DSL μs | C++ GB/s | DSL GB/s | DSL/C++ |
-| ------------ | ---- | -----: | -----: | -------: | -------: | ------: |
-| 1024×16384   | row  |   39.9 |   54.9 |   1273.7 |    927.3 |   0.73× |
-| 1024×16384   | col  |   39.2 |   44.0 |   1299.1 |   1154.8 |   0.89× |
-| 1024×16384   | both |   41.5 |   52.8 |   1642.9 |   1289.9 |   0.79× |
-| 4096×4096    | both |   43.5 |   53.9 |   1566.8 |   1264.1 |   0.81× |
-| 16384×1024   | both |   42.7 |   55.0 |   1597.3 |   1239.8 |   0.78× |
-| 512×32768    | both |   42.6 |   53.1 |   1598.5 |   1283.7 |   0.80× |
-| 32768×512    | both |   43.4 |   50.2 |   1570.5 |   1357.0 |   0.86× |
+### 2. Medium-large shapes (8k²+): wall-clock and nsys agree to within ~3%
 
-## Observations
+For long-running kernels the host-side overhead is rounding error.
+`plain` direction=both:
 
-### 1. The two kernels live in three different regimes
+| Shape          | Wall-clock DSL/C++ | Nsys DSL/C++ |
+|----------------|------:|-----:|
+| 8192×8192      | 1.08× | 1.14× |
+| 16384×16384    | 1.13× | 1.14× |
 
-- **Launch-overhead bound** (≤4k² elements, ≤16 MB): both kernels finish in
-  35–55 μs, most of which is PyTorch / CUDA launch plumbing. **DSL/C++ ≈ 0.80–0.85×**.
-- **Transitional** (8k², 16k×8k rowwise): C++ starts saturating HBM, CuTeDSL
-  doesn't. **DSL/C++ ≈ 0.54–0.60×**.
-- **Memory-bandwidth bound** (≥16k² elements): C++ settles at ~5.8 TB/s
-  rowwise, CuTeDSL plateaus at ~2.95 TB/s. **DSL/C++ ≈ 0.51–0.58×**.
+`dgelu` direction=both:
 
-### 2. Peak bandwidth divergence
+| Shape          | Wall-clock DSL/C++ | Nsys DSL/C++ |
+|----------------|------:|-----:|
+| 8192×8192      | 0.90× | 0.90× |
+| 16384×16384    | 0.91× | 0.91× |
 
-| Direction      | C++ peak   | DSL peak   | DSL / C++ | Theoretical (HBM3e) |
-| -------------- | ---------: | ---------: | --------: | ------------------: |
-| Rowwise        | 5.81 TB/s  | 2.96 TB/s  |     0.51× |            ~8 TB/s  |
-| Colwise        | 3.99 TB/s  | 2.89 TB/s  |     0.73× |            ~8 TB/s  |
-| Bidirectional  | 4.01 TB/s  | 2.33 TB/s  |     0.58× |            ~8 TB/s  |
+For the bandwidth-bound combos at large shapes, the two views converge
+within 1–6%. The activation-bound combos (`dgelu`, `dsilu`, `gelu`,
+`silu`, `dbias_dgelu`, `dbias_dsilu`) match almost exactly because the
+kernel itself dominates; the bandwidth-bound `plain` shows a small
+~5% wrapper-tax shift.
 
-The C++ rowwise path reaches **~73%** of theoretical HBM3e bandwidth. The
-CuTeDSL rowwise path reaches **~37%** — almost exactly half.
+### 3. Path B and bidim drelu: wall-clock overstates DSL's win
 
-### 3. Where the ~2× gap comes from (root cause)
+Path B (rowwise-only `dbias_dgelu` / `dbias_dsilu` / `dbias_drelu`)
+runs short kernels even at 16k². Wrapper overhead is uniform, so
+removing it expands C++'s denominator more than DSL's:
 
-The missing factor-of-two is the **cp.async.bulk.tensor (TMA) vs. cp.async**
-difference:
+`dbias_dgelu` rowwise (path B), 8192×8192:
 
-| Aspect                 | C++ (TMA)                         | CuTeDSL (cp.async) |
-| ---------------------- | --------------------------------- | ------------------ |
-| Max transfer per instr | Entire 32×64 tile in one PTX op   | 128 bits (8 BF16)  |
-| Path                   | gmem → L2 → smem (bypasses L1)    | gmem → L1 → regs → smem |
-| Thread occupancy       | Issue by 1 thread                 | All threads issue  |
-| Register pressure      | None during transfer              | Holds loaded values |
-| Coordinate compute     | Handled by TMA tensor descriptor  | Manual via TV layout |
-| Instruction count      | O(stages) per CTA                 | O(stages × threads) |
-| Bandwidth ceiling      | HBM peak (TMA saturates the bus)  | L1/cp.async limited |
+|             | C++ µs | DSL µs | DSL/C++ |
+|-------------|------:|------:|--------:|
+| Wall-clock  | 229.1 | 176.0 | **1.30×** |
+| Nsys kernel | 198.7 | 162.9 | **1.22×** |
 
-Every other optimization (smem tiling, bank-conflict avoidance, 2-wide FP8
-conversion, bidirectional single-pass, GEMM-swizzled scales, output smem
-staging) is present in both implementations — the timings confirm this via
-the near-identity at tiny sizes.
+`dbias_dgelu` rowwise (path B), 16384×16384:
 
-### 4. Colwise narrows the gap
+|             | C++ µs | DSL µs | DSL/C++ |
+|-------------|------:|------:|--------:|
+| Wall-clock  | 808.7 | 652.9 | **1.24×** |
+| Nsys kernel | 749.2 | 632.9 | **1.18×** |
 
-The colwise C++ path runs at **~4.0 TB/s** (not 5.8 TB/s), because the C++
-kernel's colwise access pattern itself doesn't fully saturate TMA — column
-strides within the 32×64 tile are less TMA-friendly than contiguous rows.
-CuTeDSL's colwise comes in at **~2.9 TB/s**, so the ratio improves to
-**~0.72×** instead of 0.51×.
+The DSL win is real, but smaller than wall-clock implied. Same pattern
+on `drelu` and `dbias_drelu` (both directions) and on bidim
+`dbias_drelu` — the C++ `quantize_mxfp8_kernel` template instantiation
+for `IS_DBIAS=true && IS_DACT=true && OP=drelu` apparently isn't as
+well-tuned as the gelu/silu paths.
 
-### 5. Aspect ratio is neutral
+## Full nsys results — direction=both
 
-The `aspect` preset shows the CuTeDSL kernel is stable under any aspect
-ratio. 32768×512 and 512×32768 both land at 0.80–0.86×, the same as 4k×4k.
-The kernel's 64×64 CTA tile divides both dimensions cleanly and there is no
-degenerate case.
+All times are kernel-only (nsys `cuda_gpu_kern_sum`), bf16 → e4m3, 100
+timed iters after 10 warmup. "DSL/C++" >1.0 means CuTeDSL is faster.
 
-### 6. Bidirectional is worst
+### Plain quantize
 
-`both` consistently shows the widest gap (0.58× at large sizes) because
-the C++ kernel's TMA can issue two bulk transfers (rowwise + colwise
-output) in parallel, while CuTeDSL serializes the two stores. This is
-structural: without TMA's 1-instruction bulk writes, two cooperative
-smem→global stores in one kernel step on each other's bandwidth.
+| Shape         | C++ µs | DSL µs | C++ GB/s | DSL GB/s | DSL/C++ |
+|---------------|------:|------:|--------:|--------:|--------:|
+| 4096×4096     |  20.0 |  18.0 |  3402.5 |  3777.6 | **1.11×** |
+| 8192×8192     |  71.8 |  63.2 |  3797.6 |  4315.8 | **1.14×** |
+| 16384×16384   | 273.2 | 239.1 |  3991.9 |  4561.3 | **1.14×** |
 
-## Where CuTeDSL would catch up
+### Forward activations (relu / gelu / silu)
 
-The single remaining delta is the TMA transfer mechanism. To close the gap:
+| Combo | Shape         | C++ µs | DSL µs | C++ GB/s | DSL GB/s | DSL/C++ |
+|-------|---------------|------:|------:|--------:|--------:|--------:|
+| relu  | 4096×4096     |  31.7 |  23.0 |  2150.3 |  2965.8 | **1.38×** |
+| relu  | 8192×8192     | 114.4 |  81.4 |  2383.1 |  3347.7 | **1.40×** |
+| relu  | 16384×16384   | 441.8 | 310.8 |  2468.1 |  3508.8 | **1.42×** |
+| gelu  | 4096×4096     |  48.4 |  56.7 |  1406.8 |  1202.4 | 0.85× |
+| gelu  | 8192×8192     | 191.8 | 209.7 |  1421.3 |  1300.1 | 0.91× |
+| gelu  | 16384×16384   | 753.7 | 811.7 |  1446.8 |  1343.4 | 0.93× |
+| silu  | 4096×4096     |  53.5 |  61.1 |  1274.7 |  1114.8 | 0.87× |
+| silu  | 8192×8192     | 224.0 | 219.3 |  1217.1 |  1242.9 | **1.02×** |
+| silu  | 16384×16384   | 849.4 | 847.6 |  1283.9 |  1286.6 | **1.00×** |
 
-1. **TMA input loads** (`cpasync.CopyBulkTensorTileG2SOp`). Requires:
-   - `cpasync.make_tiled_tma_atom` on host side
-   - `cpasync.tma_partition` with the **TMA coord tensor** returned by
-     `make_tiled_tma_atom`, passed through `flat_divide`
-   - **`cute.arch.elect_one()` context** for the `cute.copy` call — using
-     `if tidx == 0:` causes an infinite MLIR compilation loop
-   - `Int64` mbarrier storage + `mbarrier_init_fence` + `mbarrier_wait` for
-     synchronization
-   - **`CUTLASS_DSL_SM_ARCH=sm_100a`** env var, otherwise PTX targets SM90
-     and TMA instructions fail at runtime with "unspecified launch failure"
+### Backward activations (drelu / dgelu / dsilu)
 
-2. **TMA output stores** (`cpasync.CopyBulkTensorTileS2GOp`). Same pattern
-   as loads but with `cp_async_bulk_commit_group` / `cp_async_bulk_wait_group`
-   and `cute.arch.fence_proxy("async.shared", space="cta")` before the store.
+These are `tex.d{relu,gelu,silu}` — bidim quantize with `IS_DACT=true`.
+The DSL wrapper takes the IS_DACT path (`_kernel_main_dact`, paired G2S
+TMA load, doubled `tx_count`).
 
-An attempted integration in this repo got as far as clean compilation (0.2s)
-but crashed at runtime with an opaque TMA instruction error — the TMA
-descriptor was malformed in a way that requires Nsight Compute to diagnose.
-With working TMA, the rowwise path should reach ~5.5 TB/s (~95% of C++).
+| Combo | Shape         | C++ µs | DSL µs | C++ GB/s | DSL GB/s | DSL/C++ |
+|-------|---------------|------:|------:|--------:|--------:|--------:|
+| drelu | 4096×4096     |  36.7 |  28.5 |  2771.0 |  3566.2 | **1.29×** |
+| drelu | 8192×8192     | 135.6 | 101.8 |  2999.9 |  3995.0 | **1.33×** |
+| drelu | 16384×16384   | 525.6 | 390.7 |  3096.0 |  4165.7 | **1.35×** |
+| dgelu | 4096×4096     |  73.1 |  80.9 |  1390.7 |  1256.6 | 0.90× |
+| dgelu | 8192×8192     | 270.6 | 299.1 |  1503.6 |  1360.0 | 0.90× |
+| dgelu | 16384×16384   |1069.8 |1169.8 |  1521.2 |  1391.2 | 0.91× |
+| dsilu | 4096×4096     |  67.3 |  76.7 |  1510.9 |  1326.8 | 0.88× |
+| dsilu | 8192×8192     | 256.6 | 286.3 |  1585.6 |  1420.9 | 0.90× |
+| dsilu | 16384×16384   |1009.8 |1125.3 |  1611.5 |  1446.2 | 0.90× |
 
-## Reproducing these numbers
+### Bias gradient — path A (bidim, rowwise + colwise)
+
+The C++ template here is `IS_DBIAS=true && COLWISE_SCALING=true`. Both
+sides get the colwise-driven dbias accumulation.
+
+| Combo       | Shape         | C++ µs | DSL µs | C++ GB/s | DSL GB/s | DSL/C++ |
+|-------------|---------------|------:|------:|--------:|--------:|--------:|
+| dbias_drelu | 4096×4096     |  41.6 |  31.5 |  2443.5 |  3228.0 | **1.32×** |
+| dbias_drelu | 8192×8192     | 152.1 | 112.2 |  2674.4 |  3624.9 | **1.36×** |
+| dbias_drelu | 16384×16384   | 591.2 | 431.5 |  2752.8 |  3771.8 | **1.37×** |
+| dbias_dgelu | 4096×4096     |  74.2 |  83.6 |  1370.6 |  1216.6 | 0.89× |
+| dbias_dgelu | 8192×8192     | 278.0 | 307.8 |  1463.6 |  1322.0 | 0.90× |
+| dbias_dgelu | 16384×16384   |1102.6 |1201.8 |  1476.0 |  1354.1 | 0.92× |
+| dbias_dsilu | 4096×4096     |  65.1 |  78.7 |  1562.8 |  1292.0 | 0.83× |
+| dbias_dsilu | 8192×8192     | 247.3 | 296.5 |  1645.3 |  1372.1 | 0.83× |
+| dbias_dsilu | 16384×16384   | 971.3 |1163.0 |  1675.4 |  1399.3 | 0.84× |
+
+### Bias gradient — path B (rowwise-only, shmem transpose)
+
+Rowwise-only IS_DBIAS — the DSL kernel allocates the
+`DBIAS_BUFF_WIDTH=66` smem buffer and does the 32-element
+per-thread accumulator + shmem transpose epilogue described in
+[`MXFP8_CUTEDSL_FEATURE_BENCH.md`](MXFP8_CUTEDSL_FEATURE_BENCH.md).
+C++ takes the corresponding `!COLWISE_SCALING` branch.
+
+| Combo       | Shape         | C++ µs | DSL µs | C++ GB/s | DSL GB/s | DSL/C++ |
+|-------------|---------------|------:|------:|--------:|--------:|--------:|
+| dbias_drelu | 4096×4096     |  25.2 |  22.0 |  3348.5 |  3840.1 | **1.15×** |
+| dbias_drelu | 8192×8192     |  88.6 |  83.6 |  3810.6 |  4040.6 | **1.06×** |
+| dbias_drelu | 16384×16384   | 334.9 | 318.4 |  4032.8 |  4242.0 | **1.05×** |
+| dbias_dgelu | 4096×4096     |  51.3 |  43.5 |  1646.1 |  1941.4 | **1.18×** |
+| dbias_dgelu | 8192×8192     | 198.7 | 162.9 |  1699.3 |  2072.6 | **1.22×** |
+| dbias_dgelu | 16384×16384   | 749.2 | 632.9 |  1802.6 |  2134.1 | **1.18×** |
+| dbias_dsilu | 4096×4096     |  51.6 |  49.8 |  1635.1 |  1694.9 | **1.04×** |
+| dbias_dsilu | 8192×8192     | 206.0 | 194.7 |  1639.0 |  1734.4 | **1.06×** |
+| dbias_dsilu | 16384×16384   | 791.5 | 752.9 |  1706.3 |  1793.8 | **1.05×** |
+
+## Headline takeaways
+
+* **Plain MXFP8 quantize is ~14% faster than TE C++ at all sizes.**
+  4096² → 1.11×, 16384² → 1.14×. The DSL kernel saturates HBM3e at
+  ~4.5 TB/s on 16k² (vs ~4.0 TB/s for C++) — the win is from cleaner
+  TMA scheduling around bidim output stores.
+
+* **Forward `relu`, backward `drelu`, and bidim `dbias_drelu` are the
+  big DSL wins** (1.29× – 1.42×). C++ `quantize_mxfp8_kernel` for
+  drelu is constrained by the way nvcc schedules its
+  branch-and-multiply derivative; DSL's
+  `partial * cute.where(act_in > 0, …)` lowers to a cleaner sequence.
+
+* **`gelu` / `silu` / `dgelu` / `dsilu` sit at ~0.85× – 0.93× C++.**
+  The gap is in scalar f32 activation throughput — once we leave the
+  packed-x2 amax/cast fast path the DSL kernel runs `cute.math.tanh`
+  / `cute.math.exp` (with `fastmath=False` for bit-exactness against
+  `tanhf` / `expf`) and nvcc out-schedules CuTeDSL's MLIR lowering on
+  the FFMAs. Throughput halves from ~4 TB/s to ~1.3 TB/s — compute,
+  not bandwidth, dominates here.
+
+* **`dbias_drelu` on path B at 4k² is the only place small-size DSL is
+  notably ahead** (1.15×). At 8k² and 16k² path B drelu drops to 1.05×
+  / 1.06× because the DSL kernel becomes bandwidth-bound earlier than
+  C++.
+
+* **Path B beats path A at every size for `dbias_dgelu` / `dbias_dsilu`
+  at the kernel level** because rowwise-only avoids the colwise smem
+  transpose store and one TMA S2G. The shmem transpose for the dbias
+  accumulator costs less than the full colwise output. This makes
+  `dbias_d*` rowwise-only a strong fit when downstream consumers don't
+  need both layouts.
+
+* **Wall-clock at 4k² over-states C++ wins / under-states DSL wins by
+  ~30–40 percentage points.** Always cross-check with nsys at small
+  shapes. At 8k²+ the two views converge.
+
+## Methodology notes
+
+* The bench script measures `(warmup, then iters timed across one
+  cuda.Event pair)` — *not* per-call events. Per-call events would add
+  a ~0.5 µs per-iter overhead.
+* `nsys cuda_gpu_kern_sum` reports the average kernel runtime across
+  the entire timed range, weighted by instances. The dominant kernel
+  is selected by total time:
+  - **DSL**: any kernel whose name contains `kernel_cutlass` or
+    `cutedsl_alt`.
+  - **C++**: the largest non-DSL `quantize_mxfp8_kernel` instantiation
+    by total time. Activation entry kernels, `reduce_dbias`, and
+    `torch.sum`'s CUB reductions are excluded.
+* The dbias post-kernel reduce (`torch.sum(workspace, dim=0)` on the
+  DSL side, TE's `reduce_dbias` C++ kernel on the reference side) is
+  *not* included in the kernel-only nsys timing — both paths run
+  separate kernels for it. Wall-clock includes both. The reduce is
+  ~3–8 µs at all sizes and dwarfs neither.
+* All measurements collected on `cutedsl_mxfp8` branch's CuTeDSL
+  kernel against the unmodified TE C++ build (`develop`-equivalent
+  `quantize_mxfp8.cuh`).
+
+## Reproducing
 
 ```bash
 cd tests/pytorch/mxfp8
 
-# List all presets
-python bench_mxfp8_cutedsl.py --list-presets
+# Wall-clock only (fast; no profiling overhead)
+python bench_mxfp8_cutedsl.py \
+    --warmup 10 --iters 100 \
+    --shapes 4096,4096;8192,8192;16384,16384 \
+    --direction both \
+    --combo dbias_dgelu
 
-# Run any preset (no nsys)
-python bench_mxfp8_cutedsl.py --preset large --direction all \
-    --warmup 10 --iters 100 --csv out.csv
+# Sweep all combos at one shape, write CSV
+python bench_mxfp8_cutedsl.py \
+    --shapes 16384,16384 --direction both \
+    --combos plain,gelu,silu,relu,dgelu,dsilu,drelu,dbias_dgelu,dbias_dsilu,dbias_drelu \
+    --csv perf.csv
 
-# Run with nsys (combined timeline)
-./run_nsys_profile.sh --preset medium --direction both
+# nsys kernel-only (per-shape, per-combo, per-direction)
+./run_nsys_profile.sh \
+    --shapes '4096,4096;8192,8192;16384,16384' \
+    --direction both \
+    --combos plain,gelu,silu,relu,dgelu,dsilu,drelu,dbias_dgelu,dbias_dsilu,dbias_drelu
 
-# Run with nsys (one .nsys-rep per shape)
-./run_nsys_profile.sh --per-shape --preset square
+./run_nsys_profile.sh \
+    --shapes '4096,4096;8192,8192;16384,16384' \
+    --direction row \
+    --combos dbias_dgelu,dbias_dsilu,dbias_drelu
 ```
 
-All data in this document was collected with `--warmup 10 --iters 100`
-(large/square/llm/aspect/default) or `--iters 200` (tiny/small/medium) on a
-single GB200.
+The summary table in `run_nsys_profile.sh`'s stdout is the kernel-only
+view; individual `${OUT}.stdout` files contain the wall-clock numbers
+from the bench script (with nsys profiling overhead, so absolute µs
+are inflated — only the ratio is meaningful).
 
-## Bottom line
+## Wrapper-overhead breakdown via NVTX
 
-The CuTeDSL implementation matches every **algorithmic** optimization of the
-C++ reference bit-for-bit and achieves **0.80–0.85× C++ performance at small
-sizes** and **0.51–0.58× at large sizes**. The remaining gap is entirely
-TMA-shaped: the C++ kernel's `cp.async.bulk.tensor` provides ~2× more
-bandwidth than CuTeDSL's Ampere-style `cp.async` path on Blackwell. The
-optimization structure is sound; the missing piece is a CuTeDSL integration
-of TMA bulk transfers that compiles and runs correctly.
+The DSL Python wrapper is annotated with NVTX ranges around each
+phase, so `nsys profile --trace=cuda,nvtx ...` produces a CPU-thread
+timeline that decomposes the per-call host time. Useful when the
+wall-clock vs. nsys-kernel-only gap at small shapes (4k²) needs to
+be attributed to a specific wrapper section.
+
+The ranges are pushed/popped in `quantize_mxfp8_cutedsl(...)` in
+[`quantize_mxfp8_cutedsl_alt.py`](quantize_mxfp8_cutedsl_alt.py).
+
+| NVTX range | What's inside | Typical host µs (4k²) | Blocks on GPU? |
+|---|---|---:|---|
+| `dsl.validate` | All Python assertions on `x` / `noop` / `amax` / `act_input` shapes/dtypes/contiguity, `_torch_to_cutlass_dtype` map probe, `_is_derivative_activation` lookup, `cuda.CUstream(...)` ctype wrap. Pure Python — no CUDA calls. | ~17 | No |
+| `dsl.alloc` | `torch.empty` for the 4 output buffers (`rowwise_data`, `rowwise_scale`, `colwise_data`, `colwise_scale`). PyTorch caching allocator pool hit — no `cudaMalloc`/sync in steady state. | ~28 | No (unless pool empty) |
+| `dsl.cache_lookup` | `MXFP8QuantizeConfig(...)` Python object construction + `_get_compiled_kernel(cfg, stream)` dict probe. Hot path: dict lookup only; cold path (first call per config): triggers full CuTeDSL JIT compile, amortized in warmup. | ~3 | No (in steady state) |
+| `dsl.dbias_workspace` | One `torch.empty` for the `(blocks_Y, N) f32` dbias partial-sum buffer when `compute_dbias=True`. Small no-op dummy alloc otherwise. | ~8 | No |
+| `dsl.make_ptr` | The 9 `make_ptr(...)` ctype wraps over `tensor.data_ptr()` for `x`, `act_input`, 4 output buffers, `noop`, `amax`, `dbias_workspace`. Pure Python wrapper around a uintptr_t. | ~16 | No |
+| `dsl.launch` | `compiled(*args)` — the CuTeDSL-emitted launcher's host stub: pack the kernel descriptor and call `cudaLaunchKernelExC`. Returns as soon as the kernel is enqueued; the kernel itself runs asynchronously after this range ends. | ~36 | No (just enqueues) |
+| `dsl.reduce_dbias` | `torch.sum(workspace, dim=0).to(x.dtype)` — only present when `compute_dbias=True`. Two extra CUDA kernel launches (`at::native::reduce_kernel` + a `bfloat16_copy_kernel` for the dtype downcast). Returns as soon as both are enqueued; kernels run asynchronously. | ~46 | No (just enqueues) |
+
+Two things to keep in mind when reading the NVTX timeline:
+
+1. **None of the ranges block on the GPU.** Every CUDA call inside
+   them (`cudaLaunchKernel*`) is fire-and-forget — it enqueues work on
+   the stream and returns within ~5–10 µs without waiting for kernel
+   start or completion. So a range can end on the CPU while the
+   kernel it launched is still running, and the CPU has already moved
+   on to the next iter's `dsl.validate`. The only forced CPU↔GPU
+   rendezvous in the bench is the `torch.cuda.synchronize()` *after*
+   `end.record()` in `bench_once`, which sits outside the timed window.
+
+2. **NVTX/nsys tracing inflates the absolute numbers.** Each NVTX
+   `range_push/pop` adds ~1–2 µs, and every traced `cudaLaunchKernel`
+   gets recorded at ~12–13 µs vs. ~5–8 µs untraced. For the 4k²
+   `dbias_dgelu` both case, summing the median NVTX ranges gives
+   ~155 µs/iter while the clean (no-nsys) wall-clock is 110 µs/iter —
+   the ~45 µs delta is tracing overhead, distributed across the
+   ranges that contain CUDA API calls (`launch` and `reduce_dbias`
+   take the brunt). Use the *relative* breakdown to attribute cost;
+   take the *absolute* numbers as ~30–40% over the truth.
+
+The wrapper is host-bound at small shapes (host wall-clock per iter
+> kernel time per iter), so `cuda.Event.elapsed_time` ends up
+measuring host time, not kernel time. At 16k² the kernel runs
+~1.2 ms and the wrapper's ~50 µs disappears into the GPU's shadow,
+restoring agreement between wall-clock and kernel-only.
