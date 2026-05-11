@@ -28,6 +28,7 @@ mkdir -p profile/nsys_kernel_time
 PRESET="default"
 SHAPES_ARG=""
 DIR_ARG="all"
+COMBOS_ARG="plain"
 EXTRA_ARGS=()
 
 while [[ $# -gt 0 ]]; do
@@ -38,9 +39,11 @@ while [[ $# -gt 0 ]]; do
         --preset) PRESET="$2"; shift 2 ;;
         --shapes) SHAPES_ARG="$2"; shift 2 ;;
         --direction) DIR_ARG="$2"; shift 2 ;;
+        --combo|--combos) COMBOS_ARG="$2"; shift 2 ;;
         *) EXTRA_ARGS+=("$1"); shift ;;
     esac
 done
+IFS=',' read -r -a COMBOS <<< "$COMBOS_ARG"
 
 WARMUP=${WARMUP:-10}
 ITERS=${ITERS:-100}
@@ -70,13 +73,14 @@ esac
 RESULTS_FILE=$(mktemp)
 trap 'rm -f "$RESULTS_FILE"' EXIT
 
+for COMBO in "${COMBOS[@]}"; do
 for SHAPE_PAIR in $SHAPES; do
     M=${SHAPE_PAIR%,*}
     N=${SHAPE_PAIR#*,}
     for DIR in "${DIRS[@]}"; do
         TS=$(date +"%Y%m%d-%H%M%S")
-        OUT="profile/nsys_kernel_time/nsys_${M}x${N}_${DIR}_${TS}"
-        echo "==> nsys: ${M}x${N} ${DIR}"
+        OUT="profile/nsys_kernel_time/nsys_${COMBO}_${M}x${N}_${DIR}_${TS}"
+        echo "==> nsys: ${COMBO} ${M}x${N} ${DIR}"
 
         if ! nsys profile \
             --trace=cuda,nvtx \
@@ -88,26 +92,37 @@ for SHAPE_PAIR in $SHAPES; do
             python bench_mxfp8_cutedsl.py \
                 --warmup "$WARMUP" --iters "$ITERS" \
                 --shapes "${M},${N}" --direction "$DIR" \
+                --combo "$COMBO" \
                 "${EXTRA_ARGS[@]}" \
             > "${OUT}.stdout" 2>&1
         then
             echo "   FAILED — see ${OUT}.stdout"
-            echo "${M}x${N} ${DIR} 0 0 0 0 0" >> "$RESULTS_FILE"
+            echo "${COMBO} ${M}x${N} ${DIR} 0 0 0 0 0" >> "$RESULTS_FILE"
             continue
         fi
 
-        # Bytes moved per single-kernel launch, matching bench_mxfp8_cutedsl.py:
-        #   row or col only: 2*M*N (bf16 read) + M*N (fp8 out) + M*N/32 (scales)
-        #   both:           2*M*N            + 2*M*N          + 2*M*N/32
+        # Bytes moved per single-kernel launch. Activation/dbias variants
+        # add an extra act_input read (bf16); other terms identical.
+        EXTRA_IN=0
+        case "$COMBO" in
+            dgelu|dsilu|drelu|dbias_dgelu|dbias_dsilu|dbias_drelu)
+                EXTRA_IN=1 ;;
+        esac
         if [[ "$DIR" == "both" ]]; then
-            BYTES=$(awk -v m="$M" -v n="$N" 'BEGIN{printf "%.0f", m*n*4 + 2*(m*n/32)}')
+            BYTES=$(awk -v m="$M" -v n="$N" -v ei="$EXTRA_IN" \
+                'BEGIN{printf "%.0f", (2 + 2*ei)*m*n + 2*m*n + 2*(m*n/32)}')
         else
-            BYTES=$(awk -v m="$M" -v n="$N" 'BEGIN{printf "%.0f", m*n*3 +    (m*n/32)}')
+            BYTES=$(awk -v m="$M" -v n="$N" -v ei="$EXTRA_IN" \
+                'BEGIN{printf "%.0f", (2 + 2*ei)*m*n + m*n + (m*n/32)}')
         fi
 
         # Extract kernel-only avg/instances via cuda_gpu_kern_sum CSV.
-        # DSL kernel name contains "kernel_cutlass_kernel_quantize_mxfp8";
-        # C++ kernel contains "::quantize_mxfp8_kernel<".
+        # DSL kernel name contains "kernel_cutlass_kernel_quantize_mxfp8".
+        # The TE C++ side's main quantize-cast kernel is the largest non-DSL
+        # kernel containing "quantize" (covers plain quantize_mxfp8_kernel
+        # template variants for IS_ACT/IS_DACT/IS_DBIAS, plus the activation
+        # entry kernels). Small util kernels (reduce_dbias, torch.sum CUB
+        # reductions, RNG) are ignored.
         PARSED=$(python - "$OUT" <<'PY'
 import csv, io, subprocess, sys
 rep = sys.argv[1] + ".nsys-rep"
@@ -118,38 +133,44 @@ out = subprocess.run(
 )
 dsl_avg = cpp_avg = None
 dsl_inst = cpp_inst = 0
+cpp_total_best = -1.0
 for row in csv.reader(io.StringIO(out.stdout)):
     if len(row) < 9:
         continue
     try:
-        avg_ns = float(row[3])
+        total_ns = float(row[1])
         inst = int(row[2])
+        avg_ns = float(row[3])
     except ValueError:
         continue
     name = row[-1]
-    if "kernel_cutlass_kernel_quantize_mxfp8" in name and dsl_avg is None:
-        dsl_avg, dsl_inst = avg_ns, inst
-    elif "::quantize_mxfp8_kernel<" in name and cpp_avg is None:
-        cpp_avg, cpp_inst = avg_ns, inst
+    if "kernel_cutlass" in name or "cutedsl_alt" in name:
+        if dsl_avg is None:
+            dsl_avg, dsl_inst = avg_ns, inst
+    else:
+        # Pick the dominant TE quantize/cast kernel by total time.
+        if "quantize_mxfp8_kernel" in name and total_ns > cpp_total_best:
+            cpp_total_best = total_ns
+            cpp_avg, cpp_inst = avg_ns, inst
 print(f"{dsl_avg or 0} {cpp_avg or 0} {dsl_inst} {cpp_inst}")
 PY
         )
-        echo "${M}x${N} ${DIR} ${PARSED} ${BYTES}" >> "$RESULTS_FILE"
+        echo "${COMBO} ${M}x${N} ${DIR} ${PARSED} ${BYTES}" >> "$RESULTS_FILE"
     done
+done
 done
 
 # --- print summary ---
 echo
 echo "Kernel-only runtime (nsys cuda_gpu_kern_sum, WARMUP=${WARMUP} ITERS=${ITERS})"
-echo "==========================================================================================="
-printf "%-14s  %-5s  %9s  %9s  %9s  %9s  %8s\n" \
-    "shape" "dir" "DSL us" "C++ us" "DSL GB/s" "C++ GB/s" "speedup"
-printf -- "--------------  -----  ---------  ---------  ---------  ---------  --------\n"
+echo "============================================================================================================="
+printf "%-14s  %-14s  %-5s  %9s  %9s  %9s  %9s  %8s\n" \
+    "combo" "shape" "dir" "DSL us" "C++ us" "DSL GB/s" "C++ GB/s" "DSL/C++"
+printf -- "--------------  --------------  -----  ---------  ---------  ---------  ---------  --------\n"
 
-while read -r SHAPE DIR DSL_NS CPP_NS DI CI BYTES; do
+while read -r COMBO SHAPE DIR DSL_NS CPP_NS DI CI BYTES; do
     DSL_US=$(awk -v v="$DSL_NS" 'BEGIN{printf "%.2f", v/1000.0}')
     CPP_US=$(awk -v v="$CPP_NS" 'BEGIN{printf "%.2f", v/1000.0}')
-    # GB/s = bytes / ns  (since 1e-9 s cancels 1e9 in GB conversion).
     DSL_GBPS=$(awk -v b="$BYTES" -v t="$DSL_NS" 'BEGIN{if(t>0) printf "%.1f", b/t; else print "n/a"}')
     CPP_GBPS=$(awk -v b="$BYTES" -v t="$CPP_NS" 'BEGIN{if(t>0) printf "%.1f", b/t; else print "n/a"}')
     # speedup = C++ time / DSL time  (>1.0 = DSL faster).
@@ -158,8 +179,8 @@ while read -r SHAPE DIR DSL_NS CPP_NS DI CI BYTES; do
     else
         SPEEDUP="n/a"
     fi
-    printf "%-14s  %-5s  %9s  %9s  %9s  %9s  %8s\n" \
-        "$SHAPE" "$DIR" "$DSL_US" "$CPP_US" "$DSL_GBPS" "$CPP_GBPS" "$SPEEDUP"
+    printf "%-14s  %-14s  %-5s  %9s  %9s  %9s  %9s  %8s\n" \
+        "$COMBO" "$SHAPE" "$DIR" "$DSL_US" "$CPP_US" "$DSL_GBPS" "$CPP_GBPS" "$SPEEDUP"
 done < "$RESULTS_FILE"
 
 echo
