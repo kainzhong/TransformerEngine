@@ -208,7 +208,7 @@ def pack_f32x2(lo: Float32, hi: Float32, *, loc=None, ip=None) -> Int64:
 # `max.xorsign.abs.<fmt>x2`, then per-lane widen-to-f32 + `mul.f32x2` +
 # `cvt.rn.satfinite.<out>x2.f32`. Only the opcodes differ. Build one PTX kit
 # per format at module load and let the kernel pick the right kit at JIT
-# trace time via `cfg.dtype` — equivalent to a C++ template arg specialization
+# trace time via `cfg.DTYPE` — equivalent to a C++ template arg specialization
 # on `IType`, with no runtime branch.
 # ---------------------------------------------------------------------------
 def _build_packed16_kit(in_fmt: str):
@@ -390,7 +390,7 @@ def _packed16_kit(dtype):
 #
 # Each entry is a Float32 → Float32 callable applied per element before the
 # MXFP8 amax + cast. Selection is by Python string at JIT trace time, so the
-# const-expr machinery treats `cfg.activation` like a C++ template argument
+# const-expr machinery treats `cfg.ACTIVATION` like a C++ template argument
 # — no runtime branch in the inner loop, separate kernel cached per choice.
 #
 # Math primitives match CUDA fast-math intrinsics so outputs are bit-exact
@@ -516,7 +516,7 @@ def cvt_f32x2_to_fp8e5m2x2(val_hi: Float32, val_lo: Float32,
 def _cvt_f32_to_fp8(fp8_dtype: str):
     """Const-expr dispatch: pick the f32→fp8 scalar PTX op based on output dtype.
 
-    `fp8_dtype` is the Python string from `cfg.fp8_dtype`, evaluated at JIT
+    `fp8_dtype` is the Python string from `cfg.FP8_DTYPE`, evaluated at JIT
     trace time; the unused branch is never traced.
     """
     if fp8_dtype == "e5m2":
@@ -538,16 +538,16 @@ class MXFP8QuantizeConfig:
     def __init__(self, dtype, M, N, fp8_dtype="e4m3", rowwise=True, colwise=False,
                  with_gemm_swizzled_scales=False, with_amax=False,
                  activation=None, with_dbias=False):
-        self.dtype = dtype
+        self.DTYPE = dtype
         self.M = M
         self.N = N
-        self.fp8_dtype = fp8_dtype
-        self.rowwise = rowwise
-        self.colwise = colwise
-        self.with_gemm_swizzled_scales = with_gemm_swizzled_scales
+        self.FP8_DTYPE = fp8_dtype
+        self.ROWWISE = rowwise
+        self.COLWISE = colwise
+        self.WITH_GEMM_SWIZZLED_SCALES = with_gemm_swizzled_scales
         # When True, kernel reduces max(|x|) across the full tensor and atomic-
         # maxes into a caller-provided 1-element f32 (delayed-scaling FP8).
-        self.with_amax = with_amax
+        self.WITH_AMAX = with_amax
         # Optional fused activation. When set, the kernel applies OP per
         # element before amax+cast. The "d"-prefixed entries are derivative
         # activations — these select the IS_DACT path which loads a second
@@ -557,10 +557,10 @@ class MXFP8QuantizeConfig:
             raise ValueError(
                 f"unknown activation {activation!r}; expected one of "
                 f"{sorted(_ACTIVATIONS)} or None")
-        self.activation = activation
+        self.ACTIVATION = activation
         # Derived flag — fully determined by the activation name. The kernel
         # entry point reads this to dispatch IS_DACT vs IS_ACT/none.
-        self.is_dact = _is_derivative_activation(activation)
+        self.IS_DACT = _is_derivative_activation(activation)
         # IS_DBIAS — accumulate per-column sum of post-activation values into
         # a per-CTA workspace, then reduce externally to produce the bias
         # gradient. Two paths exist depending on whether colwise scaling is
@@ -571,12 +571,10 @@ class MXFP8QuantizeConfig:
         #       strip of 32 different columns; per-element thread_dbias array
         #       is shmem-transposed after the consumer loop so each thread
         #       ends up owning a column for the workspace write.
-        self.with_dbias = with_dbias
+        self.WITH_DBIAS = with_dbias
         if with_dbias and not (rowwise or colwise):
             raise ValueError("with_dbias=True requires rowwise or colwise to be True")
-        # is_path_b: rowwise-only with dbias — needs shmem transpose epilogue.
-        self.is_dbias_path_b = with_dbias and not colwise
-        self.max_norm_rcp = FP8E4M3_MAX_NORM_RCP if fp8_dtype == "e4m3" else FP8E5M2_MAX_NORM_RCP
+        self.MAX_NORM_RCP = FP8E4M3_MAX_NORM_RCP if fp8_dtype == "e4m3" else FP8E5M2_MAX_NORM_RCP
 
 
 # ---------------------------------------------------------------------------
@@ -627,7 +625,7 @@ class MXFP8QuantizeSmemKernel:
         # DBias workspace — `[blocks_Y, N]` f32 partial sums, one per (CTA,
         # col). After this kernel, a separate reduce sums down blocks_Y to
         # produce the final dbias[N]. Wrapper passes a dummy when not
-        # cfg.with_dbias; the writeback site is const-expr-gated so the
+        # cfg.WITH_DBIAS; the writeback site is const-expr-gated so the
         # dummy is never touched.
         blocks_Y = (cfg.M + TILE_Y * NUM_TILES - 1) // (TILE_Y * NUM_TILES)
         mDbias = cute.make_tensor(
@@ -636,13 +634,13 @@ class MXFP8QuantizeSmemKernel:
         # all work if it's 1.0. Wrapper passes a zero-init dummy when caller
         # didn't supply a real flag, so the kernel always sees a valid ptr.
         mNoop = cute.make_tensor(noop_ptr, cute.make_layout(1))
-        # 1-element global amax accumulator. Used only when cfg.with_amax —
+        # 1-element global amax accumulator. Used only when cfg.WITH_AMAX —
         # otherwise wrapper passes a dummy and the kernel skips the reduction.
         mAmax = cute.make_tensor(amax_ptr, cute.make_layout(1))
 
         # Rowwise output tensors
         mO_row = cute.make_tensor(out_row_ptr, cute.make_layout((M, cfg.N), stride=(cfg.N, 1)))
-        if cutlass.const_expr(cfg.with_gemm_swizzled_scales):
+        if cutlass.const_expr(cfg.WITH_GEMM_SWIZZLED_SCALES):
             # Bake the cuBLAS MXFP8 scale-block swizzle into the tensor's
             # cute layout — same logical (M, num_scale_cols) shape, but the
             # bytes are reshuffled per the cuBLAS spec
@@ -668,7 +666,7 @@ class MXFP8QuantizeSmemKernel:
 
         # Colwise output tensors
         mO_col = cute.make_tensor(out_col_ptr, cute.make_layout((M, cfg.N), stride=(cfg.N, 1)))
-        if cutlass.const_expr(cfg.with_gemm_swizzled_scales):
+        if cutlass.const_expr(cfg.WITH_GEMM_SWIZZLED_SCALES):
             # Same swizzle, but the 128-extent and 4-extent axes swap roles:
             # the col axis (range cfg.N) gets the 32×4 inner decomp, the
             # scale-row axis (range num_scale_rows) gets the 4-extent dim.
@@ -744,8 +742,8 @@ class MXFP8QuantizeSmemKernel:
         mO_col, # (M, N):(N, 1), colwise quantized output tensor (uint8)
         mS_col, # (M // 32, N):(N, 1), colwise scale tensor (uint8)
         mNoop,  # (1,) f32 — skip all work if mNoop[0] == 1.0
-        mAmax,  # (1,) f32 — global amax accumulator (only used if cfg.with_amax)
-        mDbias, # (blocks_Y, N) f32 dbias workspace (only used if cfg.with_dbias)
+        mAmax,  # (1,) f32 — global amax accumulator (only used if cfg.WITH_AMAX)
+        mDbias, # (blocks_Y, N) f32 dbias workspace (only used if cfg.WITH_DBIAS)
         max_norm_rcp,
         dtype: cutlass.Constexpr[Type[cutlass.Numeric]],
         tma_atom, tma_src,
@@ -772,7 +770,7 @@ class MXFP8QuantizeSmemKernel:
             # different inner compute (`elt = grad · dOP(act_in)`), so it
             # gets its own top-level body — no nested const-expr branches
             # threaded through the producer/consumer of the IS_ACT/plain path.
-            if cutlass.const_expr(cfg.is_dact):
+            if cutlass.const_expr(cfg.IS_DACT):
                 self._kernel_main_dact(
                     mX, mO_row, mS_row, mO_col, mS_col, mAmax, mDbias,
                     max_norm_rcp, dtype,
@@ -809,8 +807,8 @@ class MXFP8QuantizeSmemKernel:
         # C++ and only allocate what the active pass actually uses.
         # sAmax holds one f32 per warp for the cross-warp amax reduction —
         # negligible (8 bytes for NUM_WARPS=2) and we always allocate so the
-        # struct doesn't fork on a 4th const-expr (cfg.with_amax) dimension.
-        if cutlass.const_expr(cfg.rowwise and cfg.colwise):
+        # struct doesn't fork on a 4th const-expr (cfg.WITH_AMAX) dimension.
+        if cutlass.const_expr(cfg.ROWWISE and cfg.COLWISE):
             @cute.struct
             class SharedStorage:
                 mbar_storage: cute.struct.MemRange[cute.Int64, 2 * NUM_STAGES]
@@ -824,7 +822,7 @@ class MXFP8QuantizeSmemKernel:
                     cute.struct.MemRange[Uint8, TILE_Y * TILE_X * NUM_STAGES], 128
                 ]
                 sAmax: cute.struct.MemRange[Float32, NUM_WARPS]
-        elif cutlass.const_expr(cfg.rowwise and cfg.is_dbias_path_b):
+        elif cutlass.const_expr(cfg.ROWWISE and cfg.WITH_DBIAS and not cfg.COLWISE):
             # Path B: rowwise-only with dbias. Allocates an additional
             # `[THREADS_Y, DBIAS_BUFF_WIDTH]` f32 buffer for the post-loop
             # shmem transpose that aligns thread→column ownership before
@@ -840,7 +838,7 @@ class MXFP8QuantizeSmemKernel:
                 ]
                 sDbiasBuf: cute.struct.MemRange[Float32, DBIAS_BUFF_SIZE]
                 sAmax: cute.struct.MemRange[Float32, NUM_WARPS]
-        elif cutlass.const_expr(cfg.rowwise):
+        elif cutlass.const_expr(cfg.ROWWISE):
             @cute.struct
             class SharedStorage:
                 mbar_storage: cute.struct.MemRange[cute.Int64, 2 * NUM_STAGES]
@@ -875,14 +873,14 @@ class MXFP8QuantizeSmemKernel:
                 stride=((TILE_X, 1), TILE_Y * TILE_X),
             )
         )
-        if cutlass.const_expr(cfg.rowwise):
+        if cutlass.const_expr(cfg.ROWWISE):
             sO_row = storage.sO_row.get_tensor(
                 cute.make_layout(
                     ((TILE_Y, TILE_X), NUM_STAGES),
                     stride=((TILE_X, 1), TILE_Y * TILE_X),
                 )
             )
-        if cutlass.const_expr(cfg.colwise):
+        if cutlass.const_expr(cfg.COLWISE):
             sO_col = storage.sO_col.get_tensor(
                 cute.make_layout(
                     ((TILE_Y, TILE_X), NUM_STAGES),
@@ -950,7 +948,7 @@ class MXFP8QuantizeSmemKernel:
         )
 
         # Same partitioning for S2G outputs: sO_row → mO_row and sO_col → mO_col.
-        if cutlass.const_expr(cfg.rowwise):
+        if cutlass.const_expr(cfg.ROWWISE):
             gO_row_tiled = cute.zipped_divide(tma_dst_out_row, (TILE_Y, TILE_X))
             tXsO_row, tXgO_row = cute.nvgpu.cpasync.tma_partition(
                 tma_atom_out_row,
@@ -959,7 +957,7 @@ class MXFP8QuantizeSmemKernel:
                 sO_row,
                 gO_row_tiled,
             )
-        if cutlass.const_expr(cfg.colwise):
+        if cutlass.const_expr(cfg.COLWISE):
             gO_col_tiled = cute.zipped_divide(tma_dst_out_col, (TILE_Y, TILE_X))
             tXsO_col, tXgO_col = cute.nvgpu.cpasync.tma_partition(
                 tma_atom_out_col,
@@ -995,7 +993,7 @@ class MXFP8QuantizeSmemKernel:
         # with the per-warp redux + cross-warp shmem reduce + atomic at the
         # bottom to produce a global max(|x|) in mAmax. Initialised to 0
         # since amax is non-negative.
-        if cutlass.const_expr(cfg.with_amax):
+        if cutlass.const_expr(cfg.WITH_AMAX):
             block_amax = Float32(0.0)
         # Per-thread, per-column dbias accumulator. Each thread owns column
         # `tidx` of the colwise pass. Threaded through `_process_colwise` so
@@ -1016,21 +1014,21 @@ class MXFP8QuantizeSmemKernel:
             sX_tile = sX[(None, cons_state.index)]          # (TILE_Y, TILE_X) bf16
             base_row = (bidy * NUM_TILES + stage) * TILE_Y
 
-            if cutlass.const_expr(cfg.colwise):
+            if cutlass.const_expr(cfg.COLWISE):
                 sO_col_tile = sO_col[(None, cons_state.index)]
                 amax_c, block_dbias = self._process_colwise(
                     sX_tile, sO_col_tile, base_row, bidx, tidx,
                     mS_col, max_norm_rcp, block_dbias,
                 )
-                if cutlass.const_expr(cfg.with_amax):
+                if cutlass.const_expr(cfg.WITH_AMAX):
                     block_amax = cute.arch.fmax(block_amax, amax_c)
-            if cutlass.const_expr(cfg.rowwise):
+            if cutlass.const_expr(cfg.ROWWISE):
                 sO_row_tile = sO_row[(None, cons_state.index)]
                 amax_r, thread_dbias_rw = self._process_rowwise(
                     sX_tile, sO_row_tile, base_row, bidx, tidx,
                     mS_row, max_norm_rcp, thread_dbias_rw,
                 )
-                if cutlass.const_expr(cfg.with_amax):
+                if cutlass.const_expr(cfg.WITH_AMAX):
                     block_amax = cute.arch.fmax(block_amax, amax_r)
 
             # Make all smem stores (sO_row and/or sO_col) visible to the TMA
@@ -1045,13 +1043,13 @@ class MXFP8QuantizeSmemKernel:
 
             if warp_idx == 0:
                 tile_y = bidy * NUM_TILES + stage
-                if cutlass.const_expr(cfg.rowwise):
+                if cutlass.const_expr(cfg.ROWWISE):
                     cute.copy(
                         tma_atom_out_row,
                         tXsO_row[(None, cons_state.index)],
                         tXgO_row[(None, (tile_y, bidx))],
                     )
-                if cutlass.const_expr(cfg.colwise):
+                if cutlass.const_expr(cfg.COLWISE):
                     cute.copy(
                         tma_atom_out_col,
                         tXsO_col[(None, cons_state.index)],
@@ -1074,9 +1072,9 @@ class MXFP8QuantizeSmemKernel:
         # thread's per-element accumulators to sDbiasBuf, sync, then each
         # thread reads back one column's worth of values across THREADS_Y
         # rows and sums them.
-        if cutlass.const_expr(cfg.with_dbias and not cfg.is_dbias_path_b):
+        if cutlass.const_expr(cfg.WITH_DBIAS and cfg.COLWISE):
             mDbias[bidy, bidx * TILE_X + tidx] = block_dbias
-        elif cutlass.const_expr(cfg.is_dbias_path_b):
+        elif cutlass.const_expr(cfg.WITH_DBIAS and not cfg.COLWISE):
             self._dbias_path_b_writeback(
                 storage.sDbiasBuf, mDbias, thread_dbias_rw, bidx, bidy, tidx,
             )
@@ -1089,7 +1087,7 @@ class MXFP8QuantizeSmemKernel:
         #    magnitude ordering, so atomic_max on i32 bits gives the right
         #    result. (atomic_max_float32 also exists but its pointer
         #    normalisation is broken as of this CuTeDSL build.)
-        if cutlass.const_expr(cfg.with_amax):
+        if cutlass.const_expr(cfg.WITH_AMAX):
             warp_amax = cute.arch.warp_redux_sync(block_amax, kind="fmax")
             sAmax = storage.sAmax.get_tensor(cute.make_layout(NUM_WARPS))
             lane_idx = tidx % 32
@@ -1134,7 +1132,7 @@ class MXFP8QuantizeSmemKernel:
         cfg = self.cfg
 
         # SharedStorage: same shape as non-DACT plus `sX_act`.
-        if cutlass.const_expr(cfg.rowwise and cfg.colwise):
+        if cutlass.const_expr(cfg.ROWWISE and cfg.COLWISE):
             @cute.struct
             class SharedStorage:
                 mbar_storage: cute.struct.MemRange[cute.Int64, 2 * NUM_STAGES]
@@ -1151,7 +1149,7 @@ class MXFP8QuantizeSmemKernel:
                     cute.struct.MemRange[Uint8, TILE_Y * TILE_X * NUM_STAGES], 128
                 ]
                 sAmax: cute.struct.MemRange[Float32, NUM_WARPS]
-        elif cutlass.const_expr(cfg.rowwise and cfg.is_dbias_path_b):
+        elif cutlass.const_expr(cfg.ROWWISE and cfg.WITH_DBIAS and not cfg.COLWISE):
             @cute.struct
             class SharedStorage:
                 mbar_storage: cute.struct.MemRange[cute.Int64, 2 * NUM_STAGES]
@@ -1166,7 +1164,7 @@ class MXFP8QuantizeSmemKernel:
                 ]
                 sDbiasBuf: cute.struct.MemRange[Float32, DBIAS_BUFF_SIZE]
                 sAmax: cute.struct.MemRange[Float32, NUM_WARPS]
-        elif cutlass.const_expr(cfg.rowwise):
+        elif cutlass.const_expr(cfg.ROWWISE):
             @cute.struct
             class SharedStorage:
                 mbar_storage: cute.struct.MemRange[cute.Int64, 2 * NUM_STAGES]
@@ -1209,14 +1207,14 @@ class MXFP8QuantizeSmemKernel:
                 stride=((TILE_X, 1), TILE_Y * TILE_X),
             )
         )
-        if cutlass.const_expr(cfg.rowwise):
+        if cutlass.const_expr(cfg.ROWWISE):
             sO_row = storage.sO_row.get_tensor(
                 cute.make_layout(
                     ((TILE_Y, TILE_X), NUM_STAGES),
                     stride=((TILE_X, 1), TILE_Y * TILE_X),
                 )
             )
-        if cutlass.const_expr(cfg.colwise):
+        if cutlass.const_expr(cfg.COLWISE):
             sO_col = storage.sO_col.get_tensor(
                 cute.make_layout(
                     ((TILE_Y, TILE_X), NUM_STAGES),
@@ -1276,12 +1274,12 @@ class MXFP8QuantizeSmemKernel:
             tma_atom_act, 0, cute.make_layout(1), sX_act, gActIn_tiled,
         )
 
-        if cutlass.const_expr(cfg.rowwise):
+        if cutlass.const_expr(cfg.ROWWISE):
             gO_row_tiled = cute.zipped_divide(tma_dst_out_row, (TILE_Y, TILE_X))
             tXsO_row, tXgO_row = cute.nvgpu.cpasync.tma_partition(
                 tma_atom_out_row, 0, cute.make_layout(1), sO_row, gO_row_tiled,
             )
-        if cutlass.const_expr(cfg.colwise):
+        if cutlass.const_expr(cfg.COLWISE):
             gO_col_tiled = cute.zipped_divide(tma_dst_out_col, (TILE_Y, TILE_X))
             tXsO_col, tXgO_col = cute.nvgpu.cpasync.tma_partition(
                 tma_atom_out_col, 0, cute.make_layout(1), sO_col, gO_col_tiled,
@@ -1312,7 +1310,7 @@ class MXFP8QuantizeSmemKernel:
                 mainloop_pipeline.producer_commit(prod_state)
                 prod_state.advance()
 
-        if cutlass.const_expr(cfg.with_amax):
+        if cutlass.const_expr(cfg.WITH_AMAX):
             block_amax = Float32(0.0)
         # See _kernel_main: threaded through `_process_colwise_dact` so the
         # cross-stage sum order matches TE's flat `partial_dbias += elt`.
@@ -1327,23 +1325,23 @@ class MXFP8QuantizeSmemKernel:
             sX_act_tile = sX_act[(None, cons_state.index)]
             base_row = (bidy * NUM_TILES + stage) * TILE_Y
 
-            if cutlass.const_expr(cfg.colwise):
+            if cutlass.const_expr(cfg.COLWISE):
                 sO_col_tile = sO_col[(None, cons_state.index)]
                 amax_c, block_dbias = self._process_colwise_dact(
                     sX_tile, sX_act_tile, sO_col_tile,
                     base_row, bidx, tidx, mS_col, max_norm_rcp,
                     block_dbias,
                 )
-                if cutlass.const_expr(cfg.with_amax):
+                if cutlass.const_expr(cfg.WITH_AMAX):
                     block_amax = cute.arch.fmax(block_amax, amax_c)
-            if cutlass.const_expr(cfg.rowwise):
+            if cutlass.const_expr(cfg.ROWWISE):
                 sO_row_tile = sO_row[(None, cons_state.index)]
                 amax_r, thread_dbias_rw = self._process_rowwise_dact(
                     sX_tile, sX_act_tile, sO_row_tile,
                     base_row, bidx, tidx, mS_row, max_norm_rcp,
                     thread_dbias_rw,
                 )
-                if cutlass.const_expr(cfg.with_amax):
+                if cutlass.const_expr(cfg.WITH_AMAX):
                     block_amax = cute.arch.fmax(block_amax, amax_r)
 
             cute.arch.fence_proxy(
@@ -1354,13 +1352,13 @@ class MXFP8QuantizeSmemKernel:
 
             if warp_idx == 0:
                 tile_y = bidy * NUM_TILES + stage
-                if cutlass.const_expr(cfg.rowwise):
+                if cutlass.const_expr(cfg.ROWWISE):
                     cute.copy(
                         tma_atom_out_row,
                         tXsO_row[(None, cons_state.index)],
                         tXgO_row[(None, (tile_y, bidx))],
                     )
-                if cutlass.const_expr(cfg.colwise):
+                if cutlass.const_expr(cfg.COLWISE):
                     cute.copy(
                         tma_atom_out_col,
                         tXsO_col[(None, cons_state.index)],
@@ -1374,15 +1372,15 @@ class MXFP8QuantizeSmemKernel:
         cute.arch.cp_async_bulk_wait_group(0, read=False)
 
         # ---- dbias workspace writeback (mirrors _kernel_main) -------------
-        if cutlass.const_expr(cfg.with_dbias and not cfg.is_dbias_path_b):
+        if cutlass.const_expr(cfg.WITH_DBIAS and cfg.COLWISE):
             mDbias[bidy, bidx * TILE_X + tidx] = block_dbias
-        elif cutlass.const_expr(cfg.is_dbias_path_b):
+        elif cutlass.const_expr(cfg.WITH_DBIAS and not cfg.COLWISE):
             self._dbias_path_b_writeback(
                 storage.sDbiasBuf, mDbias, thread_dbias_rw, bidx, bidy, tidx,
             )
 
         # Same amax epilogue as _kernel_main — fmax over warps then atomic.
-        if cutlass.const_expr(cfg.with_amax):
+        if cutlass.const_expr(cfg.WITH_AMAX):
             warp_amax = cute.arch.warp_redux_sync(block_amax, kind="fmax")
             sAmax = storage.sAmax.get_tensor(cute.make_layout(NUM_WARPS))
             lane_idx = tidx % 32
@@ -1446,9 +1444,9 @@ class MXFP8QuantizeSmemKernel:
         #     `static_cast<IType>(elt)` numerical truncation. with_dbias
         #     accumulates the per-column sum BEFORE truncation (C++ order).
         partial_dbias = partial_dbias_in
-        if cutlass.const_expr(_is_packed16(cfg.dtype) and cfg.activation is None
-                              and not cfg.with_dbias):
-            kit = _packed16_kit(cfg.dtype)
+        if cutlass.const_expr(_is_packed16(cfg.DTYPE) and cfg.ACTIVATION is None
+                              and not cfg.WITH_DBIAS):
+            kit = _packed16_kit(cfg.DTYPE)
             sX_i16 = cute.make_tensor(
                 cute.recast_ptr(sX_tile.iterator, dtype=Int16),
                 cute.make_layout((TILE_Y, TILE_X), stride=(TILE_X, 1)),
@@ -1463,8 +1461,8 @@ class MXFP8QuantizeSmemKernel:
             in_c = [Float32(sX_flat[i, tidx]) for i in range(SCALE_DIM)]
             # Apply activation in f32 (no truncation yet — dbias must
             # accumulate from the pre-truncation value to match C++ order).
-            if cutlass.const_expr(cfg.activation is not None):
-                op = _ACTIVATIONS[cfg.activation]
+            if cutlass.const_expr(cfg.ACTIVATION is not None):
+                op = _ACTIVATIONS[cfg.ACTIVATION]
                 for i in cutlass.range_constexpr(SCALE_DIM):
                     in_c[i] = op(in_c[i])
             # Accumulate per-column dbias from f32 (pre-truncation) values.
@@ -1473,15 +1471,15 @@ class MXFP8QuantizeSmemKernel:
             # `partial_dbias_colwise += elt` order across the inner loop —
             # grouping by stage (stage0_sum + stage1_sum) rounds slightly
             # differently and produces ULP-level fp32 mismatches.
-            if cutlass.const_expr(cfg.with_dbias):
+            if cutlass.const_expr(cfg.WITH_DBIAS):
                 for i in cutlass.range_constexpr(SCALE_DIM):
                     partial_dbias = partial_dbias + in_c[i]
             # Numerical truncation through IType so amax/cast match C++.
             # Only needed when 16-bit input + activation; without activation
             # the widening was already exact.
-            if cutlass.const_expr(_is_packed16(cfg.dtype)
-                                  and cfg.activation is not None):
-                kit_act = _packed16_kit(cfg.dtype)
+            if cutlass.const_expr(_is_packed16(cfg.DTYPE)
+                                  and cfg.ACTIVATION is not None):
+                kit_act = _packed16_kit(cfg.DTYPE)
                 for i in cutlass.range_constexpr(SCALE_DIM):
                     in_c[i] = kit_act.truncate_f32(in_c[i])
             amax_c = Float32(0.0)
@@ -1489,7 +1487,7 @@ class MXFP8QuantizeSmemKernel:
                 amax_c = cute.arch.fmax(amax_c, fabs_f32(in_c[i]))
 
         # 2. E8M0 scale → gmem. mS_col's layout already encodes the swizzle
-        # when cfg.with_gemm_swizzled_scales=True, so 2D access just works.
+        # when cfg.WITH_GEMM_SWIZZLED_SCALES=True, so 2D access just works.
         biased_exp_c = float_to_e8m0(amax_c * max_norm_rcp)
         scale_row = base_row // SCALE_DIM
         mS_col[scale_row, col_global] = Uint8(biased_exp_c)
@@ -1497,10 +1495,10 @@ class MXFP8QuantizeSmemKernel:
         # 3. scale + FP8 cast → smem (one byte per (row, tidx)). Caller
         # flushes the whole (TILE_Y, TILE_X) tile with a TMA S2G.
         inv_scale_c = exp2f_rcp(biased_exp_c)
-        cvt_to_fp8 = _cvt_f32_to_fp8(cfg.fp8_dtype)
-        if cutlass.const_expr(_is_packed16(cfg.dtype) and cfg.activation is None
-                              and not cfg.with_dbias):
-            kit_cast = _packed16_kit(cfg.dtype)
+        cvt_to_fp8 = _cvt_f32_to_fp8(cfg.FP8_DTYPE)
+        if cutlass.const_expr(_is_packed16(cfg.DTYPE) and cfg.ACTIVATION is None
+                              and not cfg.WITH_DBIAS):
+            kit_cast = _packed16_kit(cfg.DTYPE)
             for i in cutlass.range_constexpr(SCALE_DIM):
                 v_f32 = kit_cast.bits_to_f32(in_c[i])
                 sO_col_flat[i, tidx] = Uint8(cvt_to_fp8(v_f32 * inv_scale_c))
@@ -1526,7 +1524,7 @@ class MXFP8QuantizeSmemKernel:
         max_norm_rcp,
         thread_dbias_in,  # list[Float32] of length SCALE_DIM — per-element
                           # rowwise dbias accumulator. Only used when
-                          # cfg.is_dbias_path_b. Caller passes it through
+                          # (cfg.WITH_DBIAS and not cfg.COLWISE). Caller passes it through
                           # untouched in non-path-B configs.
     ):
         """Rowwise MXFP8 pass: thread `(tid_Y, tid_X) = (tidx % 32, tidx // 32)`
@@ -1577,9 +1575,9 @@ class MXFP8QuantizeSmemKernel:
         # to f32, apply OP, optionally accumulate dbias, optionally
         # truncate through IType, then run scalar f32 amax + cast.
         thread_dbias = thread_dbias_in
-        if cutlass.const_expr(_is_packed16(cfg.dtype) and cfg.activation is None
-                              and not cfg.is_dbias_path_b):
-            kit = _packed16_kit(cfg.dtype)
+        if cutlass.const_expr(_is_packed16(cfg.DTYPE) and cfg.ACTIVATION is None
+                              and not (cfg.WITH_DBIAS and not cfg.COLWISE)):
+            kit = _packed16_kit(cfg.DTYPE)
             # Read 4 consecutive 16-bit elts per wave as TWO packed-x2 Int32s;
             # each ld.shared.b32 covers 2 elements. The cache `in_r[w][k]` is
             # an Int32 with low-half = element 2k, high-half = element 2k+1.
@@ -1623,23 +1621,23 @@ class MXFP8QuantizeSmemKernel:
                     in_r[w][e] = Float32(sX_rw[tid_Y, tid_X, swz + e])
             # Apply activation in f32 (pre-truncation) so dbias accumulates
             # the post-OP, IType-precision-untruncated value (matches C++).
-            if cutlass.const_expr(cfg.activation is not None):
-                op = _ACTIVATIONS[cfg.activation]
+            if cutlass.const_expr(cfg.ACTIVATION is not None):
+                op = _ACTIVATIONS[cfg.ACTIVATION]
                 for w in cutlass.range_constexpr(WAVES):
                     for e in cutlass.range_constexpr(PACK_SIZE):
                         in_r[w][e] = op(in_r[w][e])
             # Path-B dbias: each thread owns 32 different columns (a row strip),
             # so the accumulator is per-element. Indexed by `j = w*PACK + e`,
             # the C++ logical position within the thread's strip.
-            if cutlass.const_expr(cfg.is_dbias_path_b):
+            if cutlass.const_expr(cfg.WITH_DBIAS and not cfg.COLWISE):
                 for w in cutlass.range_constexpr(WAVES):
                     for e in cutlass.range_constexpr(PACK_SIZE):
                         j = w * PACK_SIZE + e
                         thread_dbias[j] = thread_dbias[j] + in_r[w][e]
             # Numerical truncation (16-bit + activation only) AFTER dbias.
-            if cutlass.const_expr(_is_packed16(cfg.dtype)
-                                  and cfg.activation is not None):
-                kit_act = _packed16_kit(cfg.dtype)
+            if cutlass.const_expr(_is_packed16(cfg.DTYPE)
+                                  and cfg.ACTIVATION is not None):
+                kit_act = _packed16_kit(cfg.DTYPE)
                 for w in cutlass.range_constexpr(WAVES):
                     for e in cutlass.range_constexpr(PACK_SIZE):
                         in_r[w][e] = kit_act.truncate_f32(in_r[w][e])
@@ -1649,19 +1647,19 @@ class MXFP8QuantizeSmemKernel:
                     amax_r = cute.arch.fmax(amax_r, fabs_f32(in_r[w][e]))
 
         # 2. E8M0 scale → gmem. mS_row's layout already encodes the swizzle
-        # when cfg.with_gemm_swizzled_scales=True, so 2D access just works.
+        # when cfg.WITH_GEMM_SWIZZLED_SCALES=True, so 2D access just works.
         biased_exp_r = float_to_e8m0(amax_r * max_norm_rcp)
         mS_row[global_row, scale_col] = Uint8(biased_exp_r)
 
         # 3. scale + packed fp8 cast → smem as one u32 per wave.
         inv_scale_r = exp2f_rcp(biased_exp_r)
-        cvt_f32x2 = _cvt_f32x2_to_fp8x2(cfg.fp8_dtype)
+        cvt_f32x2 = _cvt_f32x2_to_fp8x2(cfg.FP8_DTYPE)
         # Fast cast path matches the fast amax path — same condition.
-        _row_fast = (_is_packed16(cfg.dtype) and cfg.activation is None
-                     and not cfg.is_dbias_path_b)
+        _row_fast = (_is_packed16(cfg.DTYPE) and cfg.ACTIVATION is None
+                     and not (cfg.WITH_DBIAS and not cfg.COLWISE))
         if cutlass.const_expr(_row_fast):
-            kit_cast = _packed16_kit(cfg.dtype)
-            mul_cvt_x2 = kit_cast.mul_cvt_to_fp8x2(cfg.fp8_dtype)
+            kit_cast = _packed16_kit(cfg.DTYPE)
+            mul_cvt_x2 = kit_cast.mul_cvt_to_fp8x2(cfg.FP8_DTYPE)
             # Pack `(inv_scale_r, inv_scale_r)` as a single 64-bit f32x2 once;
             # the per-wave mul_cvt consumes this directly.
             scale_2x = pack_f32x2(inv_scale_r, inv_scale_r)
@@ -1722,24 +1720,24 @@ class MXFP8QuantizeSmemKernel:
             cute.make_layout((TILE_Y, TILE_X), stride=(TILE_X, 1)),
         )
 
-        op = _ACTIVATIONS[cfg.activation]   # the derivative function
+        op = _ACTIVATIONS[cfg.ACTIVATION]   # the derivative function
         # Load both inputs as f32, compute elt = grad · dOP(act_in), and
         # interleave the dbias accumulation in the same per-element loop so
         # the f32 `partial = partial + grad·dOP(act)` chain fuses into a
         # single FFMA — matches TE's `elt *= OP; partial += elt;` pattern.
         # Defer IType-truncation until after dbias is accumulated.
         in_c = []
-        kit = _packed16_kit(cfg.dtype) if _is_packed16(cfg.dtype) else None
+        kit = _packed16_kit(cfg.DTYPE) if _is_packed16(cfg.DTYPE) else None
         partial_dbias = partial_dbias_in
         for i in cutlass.range_constexpr(SCALE_DIM):
             grad = Float32(sX_flat[i, tidx])
             actin = Float32(sX_act_flat[i, tidx])
             elt = grad * op(actin)
-            if cutlass.const_expr(cfg.with_dbias):
+            if cutlass.const_expr(cfg.WITH_DBIAS):
                 partial_dbias = partial_dbias + elt
             in_c.append(elt)
 
-        if cutlass.const_expr(_is_packed16(cfg.dtype)):
+        if cutlass.const_expr(_is_packed16(cfg.DTYPE)):
             for i in cutlass.range_constexpr(SCALE_DIM):
                 in_c[i] = kit.truncate_f32(in_c[i])
 
@@ -1754,7 +1752,7 @@ class MXFP8QuantizeSmemKernel:
 
         # Scale + FP8 cast → smem.
         inv_scale_c = exp2f_rcp(biased_exp_c)
-        cvt_to_fp8 = _cvt_f32_to_fp8(cfg.fp8_dtype)
+        cvt_to_fp8 = _cvt_f32_to_fp8(cfg.FP8_DTYPE)
         for i in cutlass.range_constexpr(SCALE_DIM):
             sO_col_flat[i, tidx] = Uint8(cvt_to_fp8(in_c[i] * inv_scale_c))
 
@@ -1809,8 +1807,8 @@ class MXFP8QuantizeSmemKernel:
             ),
         )
 
-        op = _ACTIVATIONS[cfg.activation]
-        kit = _packed16_kit(cfg.dtype) if _is_packed16(cfg.dtype) else None
+        op = _ACTIVATIONS[cfg.ACTIVATION]
+        kit = _packed16_kit(cfg.DTYPE) if _is_packed16(cfg.DTYPE) else None
 
         # Two-pass: first compute pre-truncation elt and (path B) accumulate
         # dbias from it; then truncate for amax/cast bookkeeping.
@@ -1822,13 +1820,13 @@ class MXFP8QuantizeSmemKernel:
                 actin = Float32(sX_act_rw[tid_Y, tid_X, swz + e])
                 in_r[w][e] = grad * op(actin)
 
-        if cutlass.const_expr(cfg.is_dbias_path_b):
+        if cutlass.const_expr(cfg.WITH_DBIAS and not cfg.COLWISE):
             for w in cutlass.range_constexpr(WAVES):
                 for e in cutlass.range_constexpr(PACK_SIZE):
                     j = w * PACK_SIZE + e
                     thread_dbias[j] = thread_dbias[j] + in_r[w][e]
 
-        if cutlass.const_expr(_is_packed16(cfg.dtype)):
+        if cutlass.const_expr(_is_packed16(cfg.DTYPE)):
             for w in cutlass.range_constexpr(WAVES):
                 for e in cutlass.range_constexpr(PACK_SIZE):
                     in_r[w][e] = kit.truncate_f32(in_r[w][e])
@@ -1842,7 +1840,7 @@ class MXFP8QuantizeSmemKernel:
         mS_row[global_row, scale_col] = Uint8(biased_exp_r)
 
         inv_scale_r = exp2f_rcp(biased_exp_r)
-        cvt_f32x2 = _cvt_f32x2_to_fp8x2(cfg.fp8_dtype)
+        cvt_f32x2 = _cvt_f32x2_to_fp8x2(cfg.FP8_DTYPE)
         for w in cutlass.range_constexpr(WAVES):
             swz = ((w + bank_group) * PACK_SIZE) % SCALE_DIM
             v0 = in_r[w][0] * inv_scale_r
@@ -1919,14 +1917,14 @@ _compile_cache: dict = {}
 
 
 def _get_compiled_kernel(cfg, stream):
-    key = (cfg.dtype, cfg.M, cfg.N, cfg.fp8_dtype, cfg.rowwise, cfg.colwise,
-           cfg.with_gemm_swizzled_scales, cfg.with_amax, cfg.activation,
-           cfg.with_dbias)
+    key = (cfg.DTYPE, cfg.M, cfg.N, cfg.FP8_DTYPE, cfg.ROWWISE, cfg.COLWISE,
+           cfg.WITH_GEMM_SWIZZLED_SCALES, cfg.WITH_AMAX, cfg.ACTIVATION,
+           cfg.WITH_DBIAS)
     if key not in _compile_cache:
         kernel_obj = MXFP8QuantizeSmemKernel(cfg)
         u8_ptr = make_ptr(Uint8, 16, cute.AddressSpace.gmem, assumed_align=16)
         f32_ptr = make_ptr(Float32, 16, cute.AddressSpace.gmem, assumed_align=4)
-        in_ptr = make_ptr(cfg.dtype, 16, cute.AddressSpace.gmem, assumed_align=16)
+        in_ptr = make_ptr(cfg.DTYPE, 16, cute.AddressSpace.gmem, assumed_align=16)
         compiled = cute.compile[(GPUArch("sm_100a"),)](
             kernel_obj,
             in_ptr,           # x_ptr (grad_y when IS_DACT)
@@ -1936,7 +1934,7 @@ def _get_compiled_kernel(cfg, stream):
             f32_ptr,          # noop flag (1-element f32)
             f32_ptr,          # amax accumulator (1-element f32)
             f32_ptr,          # dbias workspace (blocks_Y * N f32, only used if with_dbias)
-            Int32(1), Float32(cfg.max_norm_rcp), stream,
+            Int32(1), Float32(cfg.MAX_NORM_RCP), stream,
         )
         _compile_cache[key] = compiled
     return _compile_cache[key]
@@ -2003,6 +2001,8 @@ def quantize_mxfp8_cutedsl(
             responsible for initialising amax (e.g. to 0.0) before launch.
     """
     # print(f"Input tensor: shape={x.shape}, dtype={x.dtype}, device={x.device}")
+    nvtx = torch.cuda.nvtx
+    nvtx.range_push("dsl.validate")
     assert x.is_cuda and x.is_contiguous() and x.ndim == 2
     M, N = x.shape
     assert rowwise or colwise
@@ -2028,7 +2028,7 @@ def quantize_mxfp8_cutedsl(
             f"shape={tuple(amax.shape)}, dtype={amax.dtype}")
     else:
         # Reuse the noop dummy slot — the kernel never reads/writes it when
-        # cfg.with_amax is False, so any non-null pointer is fine.
+        # cfg.WITH_AMAX is False, so any non-null pointer is fine.
         amax = _noop_dummy_for(x.device)
     is_dact = _is_derivative_activation(activation)
     if is_dact:
@@ -2053,8 +2053,9 @@ def quantize_mxfp8_cutedsl(
     max_norm_rcp = FP8E4M3_MAX_NORM_RCP if fp8_dtype == "e4m3" else FP8E5M2_MAX_NORM_RCP
     torch_stream = torch.cuda.current_stream()
     stream = cuda.CUstream(torch_stream.cuda_stream)
+    nvtx.range_pop()  # dsl.validate
 
-    # Allocate outputs
+    nvtx.range_push("dsl.alloc")
     result = {}
     if rowwise:
         result["rowwise_data"] = torch.empty((M, N), dtype=torch.uint8, device=x.device)
@@ -2062,13 +2063,16 @@ def quantize_mxfp8_cutedsl(
     if colwise:
         result["colwise_data"] = torch.empty((M, N), dtype=torch.uint8, device=x.device)
         result["colwise_scale"] = torch.empty((M // SCALE_DIM, N), dtype=torch.uint8, device=x.device)
+    nvtx.range_pop()  # dsl.alloc
 
+    nvtx.range_push("dsl.cache_lookup")
     # Single unified kernel launch — loads global memory once for both directions
     cfg = MXFP8QuantizeConfig(cutlass_dtype, M, N, fp8_dtype, rowwise=rowwise, colwise=colwise,
                                with_gemm_swizzled_scales=with_gemm_swizzled_scales,
                                with_amax=with_amax, activation=activation,
                                with_dbias=compute_dbias)
     compiled = _get_compiled_kernel(cfg, stream)
+    nvtx.range_pop()  # dsl.cache_lookup
 
     # For unused directions, point to the other direction's buffer (never written)
     dummy = result.get("rowwise_data", result.get("colwise_data"))
@@ -2077,17 +2081,20 @@ def quantize_mxfp8_cutedsl(
     # DBias workspace — `[blocks_Y, N]` f32 partial sums, reduced post-kernel.
     # blocks_Y must match the kernel's `(cfg.M + 63) // 64` (one CTA per
     # 64-row strip, since each CTA handles NUM_TILES=2 stages of TILE_Y=32).
+    nvtx.range_push("dsl.dbias_workspace")
     if compute_dbias:
         blocks_Y = (M + TILE_Y * NUM_TILES - 1) // (TILE_Y * NUM_TILES)
         dbias_workspace = torch.empty(
             (blocks_Y, N), dtype=torch.float32, device=x.device)
     else:
         dbias_workspace = _noop_dummy_for(x.device)
+    nvtx.range_pop()  # dsl.dbias_workspace
 
     def _ptr(t):
         return make_ptr(Uint8, t.data_ptr())
 
-    compiled(
+    nvtx.range_push("dsl.make_ptr")
+    args = (
         make_ptr(cutlass_dtype, x.data_ptr()),
         make_ptr(cutlass_dtype, act_input.data_ptr()),
         _ptr(result["rowwise_data"]) if rowwise else _ptr(dummy),
@@ -2099,6 +2106,11 @@ def quantize_mxfp8_cutedsl(
         make_ptr(Float32, dbias_workspace.data_ptr()),
         Int32(M), Float32(max_norm_rcp), stream,
     )
+    nvtx.range_pop()  # dsl.make_ptr
+
+    nvtx.range_push("dsl.launch")
+    compiled(*args)
+    nvtx.range_pop()  # dsl.launch
 
     if compute_dbias:
         # Reduce blocks_Y partial sums along the block axis. torch.sum is
@@ -2109,6 +2121,8 @@ def quantize_mxfp8_cutedsl(
         # Python-loop reduce would be bit-exact but launches `blocks_Y`
         # element-wise add kernels, dwarfing the quantize kernel time at
         # large shapes (e.g. 256 launches for M=16384).
+        nvtx.range_push("dsl.reduce_dbias")
         result["dbias"] = dbias_workspace.sum(dim=0).to(x.dtype)
+        nvtx.range_pop()  # dsl.reduce_dbias
 
     return result
