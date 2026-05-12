@@ -26,6 +26,7 @@ from transformer_engine.common.triton.mhc import (
 )
 from transformer_engine.pytorch.cpp_extensions.gemm import general_gemm
 
+
 def support_tma():
     return torch.cuda.get_device_capability()[0] >= 9
 
