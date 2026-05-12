@@ -7,6 +7,10 @@
 # which `torch.cuda.Event` (what bench_mxfp8_cutedsl.py itself reports) rolls
 # into its wall-clock timings.
 #
+# Note: bench_mxfp8_cutedsl.py now flushes L2 between iters by default, so
+# the captured kernel launches see a cold L2. Pass --no-evict-l2 in
+# EXTRA_ARGS to disable for warm-cache comparison.
+#
 # Usage:
 #   ./run_nsys_profile.sh                           # default preset, all dirs
 #   ./run_nsys_profile.sh --preset square

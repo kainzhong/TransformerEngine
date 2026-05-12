@@ -20,6 +20,19 @@ from quantize_mxfp8_cutedsl_alt import quantize_mxfp8_cutedsl
 from bench_mxfp8_cutedsl import parse_shapes
 
 
+# Module-level L2 evict buffer (256 MB f32, covers B200's ~60 MB L2 with headroom).
+# Allocated lazily, reused across calls.
+_L2_EVICT_BUF = None
+
+
+def _l2_evict_buf():
+    global _L2_EVICT_BUF
+    if _L2_EVICT_BUF is None:
+        _L2_EVICT_BUF = torch.empty(
+            256 * 1024 * 1024 // 4, dtype=torch.float32, device="cuda")
+    return _L2_EVICT_BUF
+
+
 def reference_quantize(x, rowwise, colwise):
     q = MXFP8Quantizer(
         fp8_dtype=tex.DType.kFloat8E4M3,
@@ -30,9 +43,19 @@ def reference_quantize(x, rowwise, colwise):
 
 
 def profile_one(name, fn, warmup):
-    """Warm up `warmup` times, then profile exactly one call."""
+    """Warm up `warmup` times, flush L2, then profile exactly one call.
+
+    The L2 flush happens BEFORE torch.cuda.profiler.start() / sync, so the
+    fill kernel isn't captured — NCU sees only the target kernel running
+    against a cold L2."""
     for _ in range(warmup):
         fn()
+    torch.cuda.synchronize()
+
+    # Cold-cache: write 256 MB to evict L2, then drain so the eviction kernel
+    # doesn't get profiled. By the time profiler.start() fires, GPU is idle
+    # and L2 is empty.
+    _l2_evict_buf().zero_()
     torch.cuda.synchronize()
 
     nvtx.range_push(name)
