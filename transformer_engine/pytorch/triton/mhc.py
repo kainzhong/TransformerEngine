@@ -35,6 +35,22 @@ def _tma_aligned(t):
     return (t.stride(0) * t.element_size()) % 16 == 0 and t.data_ptr() % 16 == 0
 
 
+_tma_allocator_initialized = False
+
+
+def _init_tma_allocator():
+    # TMA descriptors require a global memory allocation. Registered once on first use.
+    global _tma_allocator_initialized
+    if _tma_allocator_initialized:
+        return
+
+    def alloc_fn(size: int, alignment: int, stream: Optional[int]):  # pylint: disable=unused-argument
+        return torch.empty(size, device="cuda", dtype=torch.int8)
+
+    triton.set_allocator(alloc_fn)
+    _tma_allocator_initialized = True
+
+
 def check_deterministic(operator: str):
     """
     Checks if the non-deterministic algorithm is allowed for the given operator. If not, raises an assertion error with instructions on how to allow it.
@@ -448,13 +464,7 @@ class mHCProjectionOp(torch.autograd.Function):
 
         use_tma = _support_tma() and _tma_aligned(x) and _tma_aligned(phi)
         if use_tma:
-            # TMA descriptors require a global memory allocation
-            def alloc_fn(
-                size: int, alignment: int, stream: Optional[int]
-            ):  # pylint: disable=unused-argument
-                return torch.empty(size, device="cuda", dtype=torch.int8)
-
-            triton.set_allocator(alloc_fn)
+            _init_tma_allocator()
 
         ctx.save_for_backward(x, phi, ms, norm_weight)
         ctx.phi_dtype = phi.dtype
@@ -1179,7 +1189,7 @@ class mHCExpandCombineOp(torch.autograd.Function):
         )  # We need to use atomic_add for this so we need higher precision
 
         if bias is not None:
-            grad_bias = torch.zeros_like(bias, dtype=torch.float32) if bias is not None else None
+            grad_bias = torch.zeros_like(bias, dtype=torch.float32)
 
         # pylint: disable=unnecessary-lambda-assignment
         grid = lambda META: (
