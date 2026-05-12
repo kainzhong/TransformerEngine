@@ -296,8 +296,6 @@ def test_mhc_projection(cfg: MHCConfig, dtypes, has_norm_weight):
     x_ref = x.detach().clone().requires_grad_(True)
     phi_ref = phi.detach().clone().requires_grad_(True)
 
-    has_norm_weight = False
-
     if has_norm_weight:
         norm_weight = torch.randn(nC, device="cuda", requires_grad=True, dtype=x_dtype)
         norm_weight_ref = norm_weight.detach().clone().requires_grad_(True)
@@ -484,8 +482,11 @@ def test_mhc_fuse_grad_acc(cfg: MHCConfig, dtype):
     beta_ref = beta.detach().clone().requires_grad_(True)
 
     def end_to_end(x, phi, alpha, beta, fused_grad_x_acc):
+        fused_grad_x_acc_buffer = None
+        if fused_grad_x_acc:
+            fused_grad_x_acc_buffer = torch.empty_like(x, dtype=torch.float32)
         aggregated, H_post, H_res = mhc_generate_mix_and_aggregate(
-            x, phi, alpha, beta, None, use_tf32, fused_grad_x_acc
+            x, phi, alpha, beta, None, use_tf32, fused_grad_x_acc_buffer
         )
         H_res = mhc_fused_sinkhorn(H_res.view(s, b, n, n), n).view(s * b, n * n)
         expanded_combined = mhc_fused_expand_combine(
@@ -496,13 +497,13 @@ def test_mhc_fuse_grad_acc(cfg: MHCConfig, dtype):
             H_res,
             n,
             False,
-            fused_grad_x_acc,
+            fused_grad_x_acc_buffer,
         )
 
         return expanded_combined
 
-    expanded_combined_fuse_grad = end_to_end(x_ref, phi_ref, alpha_ref, beta_ref, False)
-    expanded_combined_no_fuse_grad = end_to_end(x, phi, alpha, beta, True)
+    expanded_combined_fuse_grad = end_to_end(x_ref, phi_ref, alpha_ref, beta_ref, fused_grad_x_acc=True)
+    expanded_combined_no_fuse_grad = end_to_end(x, phi, alpha, beta, fused_grad_x_acc=False)
 
     grad_output = torch.randn_like(expanded_combined_fuse_grad)
     expanded_combined_fuse_grad.backward(grad_output)

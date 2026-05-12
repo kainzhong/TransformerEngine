@@ -1530,6 +1530,7 @@ def _mhc_expand_combine_bwd(
     STEP_SIZE_C: tl.constexpr,
     precision: tl.constexpr,
     HAS_BIAS: tl.constexpr,
+    FUSE_GRAD_X_ACC: tl.constexpr,
 ):
     """
     Each block
@@ -1711,7 +1712,10 @@ def _mhc_expand_combine_bwd(
         grad_x_acc = tl.fma(grad_out2[:, :, None], H_res2[:, None, :], grad_x_acc)
         grad_x_acc = tl.fma(grad_out3[:, :, None], H_res3[:, None, :], grad_x_acc)
 
-        grad_x = grad_x_acc.to(x.dtype)
+        if FUSE_GRAD_X_ACC:
+            grad_x = grad_x_acc # If fusing gradient accumulation, the buffer should be always fp32 so we don't cast here
+        else:
+            grad_x = grad_x_acc.to(x.dtype)
         grad_x = tl.reshape(
             grad_x, (BLOCK_SIZE_M, STEP_SIZE_C * n)
         )  # (BLOCK_SIZE_M, STEP_SIZE_C*n)
