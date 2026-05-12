@@ -130,8 +130,50 @@ def make_dsl_fn(combo, x, act_in, rowwise, colwise,
     return lambda: quantize_mxfp8_cutedsl(x, **kwargs)
 
 
-def bench_once(name, fn, warmup, iters):
-    """Time `iters` calls to `fn()` after `warmup` calls, wrapped in an NVTX range."""
+# Module-level L2 evict buffer. 256 MB f32 (covers B200's ~60 MB L2 with headroom).
+# Allocated lazily, reused across calls to avoid alloc churn between bench runs.
+_L2_EVICT_BUF = None
+
+
+def _l2_evict_buf():
+    global _L2_EVICT_BUF
+    if _L2_EVICT_BUF is None:
+        _L2_EVICT_BUF = torch.empty(
+            256 * 1024 * 1024 // 4, dtype=torch.float32, device="cuda")
+    return _L2_EVICT_BUF
+
+
+def bench_once(name, fn, warmup, iters, evict_l2=False):
+    """Time `iters` calls to `fn()` after `warmup` calls, wrapped in an NVTX range.
+
+    When `evict_l2=True`, each measured iter is preceded by a write to a
+    256 MB scratch buffer that flushes L2, and each iter is timed with its own
+    cuda.Event pair so the evict kernel is excluded from the measurement.
+    Use this to get cold-cache timings for shapes whose input fits in L2."""
+    if evict_l2:
+        evict = _l2_evict_buf()
+        for _ in range(warmup):
+            evict.zero_()
+            fn()
+        torch.cuda.synchronize()
+
+        total_ms = 0.0
+        nvtx.range_push(f"{name}_measure")
+        for i in range(iters):
+            evict.zero_()  # async kernel — flushes L2 from prior iter
+            start = torch.cuda.Event(enable_timing=True)
+            end = torch.cuda.Event(enable_timing=True)
+            start.record()  # event sequenced after evict on the stream
+            nvtx.range_push(f"{name}_iter_{i}")
+            fn()
+            nvtx.range_pop()
+            end.record()
+            torch.cuda.synchronize()
+            total_ms += start.elapsed_time(end)
+        nvtx.range_pop()
+        return total_ms / iters
+
+    # Default (warm-cache) path — one event pair across the whole loop.
     for _ in range(warmup):
         fn()
     torch.cuda.synchronize()
@@ -155,7 +197,7 @@ def bench_once(name, fn, warmup, iters):
 
 def bench_shape(M, N, rowwise, colwise, warmup, iters, combo="plain",
                 in_dtype="bf16", fp8_dtype="e4m3", swizzle=False,
-                with_amax=False):
+                with_amax=False, evict_l2=False):
     torch.manual_seed(0)
     torch.cuda.manual_seed(0)
     in_dt = _TORCH_IN_DTYPES[in_dtype]
@@ -191,12 +233,12 @@ def bench_shape(M, N, rowwise, colwise, warmup, iters, combo="plain",
 
     ref_ms = bench_once(
         f"cpp_ref_{M}x{N}_{dir_label}_{tag}",
-        ref_fn, warmup, iters,
+        ref_fn, warmup, iters, evict_l2=evict_l2,
     )
 
     dsl_ms = bench_once(
         f"cutedsl_{M}x{N}_{dir_label}_{tag}",
-        dsl_fn, warmup, iters,
+        dsl_fn, warmup, iters, evict_l2=evict_l2,
     )
 
     nvtx.range_pop()  # close shape_ range
@@ -270,6 +312,10 @@ def main():
                         help="Enable WITH_GEMM_SWIZZLED_SCALES")
     parser.add_argument("--with-amax", action="store_true",
                         help="Enable per-tensor amax accumulation (DSL only)")
+    parser.add_argument("--evict-l2", action="store_true",
+                        help="Flush L2 cache between timed iterations (cold-cache "
+                             "measurement). Uses a 256MB scratch buffer + per-iter "
+                             "events. Adds ~1us per iter of event overhead.")
     parser.add_argument("--preset", type=str, default=None,
                         choices=sorted(SHAPE_PRESETS),
                         help=f"Shape preset: one of {sorted(SHAPE_PRESETS)}")
@@ -339,7 +385,8 @@ def main():
                         r = bench_shape(M, N, rw, cw, args.warmup, args.iters,
                                         combo, in_dtype=in_dtype, fp8_dtype=fp8,
                                         swizzle=args.swizzle,
-                                        with_amax=args.with_amax)
+                                        with_amax=args.with_amax,
+                                        evict_l2=args.evict_l2)
                         results.append(r)
 
     torch.cuda.profiler.stop()
