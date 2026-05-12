@@ -32,7 +32,7 @@ mkdir -p profile/nsys_kernel_time
 PRESET="default"
 SHAPES_ARG=""
 DIR_ARG="all"
-COMBOS_ARG="plain"
+COMBOS_ARG=""
 EXTRA_ARGS=()
 
 while [[ $# -gt 0 ]]; do
@@ -90,7 +90,7 @@ for SHAPE_PAIR in $SHAPES; do
             --trace=cuda,nvtx \
             --capture-range=cudaProfilerApi \
             --capture-range-end=stop \
-            --stats=false \
+            --stats=true \
             --force-overwrite=true \
             --output="$OUT" \
             python bench_mxfp8_cutedsl.py \
