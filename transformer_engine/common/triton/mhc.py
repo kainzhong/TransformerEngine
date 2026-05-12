@@ -1713,7 +1713,7 @@ def _mhc_expand_combine_bwd(
         grad_x_acc = tl.fma(grad_out3[:, :, None], H_res3[:, None, :], grad_x_acc)
 
         if FUSE_GRAD_X_ACC:
-            grad_x = grad_x_acc # If fusing gradient accumulation, the buffer should be always fp32 so we don't cast here
+            grad_x = grad_x_acc  # If fusing gradient accumulation, the buffer should be always fp32 so we don't cast here
         else:
             grad_x = grad_x_acc.to(x.dtype)
         grad_x = tl.reshape(

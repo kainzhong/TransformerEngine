@@ -502,7 +502,9 @@ def test_mhc_fuse_grad_acc(cfg: MHCConfig, dtype):
 
         return expanded_combined
 
-    expanded_combined_fuse_grad = end_to_end(x_ref, phi_ref, alpha_ref, beta_ref, fused_grad_x_acc=True)
+    expanded_combined_fuse_grad = end_to_end(
+        x_ref, phi_ref, alpha_ref, beta_ref, fused_grad_x_acc=True
+    )
     expanded_combined_no_fuse_grad = end_to_end(x, phi, alpha, beta, fused_grad_x_acc=False)
 
     grad_output = torch.randn_like(expanded_combined_fuse_grad)
