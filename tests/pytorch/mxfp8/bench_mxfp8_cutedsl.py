@@ -143,13 +143,39 @@ def _l2_evict_buf():
     return _L2_EVICT_BUF
 
 
-def bench_once(name, fn, warmup, iters, evict_l2=False):
+def bench_once(name, fn, warmup, iters, evict_l2=False, single=False):
     """Time `iters` calls to `fn()` after `warmup` calls, wrapped in an NVTX range.
 
-    When `evict_l2=True`, each measured iter is preceded by a write to a
-    256 MB scratch buffer that flushes L2, and each iter is timed with its own
-    cuda.Event pair so the evict kernel is excluded from the measurement.
-    Use this to get cold-cache timings for shapes whose input fits in L2."""
+    Modes:
+      - default: warm-cache, one event pair around the iter loop.
+      - evict_l2=True: cold-cache per iter — flushes L2 before each measured
+        iter via a 256MB write, times each iter with its own event pair, returns
+        the average.
+      - single=True: cold-cache one-shot — warmup with no eviction, then a
+        single L2 flush, then exactly one timed kernel launch. Returns that
+        single sample. `iters` is ignored.
+
+    `single` takes precedence over `evict_l2` if both are set."""
+
+    if single:
+        # Plain warmup — let the kernel cache (icache, JIT, etc.) warm up without
+        # disturbing the L2 yet. We'll flush L2 exactly once before the timed call.
+        for _ in range(warmup):
+            fn()
+        torch.cuda.synchronize()
+
+        evict = _l2_evict_buf()
+        nvtx.range_push(f"{name}_single")
+        evict.zero_()  # one L2 flush
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
+        fn()
+        end.record()
+        torch.cuda.synchronize()
+        nvtx.range_pop()
+        return start.elapsed_time(end)
+
     if evict_l2:
         evict = _l2_evict_buf()
         for _ in range(warmup):
@@ -197,7 +223,7 @@ def bench_once(name, fn, warmup, iters, evict_l2=False):
 
 def bench_shape(M, N, rowwise, colwise, warmup, iters, combo="plain",
                 in_dtype="bf16", fp8_dtype="e4m3", swizzle=False,
-                with_amax=False, evict_l2=False):
+                with_amax=False, evict_l2=False, single=False):
     torch.manual_seed(0)
     torch.cuda.manual_seed(0)
     in_dt = _TORCH_IN_DTYPES[in_dtype]
@@ -233,12 +259,12 @@ def bench_shape(M, N, rowwise, colwise, warmup, iters, combo="plain",
 
     ref_ms = bench_once(
         f"cpp_ref_{M}x{N}_{dir_label}_{tag}",
-        ref_fn, warmup, iters, evict_l2=evict_l2,
+        ref_fn, warmup, iters, evict_l2=evict_l2, single=single,
     )
 
     dsl_ms = bench_once(
         f"cutedsl_{M}x{N}_{dir_label}_{tag}",
-        dsl_fn, warmup, iters, evict_l2=evict_l2,
+        dsl_fn, warmup, iters, evict_l2=evict_l2, single=single,
     )
 
     nvtx.range_pop()  # close shape_ range
@@ -316,6 +342,11 @@ def main():
                         help="Flush L2 cache between timed iterations (cold-cache "
                              "measurement). Uses a 256MB scratch buffer + per-iter "
                              "events. Adds ~1us per iter of event overhead.")
+    parser.add_argument("--single", action="store_true",
+                        help="One-shot cold-cache measurement: warmup, flush L2 "
+                             "once, time a single kernel launch, report that "
+                             "sample. Overrides --iters. Takes precedence over "
+                             "--evict-l2.")
     parser.add_argument("--preset", type=str, default=None,
                         choices=sorted(SHAPE_PRESETS),
                         help=f"Shape preset: one of {sorted(SHAPE_PRESETS)}")
@@ -386,7 +417,8 @@ def main():
                                         combo, in_dtype=in_dtype, fp8_dtype=fp8,
                                         swizzle=args.swizzle,
                                         with_amax=args.with_amax,
-                                        evict_l2=args.evict_l2)
+                                        evict_l2=args.evict_l2,
+                                        single=args.single)
                         results.append(r)
 
     torch.cuda.profiler.stop()
