@@ -158,44 +158,44 @@ def bench_once(name, fn, warmup, iters, evict_l2=False, single=False):
     `single` takes precedence over `evict_l2` if both are set."""
 
     if single:
-        # Plain warmup — let the kernel cache (icache, JIT, etc.) warm up without
-        # disturbing the L2 yet. We'll flush L2 exactly once before the timed call.
+        # Warmup with no eviction — let the kernel cache (icache, JIT, etc.)
+        # warm up without disturbing L2.
         for _ in range(warmup):
             fn()
         torch.cuda.synchronize()
 
         evict = _l2_evict_buf()
         nvtx.range_push(f"{name}_single")
-        evict.zero_()  # one L2 flush
-        start = torch.cuda.Event(enable_timing=True)
-        end = torch.cuda.Event(enable_timing=True)
-        start.record()
+        evict.zero_()             # async L2 flush
+        torch.cuda.synchronize()  # ← drain evict; L2 is now cold AND GPU idle
+        # Host wall-clock from here includes Python wrapper + kernel time;
+        # excludes the evict kernel (already drained above).
+        t0 = time.perf_counter_ns()
         fn()
-        end.record()
         torch.cuda.synchronize()
+        t1 = time.perf_counter_ns()
         nvtx.range_pop()
-        return start.elapsed_time(end)
+        return (t1 - t0) / 1e6    # ms (match cuda.Event.elapsed_time units)
 
     if evict_l2:
-        evict = _l2_evict_buf()
+        # Warmup with no eviction (we're not timing warmup, no need to flush).
         for _ in range(warmup):
-            evict.zero_()
             fn()
         torch.cuda.synchronize()
 
+        evict = _l2_evict_buf()
         total_ms = 0.0
         nvtx.range_push(f"{name}_measure")
         for i in range(iters):
-            evict.zero_()  # async kernel — flushes L2 from prior iter
-            start = torch.cuda.Event(enable_timing=True)
-            end = torch.cuda.Event(enable_timing=True)
-            start.record()  # event sequenced after evict on the stream
+            evict.zero_()             # async L2 flush
+            torch.cuda.synchronize()  # ← drain evict before timing starts
             nvtx.range_push(f"{name}_iter_{i}")
-            fn()
+            t0 = time.perf_counter_ns()
+            fn()                      # host wrapper + kernel launch
+            torch.cuda.synchronize()  # wait for kernel
+            t1 = time.perf_counter_ns()
             nvtx.range_pop()
-            end.record()
-            torch.cuda.synchronize()
-            total_ms += start.elapsed_time(end)
+            total_ms += (t1 - t0) / 1e6
         nvtx.range_pop()
         return total_ms / iters
 
