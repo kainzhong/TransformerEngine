@@ -26,7 +26,8 @@ from transformer_engine.common.triton.mhc import (
 )
 from transformer_engine.pytorch.cpp_extensions.gemm import general_gemm
 
-_SUPPORT_TMA = torch.cuda.get_device_capability()[0] >= 9
+def support_tma():
+    return torch.cuda.get_device_capability()[0] >= 9
 
 
 def _tma_aligned(t):
@@ -441,7 +442,7 @@ class mHCProjectionOp(torch.autograd.Function):
             triton.cdiv(K, META["BLOCK_SIZE_K"]),
         )
 
-        use_tma = _SUPPORT_TMA and _tma_aligned(x) and _tma_aligned(phi)
+        use_tma = support_tma() and _tma_aligned(x) and _tma_aligned(phi)
         if use_tma:
             # TMA descriptors require a global memory allocation
             def alloc_fn(
