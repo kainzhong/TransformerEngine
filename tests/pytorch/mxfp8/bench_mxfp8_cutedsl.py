@@ -338,10 +338,17 @@ def main():
                         help="Enable WITH_GEMM_SWIZZLED_SCALES")
     parser.add_argument("--with-amax", action="store_true",
                         help="Enable per-tensor amax accumulation (DSL only)")
-    parser.add_argument("--evict-l2", action="store_true",
-                        help="Flush L2 cache between timed iterations (cold-cache "
-                             "measurement). Uses a 256MB scratch buffer + per-iter "
-                             "events. Adds ~1us per iter of event overhead.")
+    # L2 eviction is ON by default so the bench reflects a production cold-cache
+    # call (one kernel launch's worth of input being read from HBM, not L2).
+    # Pass --no-evict-l2 to disable for a warm-cache pipelined measurement.
+    parser.add_argument("--evict-l2", dest="evict_l2", action="store_true",
+                        default=True,
+                        help="Flush L2 cache before each timed iter "
+                             "(default; cold-cache measurement). Wrapper Python "
+                             "overhead is included in the timing.")
+    parser.add_argument("--no-evict-l2", dest="evict_l2", action="store_false",
+                        help="Disable L2 eviction; run a warm-cache pipelined "
+                             "loop instead (legacy behavior).")
     parser.add_argument("--single", action="store_true",
                         help="One-shot cold-cache measurement: warmup, flush L2 "
                              "once, time a single kernel launch, report that "

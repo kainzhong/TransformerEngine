@@ -8,6 +8,10 @@
 # every counter — putting many configs behind a single ncu makes the
 # replay phase intractably long.
 #
+# bench_for_ncu.py flushes L2 once before each profiled kernel launch (and
+# drains the evict kernel before profiler.start), so NCU captures the target
+# kernel running against a cold L2 — matching production cold-cache latency.
+#
 # Output directory: <repo-root>/profile/
 #
 # Usage:
