@@ -44,7 +44,9 @@ def _init_tma_allocator():
     if _tma_allocator_initialized:
         return
 
-    def alloc_fn(size: int, alignment: int, stream: Optional[int]):  # pylint: disable=unused-argument
+    def alloc_fn(
+        size: int, alignment: int, stream: Optional[int]
+    ):  # pylint: disable=unused-argument
         return torch.empty(size, device="cuda", dtype=torch.int8)
 
     triton.set_allocator(alloc_fn)
