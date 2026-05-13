@@ -291,6 +291,8 @@ def projection_config_bwd_dphi():
                 num_stages=s,
             )
         )
+    if os.environ.get("NVTE_DISABLE_TRITON_AUTOTUNING", "0") == "1":
+        configs = configs[:1]
     return configs
 
 
