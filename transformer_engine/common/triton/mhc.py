@@ -291,8 +291,6 @@ def projection_config_bwd_dphi():
                 num_stages=s,
             )
         )
-    if os.environ.get("NVTE_DISABLE_TRITON_AUTOTUNING", "0") == "1":
-        configs = configs[:1]
     return configs
 
 
@@ -304,6 +302,11 @@ def projection_prune_bwd_dphi(configs, named_args, **kwargs):
             lambda config: triton.cdiv(M, config.kwargs["BLOCK_SIZE_M"]) <= MAX_GRID_DIM_Y, configs
         )
     )
+
+    # Triton will skip calling prune function if the autotune returns only one config, which breaks the determinism override here
+    # So we need to apply NVTE_DISABLE_TRITON_AUTOTUNING in the pruner instead
+    if os.environ.get("NVTE_DISABLE_TRITON_AUTOTUNING", "0") == "1":
+        configs = configs[:1]
     return pruned_configs
 
 
@@ -954,22 +957,6 @@ def _mhc_sinkhorn_fwd_fused(
     tl.store(output_ptrs, P, mask=mask_batch[:, None])
 
 
-def aggregate_config_fwd():
-    block_m = [1, 2, 4]
-    block_c = [128, 256]
-    warps = [1, 2, 4]
-    stages = [1, 2, 3, 4]
-
-    configs = []
-    for m, c, w, s in itertools.product(block_m, block_c, warps, stages):
-        configs.append(
-            triton.Config({"BLOCK_SIZE_M": m, "BLOCK_SIZE_C": c}, num_warps=w, num_stages=s)
-        )
-    if os.environ.get("NVTE_DISABLE_TRITON_AUTOTUNING", "0") == "1":
-        configs = configs[:1]
-    return configs
-
-
 @triton.autotune(
     configs=sinkhorn_config(),
     key=["M"],
@@ -1074,6 +1061,19 @@ def _mhc_sinkhorn_bwd_fused(
         mask=mask_batch[:, None],
     )
 
+def aggregate_config_fwd():
+    block_m = [1, 2, 4]
+    block_c = [128, 256]
+    warps = [1, 2, 4]
+    stages = [1, 2, 3, 4]
+
+    configs = []
+    for m, c, w, s in itertools.product(block_m, block_c, warps, stages):
+        configs.append(
+            triton.Config({"BLOCK_SIZE_M": m, "BLOCK_SIZE_C": c}, num_warps=w, num_stages=s)
+        )
+    return configs
+
 
 def aggregate_prune_fwd(configs, named_args, **kwargs):
     M = named_args.get("M", kwargs.get("M", None))
@@ -1083,6 +1083,11 @@ def aggregate_prune_fwd(configs, named_args, **kwargs):
             lambda config: triton.cdiv(M, config.kwargs["BLOCK_SIZE_M"]) <= MAX_GRID_DIM_Y, configs
         )
     )
+
+    # Triton will skip calling prune function if the autotune returns only one config, which breaks the determinism override here
+    # So we need to apply NVTE_DISABLE_TRITON_AUTOTUNING in the pruner instead
+    if os.environ.get("NVTE_DISABLE_TRITON_AUTOTUNING", "0") == "1":
+        configs = configs[:1]
     return pruned_configs
 
 
