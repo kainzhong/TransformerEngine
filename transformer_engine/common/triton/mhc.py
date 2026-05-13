@@ -267,10 +267,11 @@ def _mhc_projection_bwd_fused_dx(
         grad_h.to(phi.dtype), phi, acc=grad_x, input_precision=precision, out_dtype=tl.float32
     )  # (BLOCK_SIZE_M, BLOCK_SIZE_K)
     grad_x_ptrs = grad_x_ptr + offs_m[:, None] * stride_grad_xm + offs_k[None, :] * stride_grad_xk
-    grad_x = grad_x.to(x.dtype)
     if FUSE_GRAD_X_ACC:  # If fused gradient accumulation is enabled, the buffer is always fp32
         grad_x_acc = tl.load(grad_x_ptrs, mask=mask_m[:, None] & mask_k[None, :], other=0.0)
         grad_x = grad_x.to(tl.float32) + grad_x_acc
+    else:
+        grad_x = grad_x.to(x.dtype)
     tl.store(grad_x_ptrs, grad_x, mask=mask_m[:, None] & mask_k[None, :])
 
 

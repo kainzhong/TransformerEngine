@@ -488,7 +488,6 @@ def test_mhc_fuse_grad_acc(cfg: MHCConfig, dtype):
         aggregated, H_post, H_res = mhc_generate_mix_and_aggregate(
             x, phi, alpha, beta, None, use_tf32, fused_grad_x_acc_buffer
         )
-        H_res = mhc_fused_sinkhorn(H_res.view(s, b, n, n), n).view(s * b, n * n)
         expanded_combined = mhc_fused_expand_combine(
             aggregated,
             None,

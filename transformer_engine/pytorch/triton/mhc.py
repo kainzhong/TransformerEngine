@@ -35,7 +35,7 @@ def _tma_aligned(t):
     return (t.stride(0) * t.element_size()) % 16 == 0 and t.data_ptr() % 16 == 0
 
 
-_tma_allocator_initialized = False
+_tma_allocator_initialized = False # pylint: disable=global-statement
 
 
 def _init_tma_allocator():
@@ -138,6 +138,11 @@ def mhc_generate_mix_and_aggregate(
     assert (
         n == 4
     ), "Only n=4 is supported in this implementation, where n is the Hyper Connection number"
+    if fused_grad_x_acc_buffer is not None:
+      assert fused_grad_x_acc_buffer.dtype == torch.float32, \
+          "fused_grad_x_acc_buffer must be fp32"
+      assert fused_grad_x_acc_buffer.numel() == x.numel(), \
+          "fused_grad_x_acc_buffer.numel() must match x.numel()"
     nC = n * C
     H, ms = mhc_fused_projection(
         x.view(s * b, nC),
@@ -146,11 +151,8 @@ def mhc_generate_mix_and_aggregate(
         use_tf32=use_tf32,
         fused_grad_x_acc_buffer=fused_grad_x_acc_buffer,
     )
-    h_pre, h_post, h_res = mhc_fused_scale(H, alpha, beta, ms, n)
-    H_pre = h_pre.view(s, b, n)
-    H_post = h_post.view(s, b, n)
-    H_res = h_res.view(s, b, n, n)
-    H_res = mhc_fused_sinkhorn(H_res, n, recompute_hist=True, iters=20)
+    H_pre, H_post, H_res = mhc_fused_scale(H, alpha, beta, ms, n)
+    H_res = mhc_fused_sinkhorn(H_res.view(s, b, n, n), n, recompute_hist=True, iters=20)
     out = mhc_fused_aggregate(
         x,
         H_pre.view(s, b, n),
@@ -278,8 +280,8 @@ def mhc_fused_aggregate(
         This is mainly used by our unittests since TF32 precision will introduce some errors and cause tests to fail
     fused_grad_x_acc_buffer : Optional[torch.Tensor]
         A pre-allocated buffer for inplace gradient accumulation to avoid PyTorch autograd overhead.
-        If not None, triton kernels will accumulate the gradient of x into this same buffer to avoid copying the gradient by PyTorch, which should be reused
-        during the backward of mhc_fused_aggregate, mhc_fused_expand_combine and mhc_fused_projection operations
+        If not None, triton kernels will accumulate the gradient of x into this same buffer to avoid copying the gradient by PyTorch.
+        This optimization requires the operation order to be mhc_fused_projection -> mhc_fused_aggregate -> mhc_fused_expand_combine.
         Note: the buffer must have dtype float32, and it will be cast to the activation's dtype and be returned in mhc_fused_projection
 
     Returns
@@ -289,6 +291,11 @@ def mhc_fused_aggregate(
          with the same dtype as x
     """
     assert n == 4, "Only n=4 is supported in this implementation"
+    if fused_grad_x_acc_buffer is not None:
+      assert fused_grad_x_acc_buffer.dtype == torch.float32, \
+          "fused_grad_x_acc_buffer must be fp32"
+      assert fused_grad_x_acc_buffer.numel() == x.numel(), \
+          "fused_grad_x_acc_buffer.numel() must match x.numel()"
     check_deterministic("mhc_fused_aggregate")
     out = mHCAggregateOp.apply(x, H_pre, n, use_tf32, fused_grad_x_acc_buffer)
     return out
@@ -333,8 +340,8 @@ def mhc_fused_expand_combine(
         This is mainly used by our unittests since TF32 precision will introduce some errors and cause tests to fail
     fused_grad_x_acc_buffer : Optional[torch.Tensor]
         A pre-allocated buffer for inplace gradient accumulation to avoid PyTorch autograd overhead.
-        If not None, triton kernels will accumulate the gradient of x into this same buffer to avoid copying the gradient by PyTorch, which should be reused
-        during the backward of mhc_fused_aggregate, mhc_fused_expand_combine and mhc_fused_projection operations
+        If not None, triton kernels will accumulate the gradient of x into this same buffer to avoid copying the gradient by PyTorch.
+        This optimization requires the operation order to be mhc_fused_projection -> mhc_fused_aggregate -> mhc_fused_expand_combine.
         Note: the buffer must have dtype float32, and it will be cast to the activation's dtype and be returned in mhc_fused_projection
 
     Returns
@@ -344,6 +351,11 @@ def mhc_fused_expand_combine(
         with the same dtype as x
     """
     assert n == 4, "Only n=4 is supported in this implementation"
+    if fused_grad_x_acc_buffer is not None:
+      assert fused_grad_x_acc_buffer.dtype == torch.float32, \
+          "fused_grad_x_acc_buffer must be fp32"
+      assert fused_grad_x_acc_buffer.numel() == x.numel(), \
+          "fused_grad_x_acc_buffer.numel() must match x.numel()"
     check_deterministic("mhc_fused_expand_combine")
     out = mHCExpandCombineOp.apply(
         f,
@@ -398,8 +410,8 @@ def mhc_fused_projection(
         dtype is torch.bfloat16 or torch.float32
     fused_grad_x_acc_buffer : Optional[torch.Tensor]
         A pre-allocated buffer for inplace gradient accumulation to avoid PyTorch autograd overhead.
-        If not None, triton kernels will accumulate the gradient of x into this same buffer to avoid copying the gradient by PyTorch, which should be reused
-        during the backward of mhc_fused_aggregate, mhc_fused_expand_combine and mhc_fused_projection operations
+        If not None, triton kernels will accumulate the gradient of x into this same buffer to avoid copying the gradient by PyTorch.
+        This optimization requires the operation order to be mhc_fused_projection -> mhc_fused_aggregate -> mhc_fused_expand_combine.
         Note: the buffer must have dtype float32, and it will be cast to the activation's dtype and be returned in mhc_fused_projection
 
     Returns
@@ -415,6 +427,11 @@ def mhc_fused_projection(
         phi.shape[0] == 24
     ), "Currently only n=4 is supported, which means phi should have 24 in its first dimension"
     check_deterministic("mhc_fused_projection")
+    if fused_grad_x_acc_buffer is not None:
+      assert fused_grad_x_acc_buffer.dtype == torch.float32, \
+          "fused_grad_x_acc_buffer must be fp32"
+      assert fused_grad_x_acc_buffer.numel() == x.numel(), \
+          "fused_grad_x_acc_buffer.numel() must match x.numel()"
     H, ms = mHCProjectionOp.apply(x, phi, norm_weight, use_tf32, fused_grad_x_acc_buffer)
     return H, ms
 
