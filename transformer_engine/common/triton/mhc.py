@@ -295,6 +295,7 @@ def projection_config_bwd_dphi():
         configs = configs[:1]
     return configs
 
+
 def projection_prune_bwd_dphi(configs, named_args, **kwargs):
     M = named_args.get("M", kwargs.get("M", None))
 
@@ -304,6 +305,7 @@ def projection_prune_bwd_dphi(configs, named_args, **kwargs):
         )
     )
     return pruned_configs
+
 
 @triton.autotune(
     configs=projection_config_bwd_dphi(),
