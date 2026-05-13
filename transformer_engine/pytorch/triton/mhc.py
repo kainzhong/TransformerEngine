@@ -657,7 +657,7 @@ class mHCProjectionOp(torch.autograd.Function):
             HAS_NORM_WEIGHT=norm_weight is not None,
         )
 
-        return grad_x.to(x.dtype), grad_phi, grad_norm_weight, None, None, None, None
+        return grad_x.to(x.dtype), grad_phi, grad_norm_weight, None, None
 
 
 class mHCScaleFusedOp(torch.autograd.Function):
@@ -1091,7 +1091,7 @@ class mHCAggregateOp(torch.autograd.Function):
         if ctx.fused_grad_x_acc_buffer is not None:
             grad_x = None
 
-        return grad_x, grad_H_pre, None, None, None, None
+        return grad_x, grad_H_pre, None, None, None
 
 
 class mHCExpandCombineOp(torch.autograd.Function):
@@ -1268,4 +1268,4 @@ class mHCExpandCombineOp(torch.autograd.Function):
         if ctx.fused_grad_x_acc_buffer is not None:
             grad_x = None
 
-        return grad_f, grad_bias, grad_H_post, grad_x, grad_H_res, None, None, None, None
+        return grad_f, grad_bias, grad_H_post, grad_x, grad_H_res, None, None, None
