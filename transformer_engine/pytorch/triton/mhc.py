@@ -35,12 +35,12 @@ def _tma_aligned(t):
     return (t.stride(0) * t.element_size()) % 16 == 0 and t.data_ptr() % 16 == 0
 
 
-_tma_allocator_initialized = False  # pylint: disable=global-statement
+_tma_allocator_initialized = False
 
 
 def _init_tma_allocator():
     # TMA descriptors require a global memory allocation. Registered once on first use.
-    global _tma_allocator_initialized
+    global _tma_allocator_initialized   # pylint: disable=global-statement
     if _tma_allocator_initialized:
         return
 
@@ -162,7 +162,7 @@ def mhc_generate_mix_and_aggregate(
         use_tf32=use_tf32,
         fused_grad_x_acc_buffer=fused_grad_x_acc_buffer,
     )
-    return out, H_post, H_res
+    return out, H_post.view(s, b, n), H_res
 
 
 def mhc_fused_sinkhorn(
