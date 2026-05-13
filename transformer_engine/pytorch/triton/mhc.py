@@ -35,7 +35,7 @@ def _tma_aligned(t):
     return (t.stride(0) * t.element_size()) % 16 == 0 and t.data_ptr() % 16 == 0
 
 
-_tma_allocator_initialized = False # pylint: disable=global-statement
+_tma_allocator_initialized = False  # pylint: disable=global-statement
 
 
 def _init_tma_allocator():
@@ -139,10 +139,12 @@ def mhc_generate_mix_and_aggregate(
         n == 4
     ), "Only n=4 is supported in this implementation, where n is the Hyper Connection number"
     if fused_grad_x_acc_buffer is not None:
-      assert fused_grad_x_acc_buffer.dtype == torch.float32, \
-          "fused_grad_x_acc_buffer must be fp32"
-      assert fused_grad_x_acc_buffer.numel() == x.numel(), \
-          "fused_grad_x_acc_buffer.numel() must match x.numel()"
+        assert (
+            fused_grad_x_acc_buffer.dtype == torch.float32
+        ), "fused_grad_x_acc_buffer must be fp32"
+        assert (
+            fused_grad_x_acc_buffer.numel() == x.numel()
+        ), "fused_grad_x_acc_buffer.numel() must match x.numel()"
     nC = n * C
     H, ms = mhc_fused_projection(
         x.view(s * b, nC),
@@ -292,10 +294,12 @@ def mhc_fused_aggregate(
     """
     assert n == 4, "Only n=4 is supported in this implementation"
     if fused_grad_x_acc_buffer is not None:
-      assert fused_grad_x_acc_buffer.dtype == torch.float32, \
-          "fused_grad_x_acc_buffer must be fp32"
-      assert fused_grad_x_acc_buffer.numel() == x.numel(), \
-          "fused_grad_x_acc_buffer.numel() must match x.numel()"
+        assert (
+            fused_grad_x_acc_buffer.dtype == torch.float32
+        ), "fused_grad_x_acc_buffer must be fp32"
+        assert (
+            fused_grad_x_acc_buffer.numel() == x.numel()
+        ), "fused_grad_x_acc_buffer.numel() must match x.numel()"
     check_deterministic("mhc_fused_aggregate")
     out = mHCAggregateOp.apply(x, H_pre, n, use_tf32, fused_grad_x_acc_buffer)
     return out
@@ -352,10 +356,12 @@ def mhc_fused_expand_combine(
     """
     assert n == 4, "Only n=4 is supported in this implementation"
     if fused_grad_x_acc_buffer is not None:
-      assert fused_grad_x_acc_buffer.dtype == torch.float32, \
-          "fused_grad_x_acc_buffer must be fp32"
-      assert fused_grad_x_acc_buffer.numel() == x.numel(), \
-          "fused_grad_x_acc_buffer.numel() must match x.numel()"
+        assert (
+            fused_grad_x_acc_buffer.dtype == torch.float32
+        ), "fused_grad_x_acc_buffer must be fp32"
+        assert (
+            fused_grad_x_acc_buffer.numel() == x.numel()
+        ), "fused_grad_x_acc_buffer.numel() must match x.numel()"
     check_deterministic("mhc_fused_expand_combine")
     out = mHCExpandCombineOp.apply(
         f,
@@ -428,10 +434,12 @@ def mhc_fused_projection(
     ), "Currently only n=4 is supported, which means phi should have 24 in its first dimension"
     check_deterministic("mhc_fused_projection")
     if fused_grad_x_acc_buffer is not None:
-      assert fused_grad_x_acc_buffer.dtype == torch.float32, \
-          "fused_grad_x_acc_buffer must be fp32"
-      assert fused_grad_x_acc_buffer.numel() == x.numel(), \
-          "fused_grad_x_acc_buffer.numel() must match x.numel()"
+        assert (
+            fused_grad_x_acc_buffer.dtype == torch.float32
+        ), "fused_grad_x_acc_buffer must be fp32"
+        assert (
+            fused_grad_x_acc_buffer.numel() == x.numel()
+        ), "fused_grad_x_acc_buffer.numel() must match x.numel()"
     H, ms = mHCProjectionOp.apply(x, phi, norm_weight, use_tf32, fused_grad_x_acc_buffer)
     return H, ms
 
