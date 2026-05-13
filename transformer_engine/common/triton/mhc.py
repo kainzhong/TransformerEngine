@@ -306,7 +306,7 @@ def projection_prune_bwd_dphi(configs, named_args, **kwargs):
     # Triton will skip calling prune function if the autotune returns only one config, which breaks the determinism override here
     # So we need to apply NVTE_DISABLE_TRITON_AUTOTUNING in the pruner instead
     if os.environ.get("NVTE_DISABLE_TRITON_AUTOTUNING", "0") == "1":
-        configs = configs[:1]
+        pruned_configs = pruned_configs[:1]
     return pruned_configs
 
 
@@ -1088,7 +1088,7 @@ def aggregate_prune_fwd(configs, named_args, **kwargs):
     # Triton will skip calling prune function if the autotune returns only one config, which breaks the determinism override here
     # So we need to apply NVTE_DISABLE_TRITON_AUTOTUNING in the pruner instead
     if os.environ.get("NVTE_DISABLE_TRITON_AUTOTUNING", "0") == "1":
-        configs = configs[:1]
+        pruned_configs = pruned_configs[:1]
     return pruned_configs
 
 
