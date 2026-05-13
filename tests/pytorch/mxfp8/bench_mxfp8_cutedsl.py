@@ -101,8 +101,15 @@ def make_reference_fn(combo, x, act_in, rowwise, colwise,
     # (only via the C++ tensor.amax pointer). The DSL path-with-amax is
     # benchmarked against TE's plain path; the extra DSL work is the warp
     # redux + atomic. Caller passes with_amax=True only on the DSL side.
+    #
+    # Use the direct `tex.quantize(x, quantizer)` pybind for plain so the C++
+    # entry point's Python overhead matches `tex.{relu,gelu,silu,...}` for
+    # activation combos. The alternative `quantizer(x)` goes through
+    # `MXFP8Quantizer.__call__` which wraps the result in `Float8Tensor` and
+    # adds ~15 us of Python overhead — making wall-clock comparisons across
+    # combos misleading.
     if combo == "plain":
-        return lambda: quantizer(x)
+        return lambda: tex.quantize(x, quantizer)
     if combo in _TEX_FORWARD_ACT:
         op = _TEX_FORWARD_ACT[combo]
         return lambda: op(x, quantizer)
