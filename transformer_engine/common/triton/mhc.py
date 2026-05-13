@@ -1061,6 +1061,7 @@ def _mhc_sinkhorn_bwd_fused(
         mask=mask_batch[:, None],
     )
 
+
 def aggregate_config_fwd():
     block_m = [1, 2, 4]
     block_c = [128, 256]
