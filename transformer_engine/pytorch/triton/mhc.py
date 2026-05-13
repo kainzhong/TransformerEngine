@@ -40,7 +40,7 @@ _tma_allocator_initialized = False
 
 def _init_tma_allocator():
     # TMA descriptors require a global memory allocation. Registered once on first use.
-    global _tma_allocator_initialized   # pylint: disable=global-statement
+    global _tma_allocator_initialized  # pylint: disable=global-statement
     if _tma_allocator_initialized:
         return
 
