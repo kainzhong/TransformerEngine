@@ -609,8 +609,9 @@ class MXFP8QuantizeSmemKernel:
         out_row_ptr, scale_row_ptr,
         out_col_ptr, scale_col_ptr,
         noop_ptr, amax_ptr, dbias_ptr,
-        M, max_norm_rcp, stream,
-        scaling_type="rowwise", # "rowwise", "colwise", or "bidimensional"
+        M: Int32,
+        max_norm_rcp: Float32,
+        stream: cuda.CUstream,
     ):
         cfg = self.cfg
         num_scale_cols = cfg.N // SCALE_DIM
@@ -1937,6 +1938,11 @@ def _get_compiled_kernel(cfg, stream):
             Int32(1), Float32(cfg.MAX_NORM_RCP), stream,
         )
         _compile_cache[key] = compiled
+        compiled.export_to_c(
+            file_path="/home/kainingz/GitHub/TransformerEngine/tests/pytorch/mxfp8/artifacts",
+            file_name="quantize_mxfp8_cutedsl_kernel_exported",
+            function_prefix="test",
+        )
     return _compile_cache[key]
 
 

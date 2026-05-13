@@ -76,6 +76,8 @@ esac
 # --- run nsys per (shape, dir) and collect kernel-only stats ---
 RESULTS_FILE=$(mktemp)
 trap 'rm -f "$RESULTS_FILE"' EXIT
+# Track the files generated per run so we can list them at the end.
+GENERATED_FILES=()
 
 for COMBO in "${COMBOS[@]}"; do
 for SHAPE_PAIR in $SHAPES; do
@@ -101,7 +103,8 @@ for SHAPE_PAIR in $SHAPES; do
             > "${OUT}.stdout" 2>&1
         then
             echo "   FAILED — see ${OUT}.stdout"
-            echo "${COMBO} ${M}x${N} ${DIR} 0 0 0 0 0" >> "$RESULTS_FILE"
+            # Fields: combo shape dir DSL_kern CPP_kern DI CI BYTES DSL_wall CPP_wall
+            echo "${COMBO} ${M}x${N} ${DIR} 0 0 0 0 0 0 0" >> "$RESULTS_FILE"
             continue
         fi
 
@@ -132,7 +135,7 @@ import csv, io, subprocess, sys
 rep = sys.argv[1] + ".nsys-rep"
 out = subprocess.run(
     ["nsys", "stats", "--report", "cuda_gpu_kern_sum",
-     "--format", "csv", rep],
+     "--format", "csv", "--force-export=true", rep],
     capture_output=True, text=True,
 )
 dsl_avg = cpp_avg = None
@@ -159,25 +162,39 @@ for row in csv.reader(io.StringIO(out.stdout)):
 print(f"{dsl_avg or 0} {cpp_avg or 0} {dsl_inst} {cpp_inst}")
 PY
         )
-        echo "${COMBO} ${M}x${N} ${DIR} ${PARSED} ${BYTES}" >> "$RESULTS_FILE"
+
+        # Parse Python-level wall-clock from bench stdout. The bench's summary
+        # line looks like:
+        #   <tag>   <MxN>   <dir>   C++_us   DSL_us   C++_GBps   DSL_GBps   DSL/C++
+        # Match by shape + direction so it's robust to combo-tag variations.
+        WALL=$(awk -v shape="${M}x${N}" -v dir="$DIR" '
+            $2 == shape && $3 == dir {
+                printf "%s %s", $5, $4   # DSL_us, C++_us
+                exit
+            }
+        ' "${OUT}.stdout")
+        WALL="${WALL:-0 0}"
+
+        echo "${COMBO} ${M}x${N} ${DIR} ${PARSED} ${BYTES} ${WALL}" >> "$RESULTS_FILE"
+        GENERATED_FILES+=("${OUT}")
     done
 done
 done
 
 # --- print summary ---
 echo
-echo "Kernel-only runtime (nsys cuda_gpu_kern_sum, WARMUP=${WARMUP} ITERS=${ITERS})"
+# Section 1: kernel-only runtime (nsys cuda_gpu_kern_sum avg)
+echo "[1/2] Kernel-only runtime (nsys cuda_gpu_kern_sum, WARMUP=${WARMUP} ITERS=${ITERS})"
 echo "============================================================================================================="
 printf "%-14s  %-14s  %-5s  %9s  %9s  %9s  %9s  %8s\n" \
     "combo" "shape" "dir" "DSL us" "C++ us" "DSL GB/s" "C++ GB/s" "DSL/C++"
 printf -- "--------------  --------------  -----  ---------  ---------  ---------  ---------  --------\n"
 
-while read -r COMBO SHAPE DIR DSL_NS CPP_NS DI CI BYTES; do
+while read -r COMBO SHAPE DIR DSL_NS CPP_NS DI CI BYTES DSL_WALL_US CPP_WALL_US; do
     DSL_US=$(awk -v v="$DSL_NS" 'BEGIN{printf "%.2f", v/1000.0}')
     CPP_US=$(awk -v v="$CPP_NS" 'BEGIN{printf "%.2f", v/1000.0}')
     DSL_GBPS=$(awk -v b="$BYTES" -v t="$DSL_NS" 'BEGIN{if(t>0) printf "%.1f", b/t; else print "n/a"}')
     CPP_GBPS=$(awk -v b="$BYTES" -v t="$CPP_NS" 'BEGIN{if(t>0) printf "%.1f", b/t; else print "n/a"}')
-    # speedup = C++ time / DSL time  (>1.0 = DSL faster).
     if awk -v d="$DSL_NS" 'BEGIN{exit (d>0)?0:1}'; then
         SPEEDUP=$(awk -v d="$DSL_NS" -v c="$CPP_NS" 'BEGIN{printf "%.3fx", c/d}')
     else
@@ -187,5 +204,33 @@ while read -r COMBO SHAPE DIR DSL_NS CPP_NS DI CI BYTES; do
         "$COMBO" "$SHAPE" "$DIR" "$DSL_US" "$CPP_US" "$DSL_GBPS" "$CPP_GBPS" "$SPEEDUP"
 done < "$RESULTS_FILE"
 
+# Section 2: Python-level wall-clock from the bench (includes Python wrapper +
+# kernel + sync; the L2-evict kernel itself is excluded by the bench).
 echo
-echo "==> Reports in profile/nsys_kernel_time/"
+echo "[2/2] Python-level wall-clock (bench perf_counter_ns, includes wrapper overhead)"
+echo "============================================================================================================="
+printf "%-14s  %-14s  %-5s  %9s  %9s  %9s  %9s  %8s\n" \
+    "combo" "shape" "dir" "DSL us" "C++ us" "DSL GB/s" "C++ GB/s" "DSL/C++"
+printf -- "--------------  --------------  -----  ---------  ---------  ---------  ---------  --------\n"
+
+while read -r COMBO SHAPE DIR DSL_NS CPP_NS DI CI BYTES DSL_WALL_US CPP_WALL_US; do
+    # Wall-clock GB/s = bytes / (us * 1000)  [since us → ns multiply by 1000]
+    DSL_WALL_GBPS=$(awk -v b="$BYTES" -v t="$DSL_WALL_US" 'BEGIN{if(t>0) printf "%.1f", b/(t*1000); else print "n/a"}')
+    CPP_WALL_GBPS=$(awk -v b="$BYTES" -v t="$CPP_WALL_US" 'BEGIN{if(t>0) printf "%.1f", b/(t*1000); else print "n/a"}')
+    if awk -v d="$DSL_WALL_US" 'BEGIN{exit (d>0)?0:1}'; then
+        WALL_SPEEDUP=$(awk -v d="$DSL_WALL_US" -v c="$CPP_WALL_US" 'BEGIN{printf "%.3fx", c/d}')
+    else
+        WALL_SPEEDUP="n/a"
+    fi
+    printf "%-14s  %-14s  %-5s  %9s  %9s  %9s  %9s  %8s\n" \
+        "$COMBO" "$SHAPE" "$DIR" "$DSL_WALL_US" "$CPP_WALL_US" \
+        "$DSL_WALL_GBPS" "$CPP_WALL_GBPS" "$WALL_SPEEDUP"
+done < "$RESULTS_FILE"
+
+echo
+echo "==> Generated files (${#GENERATED_FILES[@]} run(s)):"
+for OUT in "${GENERATED_FILES[@]}"; do
+    echo "    ${OUT}.nsys-rep"
+    echo "    ${OUT}.sqlite"
+    echo "    ${OUT}.stdout"
+done
