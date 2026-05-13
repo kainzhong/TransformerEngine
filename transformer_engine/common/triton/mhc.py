@@ -295,11 +295,21 @@ def projection_config_bwd_dphi():
         configs = configs[:1]
     return configs
 
+def projection_prune_bwd_dphi(configs, named_args, **kwargs):
+    M = named_args.get("M", kwargs.get("M", None))
+
+    pruned_configs = list(
+        filter(
+            lambda config: triton.cdiv(M, config.kwargs["BLOCK_SIZE_M"]) <= MAX_GRID_DIM_Y, configs
+        )
+    )
+    return pruned_configs
 
 @triton.autotune(
     configs=projection_config_bwd_dphi(),
     key=["M", "K"],
     reset_to_zero=["grad_phi_ptr", "grad_norm_weight_ptr"],
+    prune_configs_by={"early_config_prune": projection_prune_bwd_dphi},
 )
 @triton.jit
 def _mhc_projection_bwd_fused_dphi(
