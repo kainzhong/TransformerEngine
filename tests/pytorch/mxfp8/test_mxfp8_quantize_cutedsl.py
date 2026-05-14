@@ -5,7 +5,13 @@
 """Tests for MXFP8 quantization via CuTeDSL kernel.
 
 Validates that the CuTeDSL implementation produces bit-identical results
-to the reference C++ MXFP8 quantizer in Transformer Engine.
+to the reference C++ MXFP8 quantizer in Transformer Engine. Covers:
+
+  - plain quantize (rowwise / colwise / both)         vs. `tex.quantize`
+  - quantize -> dequantize roundtrip accuracy
+  - IS_ACT  (fused forward activation)                vs. `tex.{relu,gelu,silu}`
+  - IS_DACT (fused backward activation)               vs. `tex.{drelu,dgelu,dsilu}`
+  - IS_DACT + IS_DBIAS (act gradient + per-col sum)   vs. `tex.dbias_d{relu,gelu,silu}`
 """
 
 import pytest
@@ -16,7 +22,7 @@ import transformer_engine_torch as tex
 from transformer_engine.pytorch import MXFP8Quantizer
 from transformer_engine.pytorch.tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
 
-from quantize_mxfp8_cutedsl import (
+from quantize_mxfp8_cutedsl_alt import (
     quantize_mxfp8_cutedsl,
     MXFP8_BLOCK_SIZE,
 )
@@ -24,6 +30,11 @@ from quantize_mxfp8_cutedsl import (
 from mxfp8_utils import get_mxfp8_scale_shape_no_padding
 
 recipe_available, reason_for_no_recipe = te.is_mxfp8_available(return_reason=True)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 
 def unpack_quantized_tensor(quantized_tensor: MXFP8TensorStorage):
@@ -38,6 +49,29 @@ def unpack_quantized_tensor(quantized_tensor: MXFP8TensorStorage):
     if quantized_tensor._columnwise_scale_inv is not None:
         sx_t = quantized_tensor._columnwise_scale_inv
     return qx, sx, qx_t, sx_t
+
+
+def _dirs(name):
+    return {"row": (True, False), "col": (False, True), "both": (True, True)}[name]
+
+
+def _assert_quant_equal(dsl, ref_tensor, rowwise, colwise, tag=""):
+    """Bit-exact compare DSL output dict against a TE quantized tensor."""
+    if rowwise:
+        ref_d = ref_tensor._rowwise_data.view(torch.uint8)
+        ref_s = ref_tensor._rowwise_scale_inv.view(torch.uint8)
+        assert torch.equal(dsl["rowwise_data"], ref_d), f"{tag}: rowwise data mismatch"
+        assert torch.equal(dsl["rowwise_scale"], ref_s), f"{tag}: rowwise scale mismatch"
+    if colwise:
+        ref_d = ref_tensor._columnwise_data.view(torch.uint8)
+        ref_s = ref_tensor._columnwise_scale_inv.view(torch.uint8)
+        assert torch.equal(dsl["colwise_data"], ref_d), f"{tag}: colwise data mismatch"
+        assert torch.equal(dsl["colwise_scale"], ref_s), f"{tag}: colwise scale mismatch"
+
+
+# ---------------------------------------------------------------------------
+# Plain quantize (no activation, no dbias)
+# ---------------------------------------------------------------------------
 
 
 def check_mxfp8_cutedsl_vs_reference(
@@ -160,7 +194,7 @@ def check_mxfp8_cutedsl_roundtrip(
 
 
 # ---------------------------------------------------------------------------
-# Pytest test cases
+# Pytest test cases — plain quantize
 # ---------------------------------------------------------------------------
 
 
@@ -223,3 +257,131 @@ def test_mxfp8_cutedsl_roundtrip(
 ) -> None:
     """Test that CuTeDSL MXFP8 quantize -> dequantize roundtrip is accurate."""
     check_mxfp8_cutedsl_roundtrip(x_dtype=x_dtype, M=M, N=N)
+
+
+# ---------------------------------------------------------------------------
+# Pytest test cases — fused activation combos
+# ---------------------------------------------------------------------------
+
+
+_COMBO_SHAPES = [(128, 128), (256, 256), (512, 256)]
+_COMBO_DTYPES = [torch.bfloat16, torch.float16, torch.float32]
+_DIRECTIONS = ["row", "col", "both"]
+
+
+_TE_FWD_ACT = {"relu": tex.relu, "gelu": tex.gelu, "silu": tex.silu}
+_TE_BWD_ACT = {"drelu": tex.drelu, "dgelu": tex.dgelu, "dsilu": tex.dsilu}
+_TE_DBIAS_DACT = {
+    "drelu": tex.dbias_drelu,
+    "dgelu": tex.dbias_dgelu,
+    "dsilu": tex.dbias_dsilu,
+}
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize("M, N", _COMBO_SHAPES)
+@pytest.mark.parametrize("x_dtype", _COMBO_DTYPES, ids=str)
+@pytest.mark.parametrize("activation", sorted(_TE_FWD_ACT))
+@pytest.mark.parametrize("direction", _DIRECTIONS)
+def test_mxfp8_cutedsl_activation(
+    x_dtype: torch.dtype,
+    M: int,
+    N: int,
+    activation: str,
+    direction: str,
+) -> None:
+    """IS_ACT path: fused forward activation + MXFP8 quantize vs. tex.{relu,gelu,silu}."""
+    rowwise, colwise = _dirs(direction)
+    torch.manual_seed(0)
+    x = torch.randn((M, N), dtype=x_dtype, device="cuda")
+
+    quantizer = MXFP8Quantizer(
+        fp8_dtype=tex.DType.kFloat8E4M3,
+        rowwise=rowwise, columnwise=colwise,
+    )
+    ref = _TE_FWD_ACT[activation](x, quantizer)
+
+    dsl = quantize_mxfp8_cutedsl(
+        x, rowwise=rowwise, colwise=colwise, activation=activation,
+    )
+    torch.cuda.synchronize()
+
+    _assert_quant_equal(dsl, ref, rowwise, colwise,
+                        tag=f"{activation}/{direction}/{x_dtype}")
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize("M, N", _COMBO_SHAPES)
+@pytest.mark.parametrize("x_dtype", _COMBO_DTYPES, ids=str)
+@pytest.mark.parametrize("activation", sorted(_TE_BWD_ACT))
+@pytest.mark.parametrize("direction", _DIRECTIONS)
+def test_mxfp8_cutedsl_dact(
+    x_dtype: torch.dtype,
+    M: int,
+    N: int,
+    activation: str,
+    direction: str,
+) -> None:
+    """IS_DACT path: fused backward activation + MXFP8 quantize vs. tex.{drelu,dgelu,dsilu}."""
+    rowwise, colwise = _dirs(direction)
+    torch.manual_seed(0)
+    grad = torch.randn((M, N), dtype=x_dtype, device="cuda")
+    act_in = torch.randn((M, N), dtype=x_dtype, device="cuda")
+
+    quantizer = MXFP8Quantizer(
+        fp8_dtype=tex.DType.kFloat8E4M3,
+        rowwise=rowwise, columnwise=colwise,
+    )
+    ref = _TE_BWD_ACT[activation](grad, act_in, quantizer)
+
+    dsl = quantize_mxfp8_cutedsl(
+        grad, rowwise=rowwise, colwise=colwise,
+        activation=activation, act_input=act_in,
+    )
+    torch.cuda.synchronize()
+
+    _assert_quant_equal(dsl, ref, rowwise, colwise,
+                        tag=f"{activation}/{direction}/{x_dtype}")
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize("M, N", _COMBO_SHAPES)
+@pytest.mark.parametrize("x_dtype", _COMBO_DTYPES, ids=str)
+@pytest.mark.parametrize("activation", sorted(_TE_DBIAS_DACT))
+# Cover both IS_DBIAS paths: path A (colwise piggyback, used for "col" & "both")
+# and path B (rowwise-only shmem-transpose, used for "row").
+@pytest.mark.parametrize("direction", _DIRECTIONS)
+def test_mxfp8_cutedsl_dbias_dact(
+    x_dtype: torch.dtype,
+    M: int,
+    N: int,
+    activation: str,
+    direction: str,
+) -> None:
+    """IS_DACT + IS_DBIAS: fused dact + per-column dbias vs. tex.dbias_d{relu,gelu,silu}."""
+    rowwise, colwise = _dirs(direction)
+    torch.manual_seed(0)
+    grad = torch.randn((M, N), dtype=x_dtype, device="cuda")
+    act_in = torch.randn((M, N), dtype=x_dtype, device="cuda")
+
+    quantizer = MXFP8Quantizer(
+        fp8_dtype=tex.DType.kFloat8E4M3,
+        rowwise=rowwise, columnwise=colwise,
+    )
+    # TE returns (dbias, quant_tensor)
+    ref_dbias, ref_quant = _TE_DBIAS_DACT[activation](grad, act_in, quantizer)
+
+    dsl = quantize_mxfp8_cutedsl(
+        grad, rowwise=rowwise, colwise=colwise,
+        activation=activation, act_input=act_in,
+        compute_dbias=True,
+    )
+    torch.cuda.synchronize()
+
+    tag = f"{activation}/{direction}/{x_dtype}"
+    _assert_quant_equal(dsl, ref_quant, rowwise, colwise, tag=tag)
+    assert torch.equal(dsl["dbias"], ref_dbias), (
+        f"{tag}: dbias mismatch — "
+        f"{(dsl['dbias'] != ref_dbias).sum().item()}/{N} diffs, "
+        f"max |Δ|={(dsl['dbias'].float() - ref_dbias.float()).abs().max().item():.6g}"
+    )
