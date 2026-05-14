@@ -1700,8 +1700,11 @@ class MXFP8QuantizeSmemKernel:
             # the per-wave mul_cvt consumes this directly.
             scale_2x = pack_f32x2(inv_scale_r, inv_scale_r)
 
+        bank_group = (tidx % THREADS_PER_WARP) // THREADS_PER_BANK # Each 4 threads share the same bank, which forms a bank group
+        offset = bank_group * 4 # Each bank group will write 4 fp8 to
         for w in cutlass.range_constexpr(WAVES):
-            swz = ((w + bank_group) * PACK_SIZE) % SCALE_DIM
+            idx = (w * 4 + offset) % SCALE_DIM
+            idx = idx // 4
             if cutlass.const_expr(_row_fast):
                 # One fused PTX per <fmt>x2 pair: <fmt>x2 × f32x2 → fp8x2.
                 # Byte layout: byte[0]=fp8(lo * s), byte[1]=fp8(hi * s).
@@ -1718,7 +1721,7 @@ class MXFP8QuantizeSmemKernel:
                 p01 = cvt_f32x2(v1, v0)  # u16 little-endian: v0,v1
                 p23 = cvt_f32x2(v3, v2)  # u16 little-endian: v2,v3
             quad = (p23 << Int32(16)) | p01
-            sO_thread_u32[w] = Uint32(quad)
+            sO_thread_u32[idx] = Uint32(quad)
 
         # Per-thread amax over the thread's 32-elt scale block. Also returns
         # the (possibly updated) thread_dbias accumulator — extended in the
