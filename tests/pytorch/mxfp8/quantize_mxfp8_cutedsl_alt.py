@@ -83,7 +83,6 @@ FP8E5M2_MAX_NORM_RCP = 1.0 / FP8E5M2_MAX_NORM
 
 FP32_MANTISSA_BITS = 23
 
-
 # ---------------------------------------------------------------------------
 # Low-level DSL operations
 # ---------------------------------------------------------------------------
@@ -538,7 +537,6 @@ def _cvt_f32x2_to_fp8x2(fp8_dtype: str):
         return cvt_f32x2_to_fp8e5m2x2
     return cvt_f32x2_to_fp8e4m3x2
 
-
 # ---------------------------------------------------------------------------
 # Kernel configuration
 # ---------------------------------------------------------------------------
@@ -612,60 +610,19 @@ class MXFP8QuantizeSmemKernel:
     @cute.jit
     def __call__(
         self,
-        x_ptr, # Input tensor to quantize
-        act_in_ptr, # Forward activation output, only used in IS_DACT path
-        out_row_ptr, scale_row_ptr, # Rowwise output and scale tensors
-        out_col_ptr, scale_col_ptr, # Colwise output and scale tensors
-        noop_ptr, # Skip flag — if *noop == 1.0, kernel exits immediately
-        amax_ptr, # Global amax accumulator, only used in WITH_AMAX path
-        dbias_ptr, # Per-CTA-row partial dbias sums which is reduced down to (N,) by a separate kernel, only used in WITH_DBIAS path
+        mX: cute.Tensor, # Input tensor to quantize
+        mActIn: cute.Tensor, # Forward activation output, only used in IS_DACT path
+        mO_row: cute.Tensor, mS_row: cute.Tensor, # Rowwise output and scale tensors
+        mO_col: cute.Tensor, mS_col: cute.Tensor, # Colwise output and scale tensors
+        mNoop: cute.Tensor, # Skip flag — if *noop == 1.0, kernel exits immediately
+        mAmax: cute.Tensor, # Global amax accumulator, only used in WITH_AMAX path
+        mDbias: cute.Tensor, # Per-CTA-row partial dbias sums which is reduced down to (N,) by a separate kernel, only used in WITH_DBIAS path
         M: Int32,
         max_norm_rcp: Float32, # 1 / FP8_MAX_NORM constant (e4m3 vs e5m2). Multiplied into amax to build the e8m0 scale
         stream: cuda.CUstream,
     ):
         cfg = self.cfg
-        num_scale_cols = cfg.N // SCALE_DIM
-        num_scale_rows = cfg.M // SCALE_DIM
 
-        mX = cute.make_tensor(x_ptr, cute.make_layout((M, cfg.N), stride=(cfg.N, 1)))
-        mActIn = cute.make_tensor(act_in_ptr, cute.make_layout((M, cfg.N), stride=(cfg.N, 1)))
-        # Each CTA processes (TILE_Y * NUM_TILES) rows, and Dbias needs to reduce along the M dimension
-        # So we need to create a workspace with shape (CTA_rows, N) where CTA_rows is the number of rows in our grid
-        # and we will use a second kernel to reduce the workspace to the final dbias output with shape (N,)
-        blocks_Y = (cfg.M + TILE_Y * NUM_TILES - 1) // (TILE_Y * NUM_TILES) # ceil_div(M, TILE_Y * NUM_TILES)
-        mDbias = cute.make_tensor(
-            dbias_ptr, cute.make_layout((blocks_Y, cfg.N), stride=(cfg.N, 1)))
-        # 1-element noop flag in gmem — the kernel reads this once and skips
-        # all work if it's 1.0. Wrapper passes a zero-init dummy when caller
-        # didn't supply a real flag, so the kernel always sees a valid ptr.
-        mNoop = cute.make_tensor(noop_ptr, cute.make_layout(1))
-        # 1-element global amax accumulator. Used only when cfg.WITH_AMAX —
-        # otherwise wrapper passes a dummy and the kernel skips the reduction.
-        mAmax = cute.make_tensor(amax_ptr, cute.make_layout(1))
-
-        # Rowwise output tensors
-        mO_row = cute.make_tensor(out_row_ptr, cute.make_layout((M, cfg.N), stride=(cfg.N, 1)))
-        # Rowwise scale tensors
-        if cutlass.const_expr(cfg.WITH_GEMM_SWIZZLED_SCALES):
-            # For example, M=256 and N=512, then num_tiles=2, num_tiles_SC=4
-            # Swizzled layout is ((32, 4, 2), (4, 4)):((16,4,2048), (1, 512)))
-            # Non-swizzled layout is (256, 16):(16, 1)
-            # They both have logical shape (256, 16) because there are 256 rows, 512 columns, and each column has 512 / 32 = 16 scale factors.
-            # They are processed by (cdiv(M, 64), cdiv(N, 64)) = (4, 8) blocks of threads
-            # Each block writes (64, 2) scale factor blocks
-            num_tiles_M = (cfg.M + 127) // 128 # ceil_div(M, 128)
-            num_tiles_SC = (num_scale_cols + 3) // 4   #ceil_div(N, 128)
-            mS_row = cute.make_tensor(
-                scale_row_ptr,
-                cute.make_layout(
-                    ((32, 4, num_tiles_M), (4, num_tiles_SC)),
-                    stride=((16, 4, num_tiles_SC * 512), (1, 512)),
-                ),
-            )
-        else:
-            mS_row = cute.make_tensor(
-                scale_row_ptr,
-                cute.make_layout((M, num_scale_cols), stride=(num_scale_cols, 1)))
         grid_Y = cute.ceil_div(M, TILE_Y * NUM_TILES)
         grid_X = cute.ceil_div(cfg.N, TILE_X)
         # Each block will compute TILE_Y * NUM_TILES rows of TILE_X // SCALE_DIM scale factors
@@ -674,26 +631,6 @@ class MXFP8QuantizeSmemKernel:
         # In our (M, N) = (256, 512) example, since block's tile size is 64x64, we have GRID=(4, 8), and SCALE_TILE=(64, 2) since it has 64 row with 2 scale factors (64 values per row)
         # Swizzled: https://kainzhong.github.io/CuTe-Layout-Visualizer/?key=zipped_divide-%28%2832%2C+4%2C+2%29%2C+%284%2C+4%29%29%3A%28%2816%2C4%2C2048%29%2C+%281%2C+512%29%29%29-64%3A1%0A2%3A1
         # Non-Swizzled: https://kainzhong.github.io/CuTe-Layout-Visualizer/?key=zipped_divide-%28256%2C+16%29%3A%2816%2C+1%29-64%3A1%0A2%3A1
-
-        # Colwise output tensors
-        mO_col = cute.make_tensor(out_col_ptr, cute.make_layout((M, cfg.N), stride=(cfg.N, 1)))
-        if cutlass.const_expr(cfg.WITH_GEMM_SWIZZLED_SCALES):
-            # Same swizzle, but the 128-extent and 4-extent axes swap roles:
-            # the col axis (range cfg.N) gets the 32×4 inner decomp, the
-            # scale-row axis (range num_scale_rows) gets the 4-extent dim.
-            num_tiles_SR = (num_scale_rows + 3) // 4   # = ceil(M / 128)
-            num_tiles_N = (cfg.N + 127) // 128
-            mS_col = cute.make_tensor(
-                scale_col_ptr,
-                cute.make_layout(
-                    ((4, num_tiles_SR), (32, 4, num_tiles_N)),
-                    stride=((1, 512), (16, 4, num_tiles_SR * 512)),
-                ),
-            )
-        else:
-            mS_col = cute.make_tensor(
-                scale_col_ptr,
-                cute.make_layout((num_scale_rows, cfg.N), stride=(cfg.N, 1)))
 
         # Declare TMA descriptors on the host side.
         # make_tiled_tma_atom returns the UNTILED gmem tensor with basis strides.
@@ -1982,36 +1919,54 @@ class MXFP8QuantizeSmemKernel:
 # ---------------------------------------------------------------------------
 # Compilation cache
 # ---------------------------------------------------------------------------
-_compile_cache: dict = {}
+_compile_cache_tvm_ffi: dict = {}
 
-
-def _get_compiled_kernel(cfg, stream):
+def _get_compiled_kernel_tvm_ffi(cfg, stream):
     key = (cfg.DTYPE, cfg.M, cfg.N, cfg.FP8_DTYPE, cfg.ROWWISE, cfg.COLWISE,
            cfg.WITH_GEMM_SWIZZLED_SCALES, cfg.WITH_AMAX, cfg.ACTIVATION,
-           cfg.WITH_DBIAS)
-    if key not in _compile_cache:
+           cfg.WITH_DBIAS, "tvm_ffi")
+    if key not in _compile_cache_tvm_ffi:
         kernel_obj = MXFP8QuantizeSmemKernel(cfg)
-        u8_ptr = make_ptr(Uint8, 16, cute.AddressSpace.gmem, assumed_align=16)
-        f32_ptr = make_ptr(Float32, 16, cute.AddressSpace.gmem, assumed_align=4)
-        in_ptr = make_ptr(cfg.DTYPE, 16, cute.AddressSpace.gmem, assumed_align=16)
+        # Sym dims. Reuse the SAME sym_int across fakes that share a logical
+        # axis — tvm-ffi unifies dims by sym identity, so reusing M lets it
+        # enforce e.g. mX.shape[0] == mO_row.shape[0] == mDbias is unrelated.
+        # Conversely, use DIFFERENT sym_ints for axes that differ at runtime
+        # (mS_row's N/32 vs mO_row's N), otherwise the wrapper will require
+        # them to match and fail at call time.
+        M = cute.sym_int()
+        N = cute.sym_int()
+        SCALED_N_ROW = cute.sym_int()   # mS_row dim 1 = N // 32
+        SCALED_M_COL = cute.sym_int()   # mS_col dim 0 = M // 32
+        WS_M = cute.sym_int()           # mDbias dim 0 = ceil_div(M, TILE_Y*NUM_TILES)
+        # stride_order=(1, 0) → row-major: dim 1 is fastest-changing, stride 1.
+        # Matches torch's default `torch.empty((M, N))` layout = strides (N, 1).
+        # Default is (0, 1) (col-major-leftmost), which mismatches torch and
+        # breaks the kernel's TMA layout assumptions internally.
+        kw_rm16 = dict(stride_order=(1, 0),
+                       memspace=cute.AddressSpace.gmem, assumed_align=16)
+        kw_rm4 = dict(stride_order=(1, 0),
+                      memspace=cute.AddressSpace.gmem, assumed_align=4)
+        in_fake_ptr      = cute.runtime.make_fake_compact_tensor(cfg.DTYPE,  (M, N),            **kw_rm16)
+        data_fake_ptr    = cute.runtime.make_fake_compact_tensor(cute.Uint8, (M, N),            **kw_rm16)
+        scale_row_fake   = cute.runtime.make_fake_compact_tensor(cute.Uint8, (M, SCALED_N_ROW), **kw_rm16)
+        scale_col_fake   = cute.runtime.make_fake_compact_tensor(cute.Uint8, (SCALED_M_COL, N), **kw_rm16)
+        ws_fake_ptr      = cute.runtime.make_fake_compact_tensor(Float32,    (WS_M, N),         **kw_rm4)
+        single_fake_ptr  = cute.runtime.make_fake_compact_tensor(
+            Float32, (1,), memspace=cute.AddressSpace.gmem, assumed_align=4)
         compiled = cute.compile[(GPUArch("sm_100a"),)](
             kernel_obj,
-            in_ptr,           # x_ptr (grad_y when IS_DACT)
-            in_ptr,           # act_in_ptr (== x_ptr alias when not IS_DACT)
-            u8_ptr, u8_ptr,   # rowwise data, scale
-            u8_ptr, u8_ptr,   # colwise data, scale
-            f32_ptr,          # noop flag (1-element f32)
-            f32_ptr,          # amax accumulator (1-element f32)
-            f32_ptr,          # dbias workspace (blocks_Y * N f32, only used if with_dbias)
+            in_fake_ptr,                       # mX
+            in_fake_ptr,                       # mActIn (alias of mX unless IS_DACT)
+            data_fake_ptr,   scale_row_fake,   # mO_row, mS_row
+            data_fake_ptr,   scale_col_fake,   # mO_col, mS_col
+            single_fake_ptr,                   # mNoop
+            single_fake_ptr,                   # mAmax
+            ws_fake_ptr,                       # mDbias
             Int32(1), Float32(cfg.MAX_NORM_RCP), stream,
+            options="--enable-tvm-ffi"
         )
-        _compile_cache[key] = compiled
-        compiled.export_to_c(
-            file_path="/home/kainingz/GitHub/TransformerEngine/tests/pytorch/mxfp8/artifacts",
-            file_name="quantize_mxfp8_cutedsl_kernel_exported",
-            function_prefix="test",
-        )
-    return _compile_cache[key]
+        _compile_cache_tvm_ffi[key] = compiled
+    return _compile_cache_tvm_ffi[key]
 
 
 # ---------------------------------------------------------------------------
@@ -2035,6 +1990,22 @@ def _noop_dummy_for(device):
     if buf is None:
         buf = torch.zeros(1, dtype=torch.float32, device=device)
         _NOOP_DUMMY_CACHE[key] = buf
+    return buf
+
+
+_TVM_FFI_DUMMY_CACHE: dict = {}
+
+
+def _tvm_ffi_dummy(shape, dtype, device):
+    """Reusable empty buffer for tvm-ffi call-time shape checks on inactive
+    kernel slots (unused direction outputs, unused dbias workspace). The
+    kernel never reads/writes these (const-expr gated), so contents don't
+    matter — only shape/dtype/device must match the compile-time fake-ptr."""
+    key = (tuple(shape), dtype, str(device))
+    buf = _TVM_FFI_DUMMY_CACHE.get(key)
+    if buf is None:
+        buf = torch.empty(shape, dtype=dtype, device=device)
+        _TVM_FFI_DUMMY_CACHE[key] = buf
     return buf
 
 
@@ -2145,12 +2116,18 @@ def quantize_mxfp8_cutedsl(
                                with_gemm_swizzled_scales=with_gemm_swizzled_scales,
                                with_amax=with_amax, activation=activation,
                                with_dbias=compute_dbias)
-    compiled = _get_compiled_kernel(cfg, stream)
+    compiled = _get_compiled_kernel_tvm_ffi(cfg, stream)
     nvtx.range_pop()  # dsl.cache_lookup
 
-    # For unused directions, point to the other direction's buffer (never written)
-    dummy = result.get("rowwise_data", result.get("colwise_data"))
-    dummy_scale = result.get("rowwise_scale", result.get("colwise_scale"))
+    # Dummies for unused slots. The kernel is const-expr gated and never
+    # reads/writes these, but tvm-ffi's call-time shape check is unconditional,
+    # so each dummy must declare the exact shape/dtype its fake-ptr expects
+    # (see `_get_compiled_kernel_tvm_ffi`). Cached by (shape, dtype, device)
+    # so we don't churn the allocator across iters.
+    out_row_data  = result["rowwise_data"]  if rowwise else _tvm_ffi_dummy((M, N),              torch.uint8, x.device)
+    out_row_scale = result["rowwise_scale"] if rowwise else _tvm_ffi_dummy((M, N // SCALE_DIM), torch.uint8, x.device)
+    out_col_data  = result["colwise_data"]  if colwise else _tvm_ffi_dummy((M, N),              torch.uint8, x.device)
+    out_col_scale = result["colwise_scale"] if colwise else _tvm_ffi_dummy((M // SCALE_DIM, N), torch.uint8, x.device)
 
     # DBias workspace — `[blocks_Y, N]` f32 partial sums, reduced post-kernel.
     # blocks_Y must match the kernel's `(cfg.M + 63) // 64` (one CTA per
@@ -2161,29 +2138,27 @@ def quantize_mxfp8_cutedsl(
         dbias_workspace = torch.empty(
             (blocks_Y, N), dtype=torch.float32, device=x.device)
     else:
-        dbias_workspace = _noop_dummy_for(x.device)
+        # Fake declares (WS_M, N) — any positive WS_M is OK. Use a 1-row
+        # dummy; the kernel never touches it when cfg.WITH_DBIAS is False.
+        dbias_workspace = _tvm_ffi_dummy((1, N), torch.float32, x.device)
     nvtx.range_pop()  # dsl.dbias_workspace
 
-    def _ptr(t):
-        return make_ptr(Uint8, t.data_ptr())
-
     nvtx.range_push("dsl.make_ptr")
-    args = (
-        make_ptr(cutlass_dtype, x.data_ptr()),
-        make_ptr(cutlass_dtype, act_input.data_ptr()),
-        _ptr(result["rowwise_data"]) if rowwise else _ptr(dummy),
-        _ptr(result["rowwise_scale"]) if rowwise else _ptr(dummy_scale),
-        _ptr(result["colwise_data"]) if colwise else _ptr(dummy),
-        _ptr(result["colwise_scale"]) if colwise else _ptr(dummy_scale),
-        make_ptr(Float32, noop.data_ptr()),
-        make_ptr(Float32, amax.data_ptr()),
-        make_ptr(Float32, dbias_workspace.data_ptr()),
+    # Positional call — tvm-ffi compiled wrappers don't preserve Python parameter
+    # names for the tensor args, so kwarg-style fails with "unexpected keyword
+    # argument 'mX'". Order must match the kernel `__call__` signature and the
+    # fake-ptrs passed to `cute.compile` in `_get_compiled_kernel_tvm_ffi`.
+    call_args = (
+        x, act_input,
+        out_row_data, out_row_scale,
+        out_col_data, out_col_scale,
+        noop, amax, dbias_workspace,
         Int32(M), Float32(max_norm_rcp), stream,
     )
     nvtx.range_pop()  # dsl.make_ptr
 
     nvtx.range_push("dsl.launch")
-    compiled(*args)
+    compiled(*call_args)
     nvtx.range_pop()  # dsl.launch
 
     if compute_dbias:
