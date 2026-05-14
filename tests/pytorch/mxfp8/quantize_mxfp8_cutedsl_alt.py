@@ -235,6 +235,15 @@ def _build_packed16_kit(in_fmt: str):
             f"max.xorsign.abs.{in_fmt}x2 $0, $1, $2;",
             "=r,r,r", has_side_effects=False, is_align_stack=False,
             asm_dialect=llvm.AsmDialect.AD_ATT))
+    
+    @dsl_user_op
+    def max_x2(a: Int32, b: Int32, *, loc=None, ip=None) -> Int32:
+        return Int32(llvm.inline_asm(
+            T.i32(),
+            [a.ir_value(loc=loc, ip=ip), b.ir_value(loc=loc, ip=ip)],
+            f"max.{in_fmt}x2 $0, $1, $2;",
+            "=r,r,r", has_side_effects=False, is_align_stack=False,
+            asm_dialect=llvm.AsmDialect.AD_ATT))
 
     @dsl_user_op
     def abs_max_scalar(a: Int16, b: Int16, *, loc=None, ip=None) -> Int16:
@@ -315,7 +324,7 @@ def _build_packed16_kit(in_fmt: str):
                 "=f,h", has_side_effects=False, is_align_stack=False,
                 asm_dialect=llvm.AsmDialect.AD_ATT))
 
-    def _build_mul_cvt(out_fmt: str):
+    def _build_mul_cvt(out_fmt: str, relu: bool = False):
         """Build a fused `<in_fmt>x2 * f32x2 → fp8<out_fmt>x2` PTX wrapper.
 
         The shape is identical across (in_fmt, out_fmt) combos — only the
@@ -334,7 +343,7 @@ def _build_packed16_kit(in_fmt: str):
             "mov.b64 vp0, {v1, v2};\n\t"
             "mul.f32x2 vp1, vp0, $2;\n\t"
             "mov.b64 {v2, v1}, vp1;\n\t"
-            f"cvt.rn.satfinite.{out_op}.f32 $0, v1, v2;\n\t"
+            f"cvt.rn.satfinite{".relu" if relu else ""}.{out_op}.f32 $0, v1, v2;\n\t"
             "}"
         )
 
@@ -351,16 +360,14 @@ def _build_packed16_kit(in_fmt: str):
                 T.i32(), result_i16.ir_value(loc=loc, ip=ip), loc=loc, ip=ip))
         return fn
 
-    mul_cvt_e4m3 = _build_mul_cvt("e4m3")
-    mul_cvt_e5m2 = _build_mul_cvt("e5m2")
-
-    def mul_cvt_to_fp8x2(fp8_dtype: str):
+    def mul_cvt_to_fp8x2(fp8_dtype: str, relu: bool = False):
         if fp8_dtype == "e5m2":
-            return mul_cvt_e5m2
-        return mul_cvt_e4m3
+            return _build_mul_cvt("e5m2", relu)
+        return _build_mul_cvt("e4m3", relu)
 
     return SimpleNamespace(
         abs_max_x2=abs_max_x2,
+        max_x2=max_x2,
         abs_max_scalar=abs_max_scalar,
         bits_to_f32=bits_to_f32,
         x2_lo_to_f32=x2_lo_to_f32,
@@ -483,7 +490,7 @@ def _is_derivative_activation(name) -> bool:
 
 
 @dsl_user_op
-def cvt_f32x2_to_fp8e4m3x2(val_hi: Float32, val_lo: Float32,
+def cvt_f32x2_to_fp8e4m3x2(val_hi: Float32, val_lo: Float32, relu: bool = False,
                              *, loc=None, ip=None) -> Int32:
     """Convert two float32 values to two packed fp8e4m3fn bytes in one instruction.
 
@@ -493,7 +500,7 @@ def cvt_f32x2_to_fp8e4m3x2(val_hi: Float32, val_lo: Float32,
     result_i16 = Int16(llvm.inline_asm(
         T.i16(),
         [val_hi.ir_value(loc=loc, ip=ip), val_lo.ir_value(loc=loc, ip=ip)],
-        "cvt.rn.satfinite.e4m3x2.f32 $0, $1, $2;",
+        f"cvt.rn.satfinite{".relu" if relu else ""}.e4m3x2.f32 $0, $1, $2;",
         "=h,f,f", has_side_effects=False, is_align_stack=False,
         asm_dialect=llvm.AsmDialect.AD_ATT))
     return Int32(mlir_arith.extui(
@@ -501,13 +508,13 @@ def cvt_f32x2_to_fp8e4m3x2(val_hi: Float32, val_lo: Float32,
 
 
 @dsl_user_op
-def cvt_f32x2_to_fp8e5m2x2(val_hi: Float32, val_lo: Float32,
+def cvt_f32x2_to_fp8e5m2x2(val_hi: Float32, val_lo: Float32, relu: bool = False,
                              *, loc=None, ip=None) -> Int32:
     """e5m2 sibling of `cvt_f32x2_to_fp8e4m3x2`."""
     result_i16 = Int16(llvm.inline_asm(
         T.i16(),
         [val_hi.ir_value(loc=loc, ip=ip), val_lo.ir_value(loc=loc, ip=ip)],
-        "cvt.rn.satfinite.e5m2x2.f32 $0, $1, $2;",
+        f"cvt.rn.satfinite{".relu" if relu else ""}.e5m2x2.f32 $0, $1, $2;",
         "=h,f,f", has_side_effects=False, is_align_stack=False,
         asm_dialect=llvm.AsmDialect.AD_ATT))
     return Int32(mlir_arith.extui(
@@ -1610,8 +1617,13 @@ class MXFP8QuantizeSmemKernel:
         print(f"sO_thread_u32: {sO_thread_u32}")
 
         thread_dbias = thread_dbias_in
-        if cutlass.const_expr(_is_packed16(cfg.DTYPE) and cfg.ACTIVATION is None
-                              and not (cfg.WITH_DBIAS and not cfg.COLWISE)):
+
+        FUSE_RELU = cutlass.const_expr(cfg.ACTIVATION == "relu" and not cfg.WITH_DBIAS)
+        # For this fast paht we can read in pack of 2 instead of reading individual f16 / bf16 element
+        _row_fast = (_is_packed16(cfg.DTYPE) and (cfg.ACTIVATION is None or FUSE_RELU)
+                     and not (cfg.WITH_DBIAS and not cfg.COLWISE))
+
+        if cutlass.const_expr(_row_fast):
             # If no activation, no dbias, f16 / bf16 and rowwise quantization, we can read 2 f16 / bf16 at once in a pack
             # and use max.xorsign.abs.f16x2 / max.xorsign.abs.bf16x2 to compute
             kit = _packed16_kit(cfg.DTYPE)
@@ -1636,13 +1648,28 @@ class MXFP8QuantizeSmemKernel:
             amax_2x = Int32(0)
             # Each wave will use max.xorsign.abs.f16x2 or max.xorsign.abs.bf16x2 to compare 2 packed elements in parallel
             for w in cutlass.range_constexpr(WAVES):
-                amax_2x = kit.abs_max_x2(amax_2x, in_r[w][0])
-                amax_2x = kit.abs_max_x2(amax_2x, in_r[w][1])
-            # Compare the 2 packed max
-            amax_r = cute.arch.fmax(
-                fabs_f32(kit.x2_lo_to_f32(amax_2x)),
-                fabs_f32(kit.x2_hi_to_f32(amax_2x)),
-            )
+                if cutlass.const_expr(FUSE_RELU):
+                    # If we fuse relu then we don't want to do abs since negative value will be set to 0 and they will lose comparison automatically
+                    amax_2x = kit.max_x2(amax_2x, in_r[w][0])
+                    amax_2x = kit.max_x2(amax_2x, in_r[w][1])
+                else:
+                    amax_2x = kit.abs_max_x2(amax_2x, in_r[w][0])
+                    amax_2x = kit.abs_max_x2(amax_2x, in_r[w][1])
+            if cutlass.const_expr(FUSE_RELU):
+                # Compare the 2 packed max without abs
+                amax_r = cute.arch.fmax(
+                    kit.x2_lo_to_f32(amax_2x),
+                    kit.x2_hi_to_f32(amax_2x),
+                )
+                # For relu the max is at least 0
+                if cutlass.const_expr(FUSE_RELU):
+                    amax_r = cute.arch.fmax(amax_r, Float32(0.0))
+            else:
+                # Compare the 2 packed abs max
+                amax_r = cute.arch.fmax(
+                    fabs_f32(kit.x2_lo_to_f32(amax_2x)),
+                    fabs_f32(kit.x2_hi_to_f32(amax_2x)),
+                )
         else:
             # Since we need to do computation on individual f16 / bf16 elements, we can't read in pack
             sX_thread_rw = cute.make_tensor(
@@ -1666,8 +1693,9 @@ class MXFP8QuantizeSmemKernel:
                     x = Float32(sX_thread_rw[0, idx + e])
                     # If IS_ACT, apply activation function to x in f32
                     if cutlass.const_expr(cfg.ACTIVATION is not None):
-                        # TODO: Short-wire relu here since we can use PTX to do this when converting
-                        x = op(x)
+                        # If it's relu, we can handle it later
+                        if not cutlass.const_expr(FUSE_RELU):
+                            x = op(x)
                     # If IS_DBIAS and not colwise, accumulate dbias from x in f32
                     if cutlass.const_expr(cfg.WITH_DBIAS and not cfg.COLWISE): 
                         j = w * PACK_SIZE + e
@@ -1676,7 +1704,12 @@ class MXFP8QuantizeSmemKernel:
                     if cutlass.const_expr(_is_packed16(cfg.DTYPE) and cfg.ACTIVATION is not None):
                         x = kit_act.truncate_f32(x) # TODO: Why not just qunatize from f32?
                     in_r[w][e] = x
-                    amax_r = cute.arch.fmax(amax_r, fabs_f32(x))
+                    if cutlass.const_expr(FUSE_RELU):
+                        amax_r = cute.arch.fmax(amax_r, x) # For relu cases, we don't need abs since negative values will be 0 so they lose comparison automatically
+                    else:
+                        amax_r = cute.arch.fmax(amax_r, fabs_f32(x))
+            if cutlass.const_expr(FUSE_RELU):
+                amax_r = cute.arch.fmax(amax_r, Float32(0.0)) # If relu, the amax is at least 0
 
         # 2. E8M0 scale → gmem. mS_row's layout already encodes the swizzle
         # when cfg.WITH_GEMM_SWIZZLED_SCALES=True, so 2D access just works.
@@ -1690,12 +1723,9 @@ class MXFP8QuantizeSmemKernel:
         inv_scale_r = exp2f_rcp(biased_exp_r) # f32 reciprocal of the scale
         # Fetch the conversion function based on the FP8 format
         cvt_f32x2 = _cvt_f32x2_to_fp8x2(cfg.FP8_DTYPE)
-        # Fast cast path matches the fast amax path — same condition.
-        _row_fast = (_is_packed16(cfg.DTYPE) and cfg.ACTIVATION is None
-                     and not (cfg.WITH_DBIAS and not cfg.COLWISE))
         if cutlass.const_expr(_row_fast):
             kit_cast = _packed16_kit(cfg.DTYPE)
-            mul_cvt_x2 = kit_cast.mul_cvt_to_fp8x2(cfg.FP8_DTYPE)
+            mul_cvt_x2 = kit_cast.mul_cvt_to_fp8x2(cfg.FP8_DTYPE, FUSE_RELU)
             # Pack `(inv_scale_r, inv_scale_r)` as a single 64-bit f32x2 once;
             # the per-wave mul_cvt consumes this directly.
             scale_2x = pack_f32x2(inv_scale_r, inv_scale_r)
@@ -1718,8 +1748,8 @@ class MXFP8QuantizeSmemKernel:
                 v1 = in_r[w][1] * inv_scale_r
                 v2 = in_r[w][2] * inv_scale_r
                 v3 = in_r[w][3] * inv_scale_r
-                p01 = cvt_f32x2(v1, v0)  # u16 little-endian: v0,v1
-                p23 = cvt_f32x2(v3, v2)  # u16 little-endian: v2,v3
+                p01 = cvt_f32x2(v1, v0, FUSE_RELU)  # u16 little-endian: v0,v1
+                p23 = cvt_f32x2(v3, v2, FUSE_RELU)  # u16 little-endian: v2,v3
             quad = (p23 << Int32(16)) | p01
             sO_thread_u32[idx] = Uint32(quad)
 
