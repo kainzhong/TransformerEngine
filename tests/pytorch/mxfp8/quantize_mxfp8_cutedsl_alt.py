@@ -1949,6 +1949,7 @@ class MXFP8QuantizeSmemKernel:
 _compile_cache_tvm_ffi: dict = {}
 
 def _get_compiled_kernel_tvm_ffi(cfg, stream):
+    stream = cuda.CUstream(stream.cuda_stream)
     key = (cfg.DTYPE, cfg.M, cfg.N, cfg.FP8_DTYPE, cfg.ROWWISE, cfg.COLWISE,
            cfg.WITH_GEMM_SWIZZLED_SCALES, cfg.WITH_AMAX, cfg.ACTIVATION,
            cfg.WITH_DBIAS, "tvm_ffi")
@@ -2123,8 +2124,7 @@ def quantize_mxfp8_cutedsl(
 
     cutlass_dtype = _torch_to_cutlass_dtype[x.dtype]
     max_norm_rcp = FP8E4M3_MAX_NORM_RCP if fp8_dtype == "e4m3" else FP8E5M2_MAX_NORM_RCP
-    torch_stream = torch.cuda.current_stream()
-    stream = cuda.CUstream(torch_stream.cuda_stream)
+    stream = torch.cuda.current_stream()
     nvtx.range_pop()  # dsl.validate
 
     nvtx.range_push("dsl.alloc")
