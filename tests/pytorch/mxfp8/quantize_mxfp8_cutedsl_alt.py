@@ -1002,13 +1002,13 @@ class MXFP8QuantizeSmemKernel:
         # ---- Consumer: all threads quantize each completed tile. ----
         for stage in cutlass.range(num_tiles, unroll=1):
             mainloop_pipeline.consumer_wait(cons_state)
-            sX_tile = sX[(None, cons_state.index)]          # (TILE_Y, TILE_X) bf16
+            sX_tile = sX[(None, stage)]          # (TILE_Y, TILE_X) bf16
 
             if cutlass.const_expr(cfg.COLWISE):
                 # The first row that belongs to this CTA. Each CTA handles NUM_TILES of (TILE_Y, TILE_X) tiles stacked vertically,
                 # and each stage handles one of them.
                 base_row = (bidy * NUM_TILES + stage) * TILE_Y
-                sO_col_tile = sO_col[(None, cons_state.index)]
+                sO_col_tile = sO_col[(None, stage)]
                 amax_c, block_dbias = self._process_colwise(
                     sX_tile, sO_col_tile, base_row, bidx, tidx,
                     mS_col, max_norm_rcp, block_dbias,
@@ -1016,7 +1016,7 @@ class MXFP8QuantizeSmemKernel:
                 if cutlass.const_expr(cfg.WITH_AMAX):
                     block_amax = cute.arch.fmax(block_amax, amax_c)
             if cutlass.const_expr(cfg.ROWWISE):
-                sO_row_tile = sO_row[(None, cons_state.index)]
+                sO_row_tile = sO_row[(None, stage)]
                 # mS_row is ((SCALE_TILE), (GRID)) where SCALE_TILE = (32, 2).
                 # Each CTA owns NUM_TILES consecutive row-tiles of GRID. cute
                 # auto-decomposes the flat row coord `bidy * NUM_TILES + stage`
@@ -1050,13 +1050,13 @@ class MXFP8QuantizeSmemKernel:
                 if cutlass.const_expr(cfg.ROWWISE):
                     cute.copy(
                         tma_atom_out_row,
-                        tXsO_row[(None, cons_state.index)],
+                        tXsO_row[(None, stage)],
                         tXgO_row[(None, (tile_y, bidx))],
                     )
                 if cutlass.const_expr(cfg.COLWISE):
                     cute.copy(
                         tma_atom_out_col,
-                        tXsO_col[(None, cons_state.index)],
+                        tXsO_col[(None, stage)],
                         tXgO_col[(None, (tile_y, bidx))],
                     )
                 cute.arch.cp_async_bulk_commit_group()
@@ -1571,21 +1571,6 @@ class MXFP8QuantizeSmemKernel:
         # print(f"sX_thread: {sX_thread}")
         # print(f"sO_thread: {sO_thread}")
 
-        mS_tiler, mS_layout = cute.make_layout_tv(
-            thr_layout=cute.make_layout((TILE_Y, 2), stride=(2, 1)),
-            val_layout=cute.make_layout((1, 1), stride=(0, 1))
-        )
-        # print(f"scale_tv_layout: {mS_layout}")
-        # print(f"scale_tiler: {mS_tiler}")
-
-        mS_row_tv = cute.composition(mS_row_stage, mS_layout)
-
-        # Scale factor that belong to this thread
-        mS_thread = mS_row_tv[tidx, None]   # shape (1,) uint8
-
-        # See https://kainzhong.github.io/CuTe-Layout-Visualizer/?key=tv-2-%2832%2C+2%29%3A%282%2C1%29-%281%2C+1%29%3A%280%2C1%29
-        # print(f"mS_thread: {mS_thread}")
-
         sO_thread_u32_ptr = cute.recast_ptr(sO_thread.iterator, dtype=Uint32)
         # Each wave it writes 32 bytes = 8 uint32s, so in 4 waves we write all 32 quantized elements.
         sO_thread_u32 = cute.make_tensor(
@@ -1695,6 +1680,7 @@ class MXFP8QuantizeSmemKernel:
         # mS_row_stage has logical shape (32, 2) and we have 64 threads where each is mapped to one scale factor
         # The TV layout is equivalent to https://kainzhong.github.io/CuTe-Layout-Visualizer/?key=tv-2-%2832%2C+2%29%3A%282%2C+1%29-%281%29
         # but it's too trival so let's just index it directly without using layout
+        # Note this is the logical layout, which is on top of the swizzled / non-swizzled scale factor layout that mappes the logical index to the physical offset
         mS_row_stage[(tidx // 2, tidx % 2)] = Uint8(biased_exp_r)
 
         # 3. scale + packed fp8 cast → smem as one u32 per wave.
@@ -2184,22 +2170,12 @@ def quantize_mxfp8_cutedsl(
         dbias_workspace = _tvm_ffi_dummy((1, N), torch.float32, x.device)
     nvtx.range_pop()  # dsl.dbias_workspace
 
-    nvtx.range_push("dsl.make_ptr")
-    # Positional call — tvm-ffi compiled wrappers don't preserve Python parameter
-    # names for the tensor args, so kwarg-style fails with "unexpected keyword
-    # argument 'mX'". Order must match the kernel `__call__` signature and the
-    # fake-ptrs passed to `cute.compile` in `_get_compiled_kernel_tvm_ffi`.
-    call_args = (
-        x, act_input,
+    nvtx.range_push("dsl.launch")
+    compiled(x, act_input,
         out_row_data, out_row_scale,
         out_col_data, out_col_scale,
         noop, amax, dbias_workspace,
-        Int32(M), Float32(max_norm_rcp), stream,
-    )
-    nvtx.range_pop()  # dsl.make_ptr
-
-    nvtx.range_push("dsl.launch")
-    compiled(*call_args)
+        Int32(M), Float32(max_norm_rcp), stream)
     nvtx.range_pop()  # dsl.launch
 
     if compute_dbias:
