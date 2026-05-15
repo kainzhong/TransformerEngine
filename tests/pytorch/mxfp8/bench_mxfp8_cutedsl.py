@@ -94,6 +94,7 @@ def make_reference_fn(combo, x, act_in, rowwise, colwise,
         fp8_dtype=_FP8_DTYPES[fp8_dtype],
         rowwise=rowwise,
         columnwise=colwise,
+        internal=True,
     )
     if swizzle:
         quantizer.optimize_for_gemm = True
