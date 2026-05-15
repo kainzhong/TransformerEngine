@@ -700,12 +700,18 @@ class MXFP8QuantizeSmemKernel:
         # simply won't dispatch its copy, and the atom cost is negligible.
         op_store = cute.nvgpu.cpasync.CopyBulkTensorTileS2GOp()
         out_smem_layout = cute.make_ordered_layout((TILE_Y, TILE_X), order=(1, 0))
-        tma_atom_out_row, tma_dst_out_row = cute.nvgpu.cpasync.make_tiled_tma_atom(
-            op_store, mO_row, out_smem_layout, cta_tiler, num_multicast=1,
-        )
-        tma_atom_out_col, tma_dst_out_col = cute.nvgpu.cpasync.make_tiled_tma_atom(
-            op_store, mO_col, out_smem_layout, cta_tiler, num_multicast=1,
-        )
+        if cutlass.const_expr(cfg.ROWWISE):
+            tma_atom_out_row, tma_dst_out_row = cute.nvgpu.cpasync.make_tiled_tma_atom(
+                op_store, mO_row, out_smem_layout, cta_tiler, num_multicast=1,
+            )
+            tma_atom_out_col = None
+            tma_dst_out_col = None
+        if cutlass.const_expr(cfg.COLWISE):
+            tma_atom_out_col, tma_dst_out_col = cute.nvgpu.cpasync.make_tiled_tma_atom(
+                op_store, mO_col, out_smem_layout, cta_tiler, num_multicast=1,
+            )
+            tma_atom_out_row = None
+            tma_dst_out_row = None
 
         grid = [
             cute.ceil_div(Int32(cfg.N), TILE_X),
@@ -1973,18 +1979,18 @@ def _get_compiled_kernel_tvm_ffi(cfg):
         kw_rm4 = dict(stride_order=(1, 0),
                       memspace=cute.AddressSpace.gmem, assumed_align=4)
         in_fake_ptr      = cute.runtime.make_fake_compact_tensor(cfg.DTYPE,  (M, N),            **kw_rm16)
-        data_fake_ptr    = cute.runtime.make_fake_compact_tensor(cute.Uint8, (M, N),            **kw_rm16)
-        scale_row_fake   = cute.runtime.make_fake_compact_tensor(cute.Uint8, (M, SCALED_N_ROW), **kw_rm16)
-        scale_col_fake   = cute.runtime.make_fake_compact_tensor(cute.Uint8, (SCALED_M_COL, N), **kw_rm16)
-        ws_fake_ptr      = cute.runtime.make_fake_compact_tensor(Float32,    (WS_M, N),         **kw_rm4)
-        single_fake_ptr  = cute.runtime.make_fake_compact_tensor(
-            Float32, (1,), memspace=cute.AddressSpace.gmem, assumed_align=4)
+        out_row_fake_ptr    = cute.runtime.make_fake_compact_tensor(cute.Uint8, (M, N),            **kw_rm16) if cfg.ROWWISE else dummy_cute_uint8
+        out_col_fake_ptr   = cute.runtime.make_fake_compact_tensor(cute.Uint8, (M, N),            **kw_rm16) if cfg.COLWISE else dummy_cute_uint8
+        scale_row_fake   = cute.runtime.make_fake_compact_tensor(cute.Uint8, (M, SCALED_N_ROW), **kw_rm16) if cfg.ROWWISE else dummy_cute_uint8
+        scale_col_fake   = cute.runtime.make_fake_compact_tensor(cute.Uint8, (SCALED_M_COL, N), **kw_rm16) if cfg.COLWISE else dummy_cute_uint8
+        ws_fake_ptr      = cute.runtime.make_fake_compact_tensor(Float32,    (WS_M, N),         **kw_rm4) if cfg.WITH_DBIAS else dummy_cute_float32
+        single_fake_ptr  = dummy_cute_float32
         compiled = cute.compile[(GPUArch("sm_100a"),)](
             kernel_obj,
             in_fake_ptr,                       # mX
             in_fake_ptr,                       # mActIn (alias of mX unless IS_DACT)
-            data_fake_ptr,   scale_row_fake,   # mO_row, mS_row
-            data_fake_ptr,   scale_col_fake,   # mO_col, mS_col
+            out_row_fake_ptr,   scale_row_fake,   # mO_row, mS_row
+            out_col_fake_ptr,   scale_col_fake,   # mO_col, mS_col
             single_fake_ptr,                   # mNoop
             single_fake_ptr,                   # mAmax
             ws_fake_ptr,                       # mDbias
@@ -2005,18 +2011,10 @@ _torch_to_cutlass_dtype = {
 }
 
 
-_NOOP_DUMMY_CACHE: dict = {}
-
-
-def _noop_dummy_for(device):
-    """Reusable zero-init 1-element f32 buffer per device, for callers that
-    don't pass an explicit `noop` flag. Caching avoids re-allocating per call."""
-    key = str(device)
-    buf = _NOOP_DUMMY_CACHE.get(key)
-    if buf is None:
-        buf = torch.zeros(1, dtype=torch.float32, device=device)
-        _NOOP_DUMMY_CACHE[key] = buf
-    return buf
+dummy_float32 = torch.zeros(1, dtype=torch.float32, device="cuda")
+dummy_uint8 = torch.zeros(1, dtype=torch.uint8, device="cuda")
+dummy_cute_uint8 = cute.runtime.make_fake_compact_tensor(cute.Uint8, (1,), memspace=cute.AddressSpace.gmem, assumed_align=4)
+dummy_cute_float32 = cute.runtime.make_fake_compact_tensor(Float32, (1,), memspace=cute.AddressSpace.gmem, assumed_align=4)
 
 
 _TVM_FFI_DUMMY_CACHE: dict = {}
@@ -2042,10 +2040,11 @@ def quantize_mxfp8_cutedsl(
     colwise: bool = False,
     with_gemm_swizzled_scales: bool = False,
     noop: torch.Tensor = None,
-    amax: torch.Tensor = None,
+    with_amax: bool = False,
     activation: str = None,
     act_input: torch.Tensor = None,
     compute_dbias: bool = False,
+    is_dact: bool = False,
 ) -> dict:
     """Quantize a 2D tensor to MXFP8 format using CuTeDSL kernels with smem tiling.
 
@@ -2065,7 +2064,7 @@ def quantize_mxfp8_cutedsl(
             time, the kernel returns immediately and output buffers are left as
             allocated (uninitialised). Used for CUDA-Graph-friendly skip — see
             `swizzle_demo.svg`-adjacent docs / the C++ reference for semantics.
-        amax: optional 1-element f32 cuda tensor. When supplied, the kernel
+        with_amax: optional 1-element f32 cuda tensor. When supplied, the kernel
             atomic-maxes max(|x|) over the whole tensor into amax[0] (across
             all CTAs). Used by delayed-scaling FP8 modes that need a per-tensor
             amax alongside the per-32-element MXFP8 scales. Caller is
@@ -2088,23 +2087,22 @@ def quantize_mxfp8_cutedsl(
         #     f"got M={M}, N={N}")
         pass
     if noop is None:
-        noop = _noop_dummy_for(x.device)
+        noop = dummy_float32
     else:
         # assert noop.is_cuda and noop.dtype == torch.float32 and noop.numel() == 1, (
         #     f"noop must be a 1-element float32 cuda tensor, got "
         #     f"shape={tuple(noop.shape)}, dtype={noop.dtype}")
         pass
-    with_amax = amax is not None
     if with_amax:
         # assert amax.is_cuda and amax.dtype == torch.float32 and amax.numel() == 1, (
         #     f"amax must be a 1-element float32 cuda tensor, got "
         #     f"shape={tuple(amax.shape)}, dtype={amax.dtype}")
+        amax = torch.zeros(1, dtype=torch.float32, device="cuda")
         pass
     else:
         # Reuse the noop dummy slot — the kernel never reads/writes it when
         # cfg.WITH_AMAX is False, so any non-null pointer is fine.
-        amax = _noop_dummy_for(x.device)
-    is_dact = _is_derivative_activation(activation)
+        amax = dummy_float32
     if is_dact:
         # assert act_input is not None, (
         #     f"activation={activation!r} is a derivative — caller must pass "
@@ -2154,10 +2152,10 @@ def quantize_mxfp8_cutedsl(
     # so each dummy must declare the exact shape/dtype its fake-ptr expects
     # (see `_get_compiled_kernel_tvm_ffi`). Cached by (shape, dtype, device)
     # so we don't churn the allocator across iters.
-    out_row_data  = result["rowwise_data"]  if rowwise else _tvm_ffi_dummy((M, N),              torch.uint8, x.device)
-    out_row_scale = result["rowwise_scale"] if rowwise else _tvm_ffi_dummy((M, N // SCALE_DIM), torch.uint8, x.device)
-    out_col_data  = result["colwise_data"]  if colwise else _tvm_ffi_dummy((M, N),              torch.uint8, x.device)
-    out_col_scale = result["colwise_scale"] if colwise else _tvm_ffi_dummy((M // SCALE_DIM, N), torch.uint8, x.device)
+    out_row_data  = result["rowwise_data"]  if rowwise else dummy_uint8
+    out_row_scale = result["rowwise_scale"] if rowwise else dummy_uint8
+    out_col_data  = result["colwise_data"]  if colwise else dummy_uint8
+    out_col_scale = result["colwise_scale"] if colwise else dummy_uint8
 
     # DBias workspace — `[blocks_Y, N]` f32 partial sums, reduced post-kernel.
     # blocks_Y must match the kernel's `(cfg.M + 63) // 64` (one CTA per
@@ -2170,7 +2168,7 @@ def quantize_mxfp8_cutedsl(
     else:
         # Fake declares (WS_M, N) — any positive WS_M is OK. Use a 1-row
         # dummy; the kernel never touches it when cfg.WITH_DBIAS is False.
-        dbias_workspace = _tvm_ffi_dummy((1, N), torch.float32, x.device)
+        dbias_workspace = dummy_float32
     nvtx.range_pop()  # dsl.dbias_workspace
 
     nvtx.range_push("dsl.launch")
@@ -2193,5 +2191,6 @@ def quantize_mxfp8_cutedsl(
         nvtx.range_push("dsl.reduce_dbias")
         result["dbias"] = dbias_workspace.sum(dim=0).to(x.dtype)
         nvtx.range_pop()  # dsl.reduce_dbias
-
+    if with_amax:
+        result["amax"] = amax[0].item()
     return result

@@ -394,6 +394,7 @@ def test_mxfp8_cutedsl_dact(
     dsl = quantize_mxfp8_cutedsl(
         grad, rowwise=rowwise, colwise=colwise,
         activation=activation, act_input=act_in,
+        is_dact=True
     )
     torch.cuda.synchronize()
 
@@ -431,7 +432,7 @@ def test_mxfp8_cutedsl_dbias_dact(
     dsl = quantize_mxfp8_cutedsl(
         grad, rowwise=rowwise, colwise=colwise,
         activation=activation, act_input=act_in,
-        compute_dbias=True,
+        compute_dbias=True, is_dact=True,
     )
     torch.cuda.synchronize()
 
