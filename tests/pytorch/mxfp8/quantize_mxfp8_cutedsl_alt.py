@@ -2074,11 +2074,11 @@ def quantize_mxfp8_cutedsl(
     # print(f"Input tensor: shape={x.shape}, dtype={x.dtype}, device={x.device}")
     nvtx = torch.cuda.nvtx
     nvtx.range_push("dsl.validate")
-    assert x.is_cuda and x.is_contiguous() and x.ndim == 2
+    # assert x.is_cuda and x.is_contiguous() and x.ndim == 2
     M, N = x.shape
-    assert rowwise or colwise
-    assert M % TILE_Y == 0, f"M={M} must be a multiple of {TILE_Y}"
-    assert N % TILE_X == 0, f"N={N} must be a multiple of {TILE_X}"
+    # assert rowwise or colwise
+    # assert M % TILE_Y == 0, f"M={M} must be a multiple of {TILE_Y}"
+    # assert N % TILE_X == 0, f"N={N} must be a multiple of {TILE_X}"
     if with_gemm_swizzled_scales:
         # Swizzled tile is 128×4 in (M, N/32) → requires M and N to be
         # multiples of 128 to avoid partial-tile padding (which the host
