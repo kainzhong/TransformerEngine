@@ -260,6 +260,63 @@ def test_mxfp8_cutedsl_roundtrip(
 
 
 # ---------------------------------------------------------------------------
+# Pytest test cases — GEMM-swizzled scales (WITH_GEMM_SWIZZLED_SCALES)
+# ---------------------------------------------------------------------------
+#
+# When `with_gemm_swizzled_scales=True`, the kernel writes the per-block E8M0
+# scale bytes to the cuBLAS MXFP8 swizzled layout
+# (https://docs.nvidia.com/cuda/cublas/#d-block-scaling-factors-layout) so that
+# downstream MXFP8 GEMM can consume them directly without a separate swizzle
+# pass. The FP8 *data* bytes are unchanged — only the scale memory permutation
+# differs. The reference is TE's `MXFP8Quantizer` with `optimize_for_gemm=True`.
+#
+# Constraints: M and N must be multiples of 128 (the swizzle tile is 128 in
+# the row axis and 128 = 4 scale blocks in the col axis).
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize(
+    "M, N",
+    [
+        (128, 128),
+        (256, 256),
+        (512, 512),
+        (1024, 1024),
+        (2048, 1024),
+    ],
+)
+@pytest.mark.parametrize("x_dtype", [torch.bfloat16], ids=str)
+@pytest.mark.parametrize("direction", ["row", "col", "both"])
+def test_mxfp8_cutedsl_swizzled_scales(
+    x_dtype: torch.dtype,
+    M: int,
+    N: int,
+    direction: str,
+) -> None:
+    """WITH_GEMM_SWIZZLED_SCALES: scale bytes laid out in cuBLAS GEMM-swizzled
+    order match TE's `MXFP8Quantizer(..., optimize_for_gemm=True)` byte-for-byte."""
+    rowwise, colwise = _dirs(direction)
+    torch.manual_seed(0)
+    x = torch.randn((M, N), dtype=x_dtype, device="cuda")
+
+    quantizer = MXFP8Quantizer(
+        fp8_dtype=tex.DType.kFloat8E4M3,
+        rowwise=rowwise, columnwise=colwise,
+    )
+    quantizer.optimize_for_gemm = True
+    ref = tex.quantize(x, quantizer)
+
+    dsl = quantize_mxfp8_cutedsl(
+        x, rowwise=rowwise, colwise=colwise,
+        with_gemm_swizzled_scales=True,
+    )
+    torch.cuda.synchronize()
+
+    _assert_quant_equal(dsl, ref, rowwise, colwise,
+                        tag=f"swizzle/{direction}/{x_dtype}/{M}x{N}")
+
+
+# ---------------------------------------------------------------------------
 # Pytest test cases — fused activation combos
 # ---------------------------------------------------------------------------
 
