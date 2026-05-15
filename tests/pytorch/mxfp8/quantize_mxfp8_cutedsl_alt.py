@@ -675,7 +675,7 @@ class MXFP8QuantizeSmemKernel:
         # For M=256, N=512:
         # Non-swizzled: https://kainzhong.github.io/CuTe-Layout-Visualizer/?key=zipped_divide-%28256%2C+16%29%3A%2816%2C+1%29-32%0A2
         # Swizzled: https://kainzhong.github.io/CuTe-Layout-Visualizer/?key=zipped_divide-%28%2832%2C+4%2C+2%29%2C+%284%2C+4%29%29%3A%28%2816%2C+4%2C+2048%29%2C+%281%2C+512%29%29-32%0A2
-        print(f"mS_row after zipped_divide: {mS_row}")
+        # print(f"mS_row after zipped_divide: {mS_row}")
 
         # Declare TMA descriptors on the host side.
         # make_tiled_tma_atom returns the UNTILED gmem tensor with basis strides.
@@ -1030,7 +1030,7 @@ class MXFP8QuantizeSmemKernel:
                 # row-tile order for compact. Same source, both layouts correct.
                 row_tile_idx = bidy * NUM_TILES + stage
                 mS_row_stage = cute.flatten(mS_row[(None, (row_tile_idx, bidx))])
-                print(f"mS_row_stage: {mS_row_stage}\n")
+                # print(f"mS_row_stage: {mS_row_stage}\n")
                 # amax_r, thread_dbias_rw = self._process_rowwise(
                 amax_r, thread_dbias_rw = self._process_rowwise(
                     sX_tile, sO_row_tile,
@@ -1554,16 +1554,16 @@ class MXFP8QuantizeSmemKernel:
         # linear(tidx) = tid_Y*2 + tid_X, so `get_flat_coord` inverts to
         # `(tidx // 2, tidx % 2)` — semantically clearer than the raw
         # divmod, and readily reusable if we later partition via TiledCopy.
-        print(f"sX_tile: {sX_tile}")
-        print(f"sO_row_tile: {sO_row_tile}")
-        print(f"mS_row_stage: {mS_row_stage}")
+        # print(f"sX_tile: {sX_tile}")
+        # print(f"sO_row_tile: {sO_row_tile}")
+        # print(f"mS_row_stage: {mS_row_stage}")
         
         tiler, tv_layout = cute.make_layout_tv(
             thr_layout=cute.make_layout((TILE_Y, 2), stride=(2, 1)),
             val_layout=cute.make_layout((1, SCALE_DIM), stride=(0, 1))
         )
-        print(f"tv_layout: {tv_layout}")
-        print(f"tiler: {tiler}")
+        # print(f"tv_layout: {tv_layout}")
+        # print(f"tiler: {tiler}")
         
         sX_tv = cute.composition(sX_tile, tv_layout)
         sO_tv = cute.composition(sO_row_tile, tv_layout)
@@ -1573,15 +1573,15 @@ class MXFP8QuantizeSmemKernel:
         sO_thread = sO_tv[tidx, None]   # shape (32,) uint8
 
         # See https://kainzhong.github.io/CuTe-Layout-Visualizer/?key=tv-2-%2832%2C+2%29%3A%282%2C1%29-%281%2C+32%29%3A%280%2C1%29
-        print(f"sX_thread: {sX_thread}")
-        print(f"sO_thread: {sO_thread}")
+        # print(f"sX_thread: {sX_thread}")
+        # print(f"sO_thread: {sO_thread}")
 
         mS_tiler, mS_layout = cute.make_layout_tv(
             thr_layout=cute.make_layout((TILE_Y, 2), stride=(2, 1)),
             val_layout=cute.make_layout((1, 1), stride=(0, 1))
         )
-        print(f"scale_tv_layout: {mS_layout}")
-        print(f"scale_tiler: {mS_tiler}")
+        # print(f"scale_tv_layout: {mS_layout}")
+        # print(f"scale_tiler: {mS_tiler}")
 
         mS_row_tv = cute.composition(mS_row_stage, mS_layout)
 
@@ -1589,7 +1589,7 @@ class MXFP8QuantizeSmemKernel:
         mS_thread = mS_row_tv[tidx, None]   # shape (1,) uint8
 
         # See https://kainzhong.github.io/CuTe-Layout-Visualizer/?key=tv-2-%2832%2C+2%29%3A%282%2C1%29-%281%2C+1%29%3A%280%2C1%29
-        print(f"mS_thread: {mS_thread}")
+        # print(f"mS_thread: {mS_thread}")
 
         sO_thread_u32_ptr = cute.recast_ptr(sO_thread.iterator, dtype=Uint32)
         # Each wave it writes 32 bytes = 8 uint32s, so in 4 waves we write all 32 quantized elements.
@@ -1597,7 +1597,7 @@ class MXFP8QuantizeSmemKernel:
             sO_thread_u32_ptr,
             cute.make_layout((SCALE_DIM // 4,), stride=(1,)), # 1 uint32 is 4 fp8 elements
         )
-        print(f"sO_thread_u32: {sO_thread_u32}")
+        # print(f"sO_thread_u32: {sO_thread_u32}")
 
         thread_dbias = thread_dbias_in
 
@@ -1614,7 +1614,7 @@ class MXFP8QuantizeSmemKernel:
                 cute.recast_ptr(sX_thread.iterator, dtype=Int32),
                 cute.make_layout((1, SCALE_DIM // 2), stride=(0, 1)), # 1 int32 is 2 fp16/bf16 elements
             )
-            print(f"sX_thread_rw_i32: {sX_thread_rw_i32}")
+            # print(f"sX_thread_rw_i32: {sX_thread_rw_i32}")
             # Each wave we read 2 packed i32, which is 4 fp16/bf16 elements (PACK_SIZE)
             # In total we have 8 waves where each wave reads 
             in_r = [[None, None] for _ in range(WAVES)]
