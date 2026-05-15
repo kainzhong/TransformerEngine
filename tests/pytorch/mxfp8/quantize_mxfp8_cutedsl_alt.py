@@ -619,7 +619,6 @@ class MXFP8QuantizeSmemKernel:
         mDbias: cute.Tensor, # Per-CTA-row partial dbias sums which is reduced down to (N,) by a separate kernel, only used in WITH_DBIAS path
         M: Int32,
         max_norm_rcp: Float32, # 1 / FP8_MAX_NORM constant (e4m3 vs e5m2). Multiplied into amax to build the e8m0 scale
-        stream: cuda.CUstream,
     ):
         cfg = self.cfg
         num_scale_cols = cfg.N // SCALE_DIM
@@ -1949,7 +1948,6 @@ class MXFP8QuantizeSmemKernel:
 _compile_cache_tvm_ffi: dict = {}
 
 def _get_compiled_kernel_tvm_ffi(cfg, stream):
-    stream = cuda.CUstream(stream.cuda_stream)
     key = (cfg.DTYPE, cfg.M, cfg.N, cfg.FP8_DTYPE, cfg.ROWWISE, cfg.COLWISE,
            cfg.WITH_GEMM_SWIZZLED_SCALES, cfg.WITH_AMAX, cfg.ACTIVATION,
            cfg.WITH_DBIAS, "tvm_ffi")
@@ -1990,7 +1988,7 @@ def _get_compiled_kernel_tvm_ffi(cfg, stream):
             single_fake_ptr,                   # mNoop
             single_fake_ptr,                   # mAmax
             ws_fake_ptr,                       # mDbias
-            Int32(1), Float32(cfg.MAX_NORM_RCP), stream,
+            Int32(1), Float32(cfg.MAX_NORM_RCP),
             options="--enable-tvm-ffi"
         )
         _compile_cache_tvm_ffi[key] = compiled
@@ -2175,7 +2173,7 @@ def quantize_mxfp8_cutedsl(
         out_row_data, out_row_scale,
         out_col_data, out_col_scale,
         noop, amax, dbias_workspace,
-        Int32(M), Float32(max_norm_rcp), stream)
+        Int32(M), Float32(max_norm_rcp))
     nvtx.range_pop()  # dsl.launch
 
     if compute_dbias:
