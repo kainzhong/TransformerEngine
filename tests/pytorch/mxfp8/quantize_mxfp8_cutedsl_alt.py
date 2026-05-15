@@ -1003,16 +1003,11 @@ class MXFP8QuantizeSmemKernel:
         for stage in cutlass.range(num_tiles, unroll=1):
             mainloop_pipeline.consumer_wait(cons_state)
             sX_tile = sX[(None, cons_state.index)]          # (TILE_Y, TILE_X) bf16
-            
-            # The first row that belongs to this CTA. Each CTA handles NUM_TILES of (TILE_Y, TILE_X) tiles stacked vertically,
-            # and each stage handles one of them.
-            base_row = (bidy * NUM_TILES + stage) * TILE_Y
-
-            # Each CTA handles 2 tiles stacked vertically during 2 stages, so for each stage
-            # this is the y coordinate of the tile that it's currently processing
-            tile_y = bidy * NUM_TILES + stage
 
             if cutlass.const_expr(cfg.COLWISE):
+                # The first row that belongs to this CTA. Each CTA handles NUM_TILES of (TILE_Y, TILE_X) tiles stacked vertically,
+                # and each stage handles one of them.
+                base_row = (bidy * NUM_TILES + stage) * TILE_Y
                 sO_col_tile = sO_col[(None, cons_state.index)]
                 amax_c, block_dbias = self._process_colwise(
                     sX_tile, sO_col_tile, base_row, bidx, tidx,
