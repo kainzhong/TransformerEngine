@@ -93,6 +93,7 @@ for SHAPE_PAIR in $SHAPES; do
             --capture-range=cudaProfilerApi \
             --capture-range-end=stop \
             --stats=true \
+            --resolve-symbols=false \
             --force-overwrite=true \
             --output="$OUT" \
             python bench_mxfp8_cutedsl.py \
