@@ -622,15 +622,60 @@ class MXFP8QuantizeSmemKernel:
         stream: cuda.CUstream,
     ):
         cfg = self.cfg
+        num_scale_cols = cfg.N // SCALE_DIM
+        num_scale_rows = cfg.M // SCALE_DIM
 
-        grid_Y = cute.ceil_div(M, TILE_Y * NUM_TILES)
-        grid_X = cute.ceil_div(cfg.N, TILE_X)
-        # Each block will compute TILE_Y * NUM_TILES rows of TILE_X // SCALE_DIM scale factors
-        mS_row = cute.zipped_divide(mS_row, (TILE_Y * NUM_TILES, TILE_X // SCALE_DIM))  # for tiled reduction in the kernel
-        # After zipped_divide, mS_row becomes ((SCALE_TILE), (GRID))
-        # In our (M, N) = (256, 512) example, since block's tile size is 64x64, we have GRID=(4, 8), and SCALE_TILE=(64, 2) since it has 64 row with 2 scale factors (64 values per row)
-        # Swizzled: https://kainzhong.github.io/CuTe-Layout-Visualizer/?key=zipped_divide-%28%2832%2C+4%2C+2%29%2C+%284%2C+4%29%29%3A%28%2816%2C4%2C2048%29%2C+%281%2C+512%29%29%29-64%3A1%0A2%3A1
-        # Non-Swizzled: https://kainzhong.github.io/CuTe-Layout-Visualizer/?key=zipped_divide-%28256%2C+16%29%3A%2816%2C+1%29-64%3A1%0A2%3A1
+        # Rewrap mS_row / mS_col with the GEMM-swizzled layout when requested.
+        # Wrapper passes in a tensor with the compact (M, N/32):(N/32, 1) layout
+        # (built from a compact fake-ptr at compile time), and we re-view the
+        # underlying buffer here so the per-block scale stores below land at the
+        # cuBLAS-swizzled byte offsets.
+        # See https://docs.nvidia.com/cuda/cublas/#d-block-scaling-factors-layout
+        # and swizzle_demo.svg for a visual of the byte permutation.
+        if cutlass.const_expr(cfg.WITH_GEMM_SWIZZLED_SCALES):
+            num_tiles_M = (cfg.M + 127) // 128
+            num_tiles_SC = (num_scale_cols + 3) // 4   # = ceil(N / 128)
+            num_tiles_SR = (num_scale_rows + 3) // 4   # = ceil(M / 128)
+            num_tiles_N = (cfg.N + 127) // 128
+            # row i = i_lo + 32 * (i_hi + 4 * tile_Y);  col j = j_lo + 4 * tile_X.
+            # Within one 128×4 tile: byte = i_lo*16 + i_hi*4 + j_lo.
+
+            # Tile-major outer dims add (tile_Y * num_tiles_SC + tile_X) * 512.
+            # For example, if M=256, N=512, then num_scale_cols = 16, num_scale_rows = 8, and num_tiles_M=2, num_tiles_SC=4, num_tiles_SR=2, num_tiles_N=4
+            # The swizzled layout is ((32, 4, 2), (4, 4)):((16, 4, 2048), (1, 512))
+            mS_row = cute.make_tensor(
+                mS_row.iterator,
+                cute.make_layout(
+                    ((32, 4, num_tiles_M), (4, num_tiles_SC)),
+                    stride=((16, 4, num_tiles_SC * 512), (1, 512)),
+                ),
+            )
+            # Colwise: same swizzle, axes swap roles — col axis gets the 32×4
+            # inner decomp, scale-row axis gets the 4-extent dim.
+            mS_col = cute.make_tensor(
+                mS_col.iterator,
+                cute.make_layout(
+                    ((4, num_tiles_SR), (32, 4, num_tiles_N)),
+                    stride=((1, 512), (16, 4, num_tiles_SR * 512)),
+                ),
+            )
+
+        # Divide by the STAGE tile (TILE_Y, TILE_X // SCALE_DIM), not the CTA
+        # tile. Each CTA owns NUM_TILES consecutive row-tiles; the kernel walks
+        # them by indexing GRID's row dim with `bidy * NUM_TILES + stage` (cute
+        # auto-decomposes a flat coord onto GRID's hierarchical row modes).
+        #
+        # Critically, this is the only divide that cleanly cuts both layouts:
+        #   - compact `(M, N/32):(N/32, 1)`  → SCALE_TILE = (32, 2):(N/32, 1)
+        #   - swizzled `((32,4,n_M),(4,n_SC)):((16,4,n_SC·512),(1,512))`
+        #                                    → SCALE_TILE = (32, 2):(16, 1)
+        # The bigger (TILE_Y * NUM_TILES, ...) divide we used before tangles the
+        # swizzle's (32, 4) row hierarchy under flatten + sub-divide chain.
+        mS_row = cute.zipped_divide(mS_row, (TILE_Y, TILE_X // SCALE_DIM))
+        # For M=256, N=512:
+        # Non-swizzled: https://kainzhong.github.io/CuTe-Layout-Visualizer/?key=zipped_divide-%28256%2C+16%29%3A%2816%2C+1%29-32%0A2
+        # Swizzled: https://kainzhong.github.io/CuTe-Layout-Visualizer/?key=zipped_divide-%28%2832%2C+4%2C+2%29%2C+%284%2C+4%29%29%3A%28%2816%2C+4%2C+2048%29%2C+%281%2C+512%29%29-32%0A2
+        print(f"mS_row after zipped_divide: {mS_row}")
 
         # Declare TMA descriptors on the host side.
         # make_tiled_tma_atom returns the UNTILED gmem tensor with basis strides.
@@ -977,14 +1022,15 @@ class MXFP8QuantizeSmemKernel:
                     block_amax = cute.arch.fmax(block_amax, amax_c)
             if cutlass.const_expr(cfg.ROWWISE):
                 sO_row_tile = sO_row[(None, cons_state.index)]
-                # Slice the tile that belongs to this CTA; remember mS_row is ((SCALE_TILE), (GRID)) so you can slice it using block indices
-                mS_row_CTA = mS_row[(None, (bidy, bidx))]
-                mS_row_CTA = cute.flatten(mS_row_CTA)
-                # Slice the tile that belongs to this stage
-                # mS_row_CTA has logical shape (64, 2) and each stage we process TILE_Y (32) rows and TILE_X (64) columns -> 2 scale factors
-                mS_row_stage = cute.zipped_divide(mS_row_CTA, (TILE_Y, TILE_X // SCALE_DIM))
-                # Index using the stage number to obtain the stage tile with logical shape (32, 2)
-                mS_row_stage = cute.flatten(mS_row_stage[(None, stage)])
+                # mS_row is ((SCALE_TILE), (GRID)) where SCALE_TILE = (32, 2).
+                # Each CTA owns NUM_TILES consecutive row-tiles of GRID. cute
+                # auto-decomposes the flat row coord `bidy * NUM_TILES + stage`
+                # onto GRID's hierarchical row modes — which is the
+                # (i_hi, tile_Y) tile-major order for swizzled, and the plain
+                # row-tile order for compact. Same source, both layouts correct.
+                row_tile_idx = bidy * NUM_TILES + stage
+                mS_row_stage = cute.flatten(mS_row[(None, (row_tile_idx, bidx))])
+                print(f"mS_row_stage: {mS_row_stage}\n")
                 # amax_r, thread_dbias_rw = self._process_rowwise(
                 amax_r, thread_dbias_rw = self._process_rowwise(
                     sX_tile, sO_row_tile,
