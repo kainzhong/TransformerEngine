@@ -18,7 +18,6 @@ from transformer_engine.pytorch import MXFP8Quantizer
 
 from quantize_mxfp8_cutedsl_alt import quantize_mxfp8_cutedsl
 
-
 # Shape presets — names map to lists of (M, N) pairs.
 # All shapes are multiples of 64 (the CuTeDSL kernel's CHUNK_DIM).
 SHAPE_PRESETS = {
@@ -124,18 +123,26 @@ def make_reference_fn(combo, x, act_in, rowwise, colwise,
 
 
 def make_dsl_fn(combo, x, act_in, rowwise, colwise,
-                fp8_dtype="e4m3", swizzle=False, amax=None):
+                fp8_dtype="e4m3", swizzle=False, with_amax=False):
     """Return a 0-arg callable that invokes the CuTeDSL kernel for `combo`."""
     _, activation, compute_dbias = COMBOS[combo]
-    kwargs = dict(rowwise=rowwise, colwise=colwise,
-                  fp8_dtype=fp8_dtype,
-                  with_gemm_swizzled_scales=swizzle,
-                  amax=amax)
     if activation is None:
-        return lambda: quantize_mxfp8_cutedsl(x, **kwargs)
-    kwargs.update(activation=activation, act_input=act_in,
-                  compute_dbias=compute_dbias)
-    return lambda: quantize_mxfp8_cutedsl(x, **kwargs)
+        return lambda: quantize_mxfp8_cutedsl(
+            x=x,
+            rowwise=rowwise, colwise=colwise,
+            fp8_dtype=fp8_dtype,
+            with_gemm_swizzled_scales=swizzle,
+            with_amax=with_amax)
+    return lambda: quantize_mxfp8_cutedsl(
+        x=x,
+        rowwise=rowwise, colwise=colwise,
+        fp8_dtype=fp8_dtype,
+        with_gemm_swizzled_scales=swizzle,
+        with_amax=with_amax,
+        activation=activation, 
+        act_input=act_in,
+        compute_dbias=compute_dbias,
+        is_dact=activation.startswith("d"))
 
 
 # Module-level L2 evict buffer. 256 MB f32 (covers B200's ~60 MB L2 with headroom).
@@ -156,7 +163,6 @@ def bench_once(name, fn, warmup, iters, evict_l2=False, single=False):
 
     Modes:
       - default: warm-cache, one event pair around the iter loop.
-      - evict_l2=True: cold-cache per iter — flushes L2 before each measured
         iter via a 256MB write, times each iter with its own event pair, returns
         the average.
       - single=True: cold-cache one-shot — warmup with no eviction, then a
@@ -239,8 +245,6 @@ def bench_shape(M, N, rowwise, colwise, warmup, iters, combo="plain",
     needs_act_input, _, has_dbias = COMBOS[combo]
     act_in = (torch.randn(M, N, dtype=in_dt, device="cuda")
               if needs_act_input else None)
-    amax_buf = (torch.zeros(1, dtype=torch.float32, device="cuda")
-                if with_amax else None)
 
     dir_label = "both" if (rowwise and colwise) else ("row" if rowwise else "col")
     tag = f"{combo}_{in_dtype}_{fp8_dtype}"
@@ -257,8 +261,7 @@ def bench_shape(M, N, rowwise, colwise, warmup, iters, combo="plain",
                                with_amax=with_amax)
     dsl_fn = make_dsl_fn(combo, x, act_in, rowwise, colwise,
                          fp8_dtype=fp8_dtype, swizzle=swizzle,
-                         amax=amax_buf)
-
+                         with_amax=with_amax)
     # Warm the CuTeDSL JIT cache once (not counted against bench)
     nvtx.range_push("warm_jit")
     dsl_fn()
