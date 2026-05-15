@@ -1,30 +1,37 @@
 #!/bin/bash
 # Profile the CUDA C++ and CuTeDSL MXFP8 kernels with Nsight Compute.
 #
-# Each ncu invocation profiles exactly ONE (shape, direction) config and
+# Each ncu invocation profiles exactly ONE (combo, shape, direction) config and
 # captures one C++ ref launch + one CuTeDSL launch (warmup happens outside
 # torch.cuda.profiler.start/stop, so only the measurement calls are
 # captured).  We launch ncu once per config because `--set full` collects
 # every counter — putting many configs behind a single ncu makes the
 # replay phase intractably long.
 #
-# bench_for_ncu.py flushes L2 once before each profiled kernel launch (and
-# drains the evict kernel before profiler.start), so NCU captures the target
-# kernel running against a cold L2 — matching production cold-cache latency.
+# bench_for_ncu.py issues exactly ONE kernel launch per profiled section,
+# since ncu replays the kernel internally to collect each counter group —
+# a second launch would just be wasted setup work.
+#
+# bench_for_ncu.py also flushes L2 once before each profiled kernel launch
+# (and drains the evict kernel before profiler.start), so NCU captures the
+# target kernel running against a cold L2 — matching production cold-cache
+# latency.
 #
 # Output directory: <repo-root>/profile/
 #
 # Usage:
-#   ./run_ncu_profile.sh                        # preset=default, direction=all
+#   ./run_ncu_profile.sh                              # preset=default, dir=all, combo=plain
 #   ./run_ncu_profile.sh --preset square
-#   ./run_ncu_profile.sh --preset full          # all 13 sweep shapes
+#   ./run_ncu_profile.sh --preset full                # all 13 sweep shapes
 #   ./run_ncu_profile.sh --direction row
-#   ./run_ncu_profile.sh --shapes '8192,8192'   # ad-hoc single shape
+#   ./run_ncu_profile.sh --shapes '8192,8192'         # ad-hoc single shape
+#   ./run_ncu_profile.sh --combo plain,dgelu          # multiple combos
+#   ./run_ncu_profile.sh --list-presets
 #   WARMUP=50 ./run_ncu_profile.sh
 #
 # Outputs (timestamped, per config):
-#   ncu_mxfp8_<M>x<N>_<dir>_<TS>.ncu-rep    open with: ncu-ui <file>
-#   ncu_mxfp8_<M>x<N>_<dir>_<TS>.txt        stdout + stderr of the run
+#   ncu_mxfp8_<combo>_<M>x<N>_<dir>_<TS>.ncu-rep    open with: ncu-ui <file>
+#   ncu_mxfp8_<combo>_<M>x<N>_<dir>_<TS>.txt        stdout + stderr of the run
 
 set -e
 
@@ -40,27 +47,35 @@ mkdir -p "$PROFILE_DIR"
 # transformer_engine/common/cast/mxfp8/specialized/quantize_mxfp8.cuh.
 export ENABLE_CAST_ONLY=${ENABLE_CAST_ONLY:-1}
 
-WARMUP=${WARMUP:-20}
-PRESET=${PRESET:-default}
-DIR=${DIR:-all}
-SHAPES=""
+# --- arg parsing ---
+PRESET="default"
+SHAPES_ARG=""
+DIR_ARG="all"
+COMBOS_ARG="plain"
+EXTRA_ARGS=()
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --preset)    PRESET="$2"; shift 2 ;;
-        --direction) DIR="$2"; shift 2 ;;
-        --warmup)    WARMUP="$2"; shift 2 ;;
-        --shapes)    SHAPES="$2"; shift 2 ;;
+        --list-presets)
+            python bench_mxfp8_cutedsl.py --list-presets
+            exit 0 ;;
+        --preset)         PRESET="$2"; shift 2 ;;
+        --shapes)         SHAPES_ARG="$2"; shift 2 ;;
+        --direction)      DIR_ARG="$2"; shift 2 ;;
+        --combo|--combos) COMBOS_ARG="$2"; shift 2 ;;
         -h|--help)
-            sed -n '2,28p' "$0"
+            sed -n '2,33p' "$0"
             exit 0
             ;;
-        *) echo "Unknown arg: $1"; exit 1 ;;
+        *) EXTRA_ARGS+=("$1"); shift ;;
     esac
 done
+IFS=',' read -r -a COMBOS <<< "$COMBOS_ARG"
+
+WARMUP=${WARMUP:-20}
 
 # Resolve direction list.
-case "$DIR" in
+case "$DIR_ARG" in
     all)  DIRS=("row" "col" "both") ;;
     row)  DIRS=("row") ;;
     col)  DIRS=("col") ;;
@@ -69,35 +84,36 @@ case "$DIR" in
 esac
 
 # Resolve shape list (from --shapes or SHAPE_PRESETS[preset]).
-if [[ -n "$SHAPES" ]]; then
-    SHAPE_LIST="$SHAPES"
+if [[ -n "$SHAPES_ARG" ]]; then
+    SHAPES=$(echo "$SHAPES_ARG" | tr ';' '\n')
 else
-    SHAPE_LIST=$(python - "$PRESET" <<'PY'
-import sys
+    SHAPES=$(python - <<PY
 from bench_mxfp8_cutedsl import SHAPE_PRESETS
-preset = sys.argv[1]
+preset = "$PRESET"
 if preset not in SHAPE_PRESETS:
-    sys.exit(f"unknown preset {preset!r}; "
-             f"choices: {sorted(SHAPE_PRESETS)}")
-print(";".join(f"{m},{n}" for m, n in SHAPE_PRESETS[preset]))
+    import sys
+    sys.exit(f"unknown preset {preset!r}; choices: {sorted(SHAPE_PRESETS)}")
+for m, n in SHAPE_PRESETS[preset]:
+    print(f"{m},{n}")
 PY
 )
 fi
 
 echo "==> Profile dir: ${PROFILE_DIR}"
-echo "==> Preset: ${PRESET}   direction: ${DIR}   warmup: ${WARMUP}"
-echo "==> Shapes: ${SHAPE_LIST}"
+echo "==> Preset: ${PRESET}   direction: ${DIR_ARG}   combos: ${COMBOS_ARG}   warmup: ${WARMUP}"
+echo "==> Shapes:"
+echo "$SHAPES" | sed 's/^/    /'
 echo
 
-# Loop: one ncu invocation per (shape, direction).
-IFS=';' read -ra SHAPE_ARR <<< "$SHAPE_LIST"
-for SHAPE in "${SHAPE_ARR[@]}"; do
-    M="${SHAPE%,*}"
-    N="${SHAPE#*,}"
+# Loop: one ncu invocation per (combo, shape, direction).
+for COMBO in "${COMBOS[@]}"; do
+for SHAPE_PAIR in $SHAPES; do
+    M="${SHAPE_PAIR%,*}"
+    N="${SHAPE_PAIR#*,}"
     for D in "${DIRS[@]}"; do
         TS=$(date +"%Y%m%d-%H%M%S")
-        OUT="${PROFILE_DIR}/ncu_mxfp8_${M}x${N}_${D}_${TS}"
-        echo "==> ${M}x${N} ${D}  ->  ${OUT}.ncu-rep"
+        OUT="${PROFILE_DIR}/ncu_mxfp8_${COMBO}_${M}x${N}_${D}_${TS}"
+        echo "==> ${COMBO} ${M}x${N} ${D}  ->  ${OUT}.ncu-rep"
 
         ncu \
             --set full \
@@ -109,11 +125,14 @@ for SHAPE in "${SHAPE_ARR[@]}"; do
             python bench_for_ncu.py \
                 --shapes "${M},${N}" \
                 --direction "${D}" \
+                --combo "${COMBO}" \
                 --warmup "${WARMUP}" \
+                "${EXTRA_ARGS[@]}" \
             2>&1 | tee "${OUT}.txt"
 
         sleep 1
     done
+done
 done
 
 echo
