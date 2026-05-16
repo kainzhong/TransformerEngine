@@ -543,7 +543,7 @@ def _cvt_f32x2_to_fp8x2(fp8_dtype: str):
 class MXFP8QuantizeConfig:
     def __init__(self, dtype, M, N, fp8_dtype="e4m3", rowwise=True, colwise=False,
                  with_gemm_swizzled_scales=False, with_amax=False,
-                 activation=None, with_dbias=False):
+                 activation=None, with_dbias=False, is_dact=False):
         self.DTYPE = dtype
         self.M = M
         self.N = N
@@ -566,7 +566,7 @@ class MXFP8QuantizeConfig:
         self.ACTIVATION = activation
         # Derived flag — fully determined by the activation name. The kernel
         # entry point reads this to dispatch IS_DACT vs IS_ACT/none.
-        self.IS_DACT = _is_derivative_activation(activation)
+        self.IS_DACT = is_dact
         # IS_DBIAS — accumulate per-column sum of post-activation values into
         # a per-CTA workspace, then reduce externally to produce the bias
         # gradient. Two paths exist depending on whether colwise scaling is
@@ -688,12 +688,17 @@ class MXFP8QuantizeSmemKernel:
         tma_atom, tma_src = cute.nvgpu.cpasync.make_tiled_tma_atom(
             op_load, mX, smem_tile_layout, cta_tiler, num_multicast=1,
         )
-        # Second input descriptor — only consumed by the IS_DACT path. When
-        # not is_dact, the wrapper aliases this onto x's data ptr so the
-        # descriptor is well-formed but never read.
-        tma_atom_act, tma_src_act = cute.nvgpu.cpasync.make_tiled_tma_atom(
-            op_load, mActIn, smem_tile_layout, cta_tiler, num_multicast=1,
-        )
+
+        if cutlass.const_expr(cfg.IS_DACT):
+            # Second input descriptor — only consumed by the IS_DACT path. When
+            # not is_dact, the wrapper aliases this onto x's data ptr so the
+            # descriptor is well-formed but never read.
+            tma_atom_act, tma_src_act = cute.nvgpu.cpasync.make_tiled_tma_atom(
+                op_load, mActIn, smem_tile_layout, cta_tiler, num_multicast=1,
+            )
+        else:
+            tma_atom_act = None
+            tma_src_act = None
 
         # Output: TMA S2G (uint8 smem → gmem) for both directions. Creating
         # both atoms unconditionally — if a direction is disabled the kernel
@@ -2143,7 +2148,7 @@ def quantize_mxfp8_cutedsl(
     cfg = MXFP8QuantizeConfig(cutlass_dtype, M, N, fp8_dtype, rowwise=rowwise, colwise=colwise,
                                with_gemm_swizzled_scales=with_gemm_swizzled_scales,
                                with_amax=with_amax, activation=activation,
-                               with_dbias=compute_dbias)
+                               with_dbias=compute_dbias, is_dact=is_dact)
     compiled = _get_compiled_kernel_tvm_ffi(cfg)
     nvtx.range_pop()  # dsl.cache_lookup
 
