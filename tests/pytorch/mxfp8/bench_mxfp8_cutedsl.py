@@ -94,7 +94,7 @@ def make_reference_fn(combo, x, act_in, rowwise, colwise,
         rowwise=rowwise,
         columnwise=colwise,
     )
-    quantizer.internal = True
+    # quantizer.internal = True
     if swizzle:
         quantizer.optimize_for_gemm = True
     # TE's MXFP8Quantizer doesn't expose a per-tensor amax knob via Python
