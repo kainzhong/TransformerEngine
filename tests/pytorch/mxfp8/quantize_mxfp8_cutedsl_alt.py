@@ -2141,6 +2141,15 @@ def quantize_mxfp8_cutedsl(
     if colwise:
         result["colwise_data"] = torch.empty((M, N), dtype=torch.uint8, device=x.device)
         result["colwise_scale"] = torch.empty((M // SCALE_DIM, N), dtype=torch.uint8, device=x.device)
+    # Dummies for unused slots. The kernel is const-expr gated and never
+    # reads/writes these, but tvm-ffi's call-time shape check is unconditional,
+    # so each dummy must declare the exact shape/dtype its fake-ptr expects
+    # (see `_get_compiled_kernel_tvm_ffi`). Cached by (shape, dtype, device)
+    # so we don't churn the allocator across iters.
+    out_row_data  = result["rowwise_data"]  if rowwise else dummy_uint8
+    out_row_scale = result["rowwise_scale"] if rowwise else dummy_uint8
+    out_col_data  = result["colwise_data"]  if colwise else dummy_uint8
+    out_col_scale = result["colwise_scale"] if colwise else dummy_uint8
     nvtx.range_pop()  # dsl.alloc
 
     nvtx.range_push("dsl.cache_lookup")
@@ -2151,16 +2160,6 @@ def quantize_mxfp8_cutedsl(
                                with_dbias=compute_dbias, is_dact=is_dact)
     compiled = _get_compiled_kernel_tvm_ffi(cfg)
     nvtx.range_pop()  # dsl.cache_lookup
-
-    # Dummies for unused slots. The kernel is const-expr gated and never
-    # reads/writes these, but tvm-ffi's call-time shape check is unconditional,
-    # so each dummy must declare the exact shape/dtype its fake-ptr expects
-    # (see `_get_compiled_kernel_tvm_ffi`). Cached by (shape, dtype, device)
-    # so we don't churn the allocator across iters.
-    out_row_data  = result["rowwise_data"]  if rowwise else dummy_uint8
-    out_row_scale = result["rowwise_scale"] if rowwise else dummy_uint8
-    out_col_data  = result["colwise_data"]  if colwise else dummy_uint8
-    out_col_scale = result["colwise_scale"] if colwise else dummy_uint8
 
     # DBias workspace — `[blocks_Y, N]` f32 partial sums, reduced post-kernel.
     # blocks_Y must match the kernel's `(cfg.M + 63) // 64` (one CTA per
