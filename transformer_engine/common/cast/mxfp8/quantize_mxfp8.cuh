@@ -146,23 +146,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
   constexpr size_t shmem_buff_size = buff_size_aligned_in / BUFFS_NUM;
 
-  // Pick the master via a warp-uniform predicate plus a hardware lane-elect.
-  // The naive `(threadIdx.x == 0)` form is divergent inside warp 0 (one lane
-  // takes the master path, 31 take the non-master path), forcing the compiler
-  // to wrap every `if (is_master_thread) { ... }` site in a BSSY/BSYNC
-  // reconvergence region and predicate the inner LSU/TMA ops on all 32 lanes.
-  // ncu attributes the resulting LSU queue pressure to `lg_throttle` (~30% of
-  // warp-active cycles for this kernel at 8K^2+).
-  //
-  // The fix: `is_master_warp` is uniform within each warp (warp 0: all 32
-  // lanes true, other warps: all false), so the outer branch is convergent.
-  // `elect.sync` then picks one lane within warp 0, and the compiler emits a
-  // BRA.U.ANY-style elect-driven branch for any inner `if (is_master_thread)`
-  // site — no divergent reconvergence region, no predicated ops on the
-  // unchosen lanes. Net: ~zero `lg_throttle` and ~100% branch efficiency for
-  // the master-only sections.
-  const bool is_master_warp = (threadIdx.x < THREADS_PER_WARP);
-  const bool is_master_thread = is_master_warp && (ptx::elect_one_sync() != 0);
+  const bool is_master_thread = (threadIdx.x == 0);
 
   float partial_dbias_colwise = 0.0f;
   float thread_dbias_rowwise[SCALE_DIM_X];
@@ -200,19 +184,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
     if (next_stage < STAGES) {
       // Wait for TMA transfer to have finished reading shared memory.
-      // I.e. the buffer is ready to be written to.
-      //
-      // Gated on is_master_thread: only the master issues the subsequent
-      // TMA load (copy_2d_to_shared below is itself gated on master), so
-      // only that thread needs the queue-depth guarantee. Without the
-      // gate, every thread in the CTA issues `cp.async.bulk.wait_group`,
-      // and at 16K+ CTAs the redundant 63 wait ops per CTA saturate the
-      // L1TEX/LSU instruction queue, showing up in ncu as ~30% warp time
-      // in `lg_throttle` stalls. Non-master threads still synchronise on
-      // the next stage via mbarrier_wait_parity below.
-      if (is_master_thread) {
-        ptx::cp_async_bulk_wait_group_read<1>();
-      }
+      // I.e. the buffer is ready to be written to
+      ptx::cp_async_bulk_wait_group_read<1>();
 
       const size_t next_buff = next_stage % BUFFS_NUM;
       const size_t next_stage_offset_Y = next_stage * BUFF_DIM_Y;
@@ -249,7 +222,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
         for (int i = 0; i < BUFF_DIM_Y; ++i) {
           const size_t shmem_offset_colwise = shmem_offset_base_colwise + i * BUFF_DIM_X;
           in_colwise_IType[i] = in_sh[shmem_offset_colwise];
-          ptx::abs_max(thread_amax_f16, thread_amax_f16, in_colwise_IType[i]);
+          thread_amax_f16 = __hmax(thread_amax_f16, __habs(in_colwise_IType[i]));
         }
         thread_amax = static_cast<float>(thread_amax_f16);
       } else {
