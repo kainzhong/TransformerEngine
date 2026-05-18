@@ -1055,7 +1055,7 @@ class MXFP8QuantizeSmemKernel:
             # warps before issuing the bulk store(s). Matches the C++
             # reference's fence_proxy + __syncthreads pattern.
             cute.arch.fence_proxy(
-                cute.arch.ProxyKind.async_shared,
+                "async_shared",
                 space=cute.arch.SharedSpace.shared_cta,
             )
             cute.arch.sync_threads()
