@@ -1056,7 +1056,7 @@ class MXFP8QuantizeSmemKernel:
             # reference's fence_proxy + __syncthreads pattern.
             cute.arch.fence_proxy(
                 "async_shared",
-                space=cute.arch.SharedSpace.shared_cta,
+                "cta",
             )
             cute.arch.sync_threads()
 
