@@ -2185,7 +2185,7 @@ def quantize_mxfp8_cutedsl(
         # Fake declares (WS_M, N) — any positive WS_M is OK. Use a 1-row
         # dummy; the kernel never touches it when cfg.WITH_DBIAS is False.
         dbias_workspace = dummy_float32
-    nvtx.range_pop()  # dsl.dbias_workspace
+    # nvtx.range_pop()  # dsl.dbias_workspace
 
     # nvtx.range_push("dsl.launch")
     compiled(x, act_input,
