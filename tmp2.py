@@ -15,6 +15,7 @@ quantizer = MXFP8Quantizer(
     rowwise=rowwise,
     columnwise=colwise,
 )
+quantizer.internal = True
 
 t0 = time.perf_counter_ns()
 for i in range(1000):
