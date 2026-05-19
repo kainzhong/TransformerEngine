@@ -17,8 +17,12 @@ quantizer = MXFP8Quantizer(
 )
 quantizer.internal = True
 
-t0 = time.perf_counter_ns()
 for i in range(1000):
+    rowwise_data = torch.empty((M, N), dtype=torch.uint8, device="cuda")
+    rowwise_scale_inv = torch.empty((M, N // 32), dtype=torch.uint8, device="cuda")
+
+t0 = time.perf_counter_ns()
+for i in range(5000):
     rowwise_data = torch.empty((M, N), dtype=torch.uint8, device="cuda")
     rowwise_scale_inv = torch.empty((M, N // 32), dtype=torch.uint8, device="cuda")
 t1 = time.perf_counter_ns()
