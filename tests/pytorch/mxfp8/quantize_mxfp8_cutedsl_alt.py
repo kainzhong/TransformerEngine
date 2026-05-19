@@ -2029,6 +2029,12 @@ dummy_cute_float32 = cute.runtime.make_fake_compact_tensor(Float32, (1,), memspa
 
 _TVM_FFI_DUMMY_CACHE: dict = {}
 
+quantizer = MXFP8Quantizer(
+    fp8_dtype=tex.DType.kFloat8E4M3,
+    rowwise=True,
+    columnwise=False,
+)
+quantizer.internal = True
 
 def _tvm_ffi_dummy(shape, dtype, device):
     """Reusable empty buffer for tvm-ffi call-time shape checks on inactive
@@ -2151,13 +2157,7 @@ def quantize_mxfp8_cutedsl(
     out_col_data  = result["colwise_data"]  if colwise else dummy_uint8
     out_col_scale = result["colwise_scale"] if colwise else dummy_uint8
 
-    # quantizer = MXFP8Quantizer(
-    #     fp8_dtype=tex.DType.kFloat8E4M3 if fp8_dtype == "e4m3" else tex.DType.kFloat8E5M2,
-    #     rowwise=rowwise,
-    #     columnwise=colwise,
-    # )
-    # quantizer.internal = True
-    # quantized_output = quantizer.make_empty(x.shape)
+    quantized_output = quantizer.make_empty(x.shape)
     # out_row_data  = quantized_output._rowwise_data  if rowwise else dummy_uint8
     # out_row_scale = quantized_output._rowwise_scale_inv if rowwise else dummy_uint8
     # out_col_data  = quantized_output._colwise_data  if colwise else dummy_uint8
