@@ -17,6 +17,7 @@ quantizer = MXFP8Quantizer(
 )
 quantizer.internal = True
 
+# warmup
 for i in range(1000):
     rowwise_data = torch.empty((M, N), dtype=torch.uint8, device="cuda")
     rowwise_scale_inv = torch.empty((M, N // 32), dtype=torch.uint8, device="cuda")

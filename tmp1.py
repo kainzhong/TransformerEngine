@@ -17,6 +17,7 @@ quantizer = MXFP8Quantizer(
 )
 quantizer.internal = True
 
+# warmup
 for i in range(1000):
     quantized_output = quantizer.make_empty((M, N), device="cuda")
 
