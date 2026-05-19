@@ -2081,8 +2081,8 @@ def quantize_mxfp8_cutedsl(
             responsible for initialising amax (e.g. to 0.0) before launch.
     """
     # print(f"Input tensor: shape={x.shape}, dtype={x.dtype}, device={x.device}")
-    nvtx = torch.cuda.nvtx
-    nvtx.range_push("dsl.validate")
+    # nvtx = torch.cuda.nvtx
+    # nvtx.range_push("dsl.validate")
     # assert x.is_cuda and x.is_contiguous() and x.ndim == 2
     M, N = x.shape
     # assert rowwise or colwise
@@ -2136,9 +2136,9 @@ def quantize_mxfp8_cutedsl(
     cutlass_dtype = _torch_to_cutlass_dtype[x.dtype]
     max_norm_rcp = FP8E4M3_MAX_NORM_RCP if fp8_dtype == "e4m3" else FP8E5M2_MAX_NORM_RCP
     # stream = torch.cuda.current_stream()
-    nvtx.range_pop()  # dsl.validate
+    # nvtx.range_pop()  # dsl.validate
 
-    nvtx.range_push("dsl.alloc")
+    # nvtx.range_push("dsl.alloc")
     result = {}
     # if rowwise:
     #     result["rowwise_data"] = torch.empty((M, N), dtype=torch.uint8, device=x.device)
@@ -2162,21 +2162,21 @@ def quantize_mxfp8_cutedsl(
     out_row_scale = quantized_output._rowwise_scale_inv if rowwise else dummy_uint8
     out_col_data  = quantized_output._colwise_data  if colwise else dummy_uint8
     out_col_scale = quantized_output._colwise_scale_inv if colwise else dummy_uint8
-    nvtx.range_pop()  # dsl.alloc
+    # nvtx.range_pop()  # dsl.alloc
 
-    nvtx.range_push("dsl.cache_lookup")
+    # nvtx.range_push("dsl.cache_lookup")
     # Single unified kernel launch — loads global memory once for both directions
     cfg = MXFP8QuantizeConfig(cutlass_dtype, M, N, fp8_dtype, rowwise=rowwise, colwise=colwise,
                                with_gemm_swizzled_scales=with_gemm_swizzled_scales,
                                with_amax=with_amax, activation=activation,
                                with_dbias=compute_dbias, is_dact=is_dact)
     compiled = _get_compiled_kernel_tvm_ffi(cfg)
-    nvtx.range_pop()  # dsl.cache_lookup
+    # nvtx.range_pop()  # dsl.cache_lookup
 
     # DBias workspace — `[blocks_Y, N]` f32 partial sums, reduced post-kernel.
     # blocks_Y must match the kernel's `(cfg.M + 63) // 64` (one CTA per
     # 64-row strip, since each CTA handles NUM_TILES=2 stages of TILE_Y=32).
-    nvtx.range_push("dsl.dbias_workspace")
+    # nvtx.range_push("dsl.dbias_workspace")
     if compute_dbias:
         blocks_Y = (M + TILE_Y * NUM_TILES - 1) // (TILE_Y * NUM_TILES)
         dbias_workspace = torch.empty(
@@ -2187,13 +2187,13 @@ def quantize_mxfp8_cutedsl(
         dbias_workspace = dummy_float32
     nvtx.range_pop()  # dsl.dbias_workspace
 
-    nvtx.range_push("dsl.launch")
+    # nvtx.range_push("dsl.launch")
     compiled(x, act_input,
         out_row_data, out_row_scale,
         out_col_data, out_col_scale,
         noop, amax, dbias_workspace,
         Int32(M), Float32(max_norm_rcp))
-    nvtx.range_pop()  # dsl.launch
+    # nvtx.range_pop()  # dsl.launch
 
     if compute_dbias:
         # Reduce blocks_Y partial sums along the block axis. torch.sum is
@@ -2204,9 +2204,9 @@ def quantize_mxfp8_cutedsl(
         # Python-loop reduce would be bit-exact but launches `blocks_Y`
         # element-wise add kernels, dwarfing the quantize kernel time at
         # large shapes (e.g. 256 launches for M=16384).
-        nvtx.range_push("dsl.reduce_dbias")
+        # nvtx.range_push("dsl.reduce_dbias")
         result["dbias"] = dbias_workspace.sum(dim=0).to(x.dtype)
-        nvtx.range_pop()  # dsl.reduce_dbias
+        # nvtx.range_pop()  # dsl.reduce_dbias
     if with_amax:
         result["amax"] = amax[0].item()
     return result
