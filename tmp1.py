@@ -25,4 +25,5 @@ t0 = time.perf_counter_ns()
 for i in range(5000):
     quantized_output = quantizer.make_empty((M, N), device="cuda")
 t1 = time.perf_counter_ns()
-print(f"Time: {(t1 - t0) / 1e9:.6f} seconds")
+avg_time = (t1 - t0) / 5000 / 1000
+print(f"Average time: {avg_time:.6f} us")
