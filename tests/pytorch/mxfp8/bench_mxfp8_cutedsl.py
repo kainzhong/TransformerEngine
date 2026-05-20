@@ -123,7 +123,7 @@ def make_reference_fn(combo, x, act_in, rowwise, colwise,
 
 
 def make_dsl_fn(combo, x, act_in, rowwise, colwise,
-                fp8_dtype="e4m3", swizzle=False, with_amax=False):
+                fp8_dtype="e4m3", swizzle=False, with_amax=False, timing_func=lambda l, t: None):
     """Return a 0-arg callable that invokes the CuTeDSL kernel for `combo`."""
     _, activation, compute_dbias = COMBOS[combo]
     if activation is None:
@@ -132,7 +132,7 @@ def make_dsl_fn(combo, x, act_in, rowwise, colwise,
             rowwise=rowwise, colwise=colwise,
             fp8_dtype=fp8_dtype,
             with_gemm_swizzled_scales=swizzle,
-            with_amax=with_amax)
+            with_amax=with_amax, timing_func=timing_func)
     return lambda: quantize_mxfp8_cutedsl(
         x=x,
         rowwise=rowwise, colwise=colwise,
@@ -142,7 +142,7 @@ def make_dsl_fn(combo, x, act_in, rowwise, colwise,
         activation=activation, 
         act_input=act_in,
         compute_dbias=compute_dbias,
-        is_dact=activation.startswith("d"))
+        is_dact=activation.startswith("d"), timing_func=timing_func)
 
 
 # Module-level L2 evict buffer. 256 MB f32 (covers B200's ~60 MB L2 with headroom).
@@ -200,16 +200,19 @@ def bench_once(name, fn, warmup, iters, evict_l2=False, single=False):
         evict = _l2_evict_buf()
         total_ms = 0.0
         nvtx.range_push(f"{name}_measure")
+        t0 = time.perf_counter_ns()
         for i in range(iters):
-            evict.zero_()             # async L2 flush
-            torch.cuda.synchronize()  # ← drain evict before timing starts
-            nvtx.range_push(f"{name}_iter_{i}")
-            t0 = time.perf_counter_ns()
+            # evict.zero_()             # async L2 flush
+            # torch.cuda.synchronize()  # ← drain evict before timing starts
+            # nvtx.range_push(f"{name}_iter_{i}")
+            # t0 = time.perf_counter_ns()
             fn()                      # host wrapper + kernel launch
-            torch.cuda.synchronize()  # wait for kernel
-            t1 = time.perf_counter_ns()
-            nvtx.range_pop()
-            total_ms += (t1 - t0) / 1e6
+            # torch.cuda.synchronize()  # wait for kernel
+            # t1 = time.perf_counter_ns()
+            # nvtx.range_pop()
+            # total_ms += (t1 - t0) / 1e6
+        t1 = time.perf_counter_ns()
+        total_ms = (t1 - t0) / 1e6
         nvtx.range_pop()
         return total_ms / iters
 
@@ -256,12 +259,21 @@ def bench_shape(M, N, rowwise, colwise, warmup, iters, combo="plain",
     # Per-shape outer NVTX range so each shape is clearly grouped in the timeline
     nvtx.range_push(f"shape_{M}x{N}_{dir_label}_{tag}")
 
+    timing_dict = {}
+    timing_count_dict = {}
+    # Skip warm_jit (1 dsl call) + bench_once's own warmup (`warmup` dsl calls).
+    skip_calls = 1 + warmup
+    def timing_func(label, iter_ms):
+        timing_count_dict[label] = timing_count_dict.get(label, 0) + 1
+        if timing_count_dict[label] > skip_calls:
+            timing_dict[label] = timing_dict.get(label, 0.0) + iter_ms
+
     ref_fn = make_reference_fn(combo, x, act_in, rowwise, colwise,
                                fp8_dtype=fp8_dtype, swizzle=swizzle,
                                with_amax=with_amax)
     dsl_fn = make_dsl_fn(combo, x, act_in, rowwise, colwise,
                          fp8_dtype=fp8_dtype, swizzle=swizzle,
-                         with_amax=with_amax)
+                         with_amax=with_amax, timing_func=timing_func)
     # Warm the CuTeDSL JIT cache once (not counted against bench)
     nvtx.range_push("warm_jit")
     dsl_fn()
@@ -277,6 +289,13 @@ def bench_shape(M, N, rowwise, colwise, warmup, iters, combo="plain",
         f"cutedsl_{M}x{N}_{dir_label}_{tag}",
         dsl_fn, warmup, iters, evict_l2=evict_l2, single=single,
     )
+
+    # timing_func is invoked once per label per dsl_fn() call, so the number of
+    # dsl iterations is timing_calls / len(timing_dict).
+    for k, v in timing_dict.items():
+        v = v / iters if (not single and iters) else v
+        v = v * 1000  # convert to us for readability
+        print(f"  timing_func: {k} = {v:.3f} us")
 
     nvtx.range_pop()  # close shape_ range
 

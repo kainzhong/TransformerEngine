@@ -19,19 +19,32 @@ shared memory.
 
 import os
 import subprocess
+import time
 
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
 from transformer_engine.pytorch.tensor.storage.float8_tensor_storage import Float8TensorStorage
 import transformer_engine_torch as tex
-# Pin CuTeDSL compile target to Blackwell. Must be set before cutlass imports
-# so env detection in base_dsl picks it up; also passed explicitly below.
-os.environ.setdefault("CUTE_DSL_ARCH", "sm_100a")
+# Pin CuTeDSL compile target to the current device's Blackwell SM. Must be set
+# before cutlass imports so env detection in base_dsl picks it up; also passed
+# explicitly below.
+def _detect_cute_dsl_arch() -> str:
+    try:
+        import torch as _torch
+        major, minor = _torch.cuda.get_device_capability(_torch.cuda.current_device())
+    except Exception:
+        return "sm_100a"
+    # Map known Blackwell capabilities to their CuTeDSL arch-specific targets.
+    # Fall back to the plain (non-"a") target if the arch-specific one is unknown.
+    return f"sm_{major}{minor}a"
+
+os.environ.setdefault("CUTE_DSL_ARCH", _detect_cute_dsl_arch())
 
 from types import SimpleNamespace
 from typing import Type
 
 import cuda.bindings.driver as cuda
 import torch
+import transformer_engine_torch as tex
 
 import cutlass
 import cutlass.cute as cute
@@ -1995,7 +2008,7 @@ def _get_compiled_kernel_tvm_ffi(cfg):
         scale_col_fake   = cute.runtime.make_fake_compact_tensor(cute.Uint8, (SCALED_M_COL, N), **kw_rm16) if cfg.COLWISE else dummy_cute_uint8
         ws_fake_ptr      = cute.runtime.make_fake_compact_tensor(Float32,    (WS_M, N),         **kw_rm4) if cfg.WITH_DBIAS else dummy_cute_float32
         single_fake_ptr  = dummy_cute_float32
-        compiled = cute.compile[(GPUArch("sm_100a"),)](
+        compiled = cute.compile[(GPUArch(os.environ["CUTE_DSL_ARCH"]),)](
             kernel_obj,
             in_fake_ptr,                       # mX
             in_fake_ptr,                       # mActIn (alias of mX unless IS_DACT)
@@ -2028,13 +2041,12 @@ dummy_cute_float32 = cute.runtime.make_fake_compact_tensor(Float32, (1,), memspa
 
 
 _TVM_FFI_DUMMY_CACHE: dict = {}
+_FP8_DTYPES = {
+    "e4m3": tex.DType.kFloat8E4M3,
+    "e5m2": tex.DType.kFloat8E5M2,
+}
 
-quantizer = MXFP8Quantizer(
-    fp8_dtype=tex.DType.kFloat8E4M3,
-    rowwise=True,
-    columnwise=False,
-)
-quantizer.internal = True
+noop_flag = torch.tensor([1], dtype=torch.float32, device="cuda")  # if noop_flag[0] == 1.0 at launch, kernel returns immediately
 
 def _tvm_ffi_dummy(shape, dtype, device):
     """Reusable empty buffer for tvm-ffi call-time shape checks on inactive
@@ -2061,6 +2073,7 @@ def quantize_mxfp8_cutedsl(
     act_input: torch.Tensor = None,
     compute_dbias: bool = False,
     is_dact: bool = False,
+    timing_func: callable = lambda l, t: None,
 ) -> dict:
     """Quantize a 2D tensor to MXFP8 format using CuTeDSL kernels with smem tiling.
 
@@ -2086,10 +2099,12 @@ def quantize_mxfp8_cutedsl(
             amax alongside the per-32-element MXFP8 scales. Caller is
             responsible for initialising amax (e.g. to 0.0) before launch.
     """
+    t_start = time.perf_counter_ns()
     # print(f"Input tensor: shape={x.shape}, dtype={x.dtype}, device={x.device}")
     # nvtx = torch.cuda.nvtx
     # nvtx.range_push("dsl.validate")
     # assert x.is_cuda and x.is_contiguous() and x.ndim == 2
+    t0 = time.perf_counter_ns()
     M, N = x.shape
     # assert rowwise or colwise
     # assert M % TILE_Y == 0, f"M={M} must be a multiple of {TILE_Y}"
@@ -2143,19 +2158,36 @@ def quantize_mxfp8_cutedsl(
     max_norm_rcp = FP8E4M3_MAX_NORM_RCP if fp8_dtype == "e4m3" else FP8E5M2_MAX_NORM_RCP
     # stream = torch.cuda.current_stream()
     # nvtx.range_pop()  # dsl.validate
+    t1 = time.perf_counter_ns()
+    timing_func("prepare_args", (t1 - t0) / 1e6)
 
+    t0 = time.perf_counter_ns()
     # nvtx.range_push("dsl.alloc")
     result = {}
-    if rowwise:
-        result["rowwise_data"] = torch.empty((M, N), dtype=torch.uint8, device=x.device)
-        result["rowwise_scale"] = torch.empty((M, N // SCALE_DIM), dtype=torch.uint8, device=x.device)
-    if colwise:
-        result["colwise_data"] = torch.empty((M, N), dtype=torch.uint8, device=x.device)
-        result["colwise_scale"] = torch.empty((M // SCALE_DIM, N), dtype=torch.uint8, device=x.device)
-    out_row_data  = result["rowwise_data"]  if rowwise else dummy_uint8
-    out_row_scale = result["rowwise_scale"] if rowwise else dummy_uint8
-    out_col_data  = result["colwise_data"]  if colwise else dummy_uint8
-    out_col_scale = result["colwise_scale"] if colwise else dummy_uint8
+    # if rowwise:
+    #     result["rowwise_data"] = torch.empty((M, N), dtype=torch.uint8, device=x.device)
+    #     result["rowwise_scale"] = torch.empty((M, N // SCALE_DIM), dtype=torch.uint8, device=x.device)
+    # if colwise:
+    #     result["colwise_data"] = torch.empty((M, N), dtype=torch.uint8, device=x.device)
+    #     result["colwise_scale"] = torch.empty((M // SCALE_DIM, N), dtype=torch.uint8, device=x.device)
+    # out_row_data  = result["rowwise_data"]  if rowwise else dummy_uint8
+    # out_row_scale = result["rowwise_scale"] if rowwise else dummy_uint8
+    # out_col_data  = result["colwise_data"]  if colwise else dummy_uint8
+    # out_col_scale = result["colwise_scale"] if colwise else dummy_uint8
+
+    quantizer = MXFP8Quantizer(
+        fp8_dtype=_FP8_DTYPES[fp8_dtype],
+        rowwise=rowwise,
+        columnwise=colwise,
+    )
+    quantizer.internal = True
+    if with_gemm_swizzled_scales:
+        quantizer.optimize_for_gemm = True
+    output_placeholder = tex.quantize(x, quantizer, None, noop_flag)
+    out_row_data = output_placeholder._rowwise_data if rowwise else dummy_uint8
+    out_row_scale = output_placeholder._rowwise_scale_inv if rowwise else dummy_uint8
+    out_col_data = quantizer._columnwise_data if colwise else dummy_uint8
+    out_col_scale = quantizer._columnwise_scale_inv if colwise else dummy_uint8
 
     # quantized_output = quantizer.make_empty(x.shape)
     # out_row_data  = quantized_output._rowwise_data  if rowwise else dummy_uint8
@@ -2163,7 +2195,10 @@ def quantize_mxfp8_cutedsl(
     # out_col_data  = quantized_output._colwise_data  if colwise else dummy_uint8
     # out_col_scale = quantized_output._colwise_scale_inv if colwise else dummy_uint8
     # nvtx.range_pop()  # dsl.alloc
+    t1 = time.perf_counter_ns()
+    timing_func("allocate", (t1 - t0) / 1e6)
 
+    t0 = time.perf_counter_ns()
     # nvtx.range_push("dsl.cache_lookup")
     # Single unified kernel launch — loads global memory once for both directions
     cfg = MXFP8QuantizeConfig(cutlass_dtype, M, N, fp8_dtype, rowwise=rowwise, colwise=colwise,
@@ -2172,7 +2207,10 @@ def quantize_mxfp8_cutedsl(
                                with_dbias=compute_dbias, is_dact=is_dact)
     compiled = _get_compiled_kernel_tvm_ffi(cfg)
     # nvtx.range_pop()  # dsl.cache_lookup
+    t1 = time.perf_counter_ns()
+    timing_func("compile_kernel", (t1 - t0) / 1e6)
 
+    t0 = time.perf_counter_ns()
     # DBias workspace — `[blocks_Y, N]` f32 partial sums, reduced post-kernel.
     # blocks_Y must match the kernel's `(cfg.M + 63) // 64` (one CTA per
     # 64-row strip, since each CTA handles NUM_TILES=2 stages of TILE_Y=32).
@@ -2186,7 +2224,10 @@ def quantize_mxfp8_cutedsl(
         # dummy; the kernel never touches it when cfg.WITH_DBIAS is False.
         dbias_workspace = dummy_float32
     # nvtx.range_pop()  # dsl.dbias_workspace
+    t1 = time.perf_counter_ns()
+    timing_func("dbias_workspace", (t1 - t0) / 1e6)
 
+    t0 = time.perf_counter_ns()
     # nvtx.range_push("dsl.launch")
     compiled(x, act_input,
         out_row_data, out_row_scale,
@@ -2194,7 +2235,10 @@ def quantize_mxfp8_cutedsl(
         noop, amax, dbias_workspace,
         Int32(M), Float32(max_norm_rcp))
     # nvtx.range_pop()  # dsl.launch
+    t1 = time.perf_counter_ns()
+    timing_func("launch", (t1 - t0) / 1e6)
 
+    t0 = time.perf_counter_ns()
     if compute_dbias:
         # Reduce blocks_Y partial sums along the block axis. torch.sum is
         # tree-based (single CUDA launch) — fast, but its association order
@@ -2209,4 +2253,8 @@ def quantize_mxfp8_cutedsl(
         # nvtx.range_pop()  # dsl.reduce_dbias
     if with_amax:
         result["amax"] = amax[0].item()
+    t1 = time.perf_counter_ns()
+    timing_func("postprocess_output", (t1 - t0) / 1e6)
+    t_end = time.perf_counter_ns()
+    timing_func("total_time", (t_end - t_start) / 1e6)
     return result
