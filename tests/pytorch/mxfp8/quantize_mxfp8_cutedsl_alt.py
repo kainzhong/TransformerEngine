@@ -559,12 +559,10 @@ def _cvt_f32x2_to_fp8x2(fp8_dtype: str):
 # Kernel configuration
 # ---------------------------------------------------------------------------
 class MXFP8QuantizeConfig:
-    def __init__(self, dtype, M, N, fp8_dtype="e4m3", rowwise=True, colwise=False,
+    def __init__(self, dtype, fp8_dtype="e4m3", rowwise=True, colwise=False,
                  with_gemm_swizzled_scales=False, with_amax=False,
                  activation=None, with_dbias=False, is_dact=False):
         self.DTYPE = dtype
-        self.M = M
-        self.N = N
         self.FP8_DTYPE = fp8_dtype
         self.ROWWISE = rowwise
         self.COLWISE = colwise
@@ -635,12 +633,13 @@ class MXFP8QuantizeSmemKernel:
         mNoop: cute.Tensor, # Skip flag — if *noop == 1.0, kernel exits immediately
         mAmax: cute.Tensor, # Global amax accumulator, only used in WITH_AMAX path
         mDbias: cute.Tensor, # Per-CTA-row partial dbias sums which is reduced down to (N,) by a separate kernel, only used in WITH_DBIAS path
-        M: Int32,
-        max_norm_rcp: Float32, # 1 / FP8_MAX_NORM constant (e4m3 vs e5m2). Multiplied into amax to build the e8m0 scale
     ):
+        M = mX.shape[0]
+        N = mX.shape[1]
         cfg = self.cfg
-        num_scale_cols = cfg.N // SCALE_DIM
-        num_scale_rows = cfg.M // SCALE_DIM
+        max_norm_rcp = cfg.MAX_NORM_RCP
+        num_scale_cols = N // SCALE_DIM
+        num_scale_rows = M // SCALE_DIM
 
         # Rewrap mS_row / mS_col with the GEMM-swizzled layout when requested.
         # Wrapper passes in a tensor with the compact (M, N/32):(N/32, 1) layout
@@ -688,12 +687,7 @@ class MXFP8QuantizeSmemKernel:
         #                                    → SCALE_TILE = (32, 2):(16, 1)
         # The bigger (TILE_Y * NUM_TILES, ...) divide we used before tangles the
         # swizzle's (32, 4) row hierarchy under flatten + sub-divide chain.
-        mS_row = cute.zipped_divide(mS_row, (TILE_Y, TILE_X // SCALE_DIM))
-        # For M=256, N=512:
-        # Non-swizzled: https://kainzhong.github.io/CuTe-Layout-Visualizer/?key=zipped_divide-%28256%2C+16%29%3A%2816%2C+1%29-32%0A2
-        # Swizzled: https://kainzhong.github.io/CuTe-Layout-Visualizer/?key=zipped_divide-%28%2832%2C+4%2C+2%29%2C+%284%2C+4%29%29%3A%28%2816%2C+4%2C+2048%29%2C+%281%2C+512%29%29-32%0A2
-        # print(f"mS_row after zipped_divide: {mS_row}")
-
+        
         # Declare TMA descriptors on the host side.
         # make_tiled_tma_atom returns the UNTILED gmem tensor with basis strides.
         # Tile it inside the kernel with zipped_divide so each coord selects
@@ -737,7 +731,7 @@ class MXFP8QuantizeSmemKernel:
             tma_dst_out_row = None
 
         grid = [
-            cute.ceil_div(Int32(cfg.N), TILE_X),
+            cute.ceil_div(Int32(N), TILE_X),
             cute.ceil_div(M, TILE_Y * NUM_TILES),
         ]
         block = [THREADS_PER_CHUNK,]
@@ -773,6 +767,13 @@ class MXFP8QuantizeSmemKernel:
         tma_atom_out_col, tma_dst_out_col, # how to use TMA to copy the colwise output
     ):
         cfg = self.cfg
+
+        mS_row = cute.zipped_divide(mS_row, (TILE_Y, TILE_X // SCALE_DIM))
+        # For M=256, N=512:
+        # Non-swizzled: https://kainzhong.github.io/CuTe-Layout-Visualizer/?key=zipped_divide-%28256%2C+16%29%3A%2816%2C+1%29-32%0A2
+        # Swizzled: https://kainzhong.github.io/CuTe-Layout-Visualizer/?key=zipped_divide-%28%2832%2C+4%2C+2%29%2C+%284%2C+4%29%29%3A%28%2816%2C+4%2C+2048%29%2C+%281%2C+512%29%29-32%0A2
+        # print(f"mS_row after zipped_divide: {mS_row}")
+
 
         # ---- noop early-exit ----------------------------------------------
         # Skip the entire kernel if the framework signalled "no-op" via a
@@ -1977,7 +1978,7 @@ class MXFP8QuantizeSmemKernel:
 _compile_cache_tvm_ffi: dict = {}
 
 def _get_compiled_kernel_tvm_ffi(cfg):
-    key = (cfg.DTYPE, cfg.M, cfg.N, cfg.FP8_DTYPE, cfg.ROWWISE, cfg.COLWISE,
+    key = (cfg.DTYPE, cfg.FP8_DTYPE, cfg.ROWWISE, cfg.COLWISE,
            cfg.WITH_GEMM_SWIZZLED_SCALES, cfg.WITH_AMAX, cfg.ACTIVATION,
            cfg.WITH_DBIAS, "tvm_ffi")
     if key not in _compile_cache_tvm_ffi:
@@ -2017,7 +2018,6 @@ def _get_compiled_kernel_tvm_ffi(cfg):
             single_fake_ptr,                   # mNoop
             single_fake_ptr,                   # mAmax
             ws_fake_ptr,                       # mDbias
-            Int32(1), Float32(cfg.MAX_NORM_RCP),
             options="--enable-tvm-ffi"
         )
         _compile_cache_tvm_ffi[key] = compiled
@@ -2100,12 +2100,12 @@ def quantize_mxfp8_cutedsl(
             amax alongside the per-32-element MXFP8 scales. Caller is
             responsible for initialising amax (e.g. to 0.0) before launch.
     """
-    t_start = time.perf_counter_ns()
+    # t_start = time.perf_counter_ns()
     # print(f"Input tensor: shape={x.shape}, dtype={x.dtype}, device={x.device}")
     # nvtx = torch.cuda.nvtx
     # nvtx.range_push("dsl.validate")
     # assert x.is_cuda and x.is_contiguous() and x.ndim == 2
-    t0 = time.perf_counter_ns()
+    # t0 = time.perf_counter_ns()
     M, N = x.shape
     # assert rowwise or colwise
     # assert M % TILE_Y == 0, f"M={M} must be a multiple of {TILE_Y}"
@@ -2159,10 +2159,10 @@ def quantize_mxfp8_cutedsl(
     max_norm_rcp = FP8E4M3_MAX_NORM_RCP if fp8_dtype == "e4m3" else FP8E5M2_MAX_NORM_RCP
     # stream = torch.cuda.current_stream()
     # nvtx.range_pop()  # dsl.validate
-    t1 = time.perf_counter_ns()
-    timing_func("prepare_args", (t1 - t0) / 1e6)
+    # t1 = time.perf_counter_ns()
+    # timing_func("prepare_args", (t1 - t0) / 1e6)
 
-    t0 = time.perf_counter_ns()
+    # t0 = time.perf_counter_ns()
     # nvtx.range_push("dsl.alloc")
     result = {}
     # if rowwise:
@@ -2187,22 +2187,22 @@ def quantize_mxfp8_cutedsl(
     out_col_data  = quantized_output._colwise_data  if colwise else dummy_uint8
     out_col_scale = quantized_output._colwise_scale_inv if colwise else dummy_uint8
     # nvtx.range_pop()  # dsl.alloc
-    t1 = time.perf_counter_ns()
-    timing_func("allocate", (t1 - t0) / 1e6)
+    # t1 = time.perf_counter_ns()
+    # timing_func("allocate", (t1 - t0) / 1e6)
 
-    t0 = time.perf_counter_ns()
+    # t0 = time.perf_counter_ns()
     # nvtx.range_push("dsl.cache_lookup")
     # Single unified kernel launch — loads global memory once for both directions
-    cfg = MXFP8QuantizeConfig(cutlass_dtype, M, N, fp8_dtype, rowwise=rowwise, colwise=colwise,
+    cfg = MXFP8QuantizeConfig(cutlass_dtype, fp8_dtype, rowwise=rowwise, colwise=colwise,
                                with_gemm_swizzled_scales=with_gemm_swizzled_scales,
                                with_amax=with_amax, activation=activation,
                                with_dbias=compute_dbias, is_dact=is_dact)
     compiled = _get_compiled_kernel_tvm_ffi(cfg)
     # nvtx.range_pop()  # dsl.cache_lookup
-    t1 = time.perf_counter_ns()
-    timing_func("compile_kernel", (t1 - t0) / 1e6)
+    # t1 = time.perf_counter_ns()
+    # timing_func("compile_kernel", (t1 - t0) / 1e6)
 
-    t0 = time.perf_counter_ns()
+    # t0 = time.perf_counter_ns()
     # DBias workspace — `[blocks_Y, N]` f32 partial sums, reduced post-kernel.
     # blocks_Y must match the kernel's `(cfg.M + 63) // 64` (one CTA per
     # 64-row strip, since each CTA handles NUM_TILES=2 stages of TILE_Y=32).
@@ -2216,21 +2216,20 @@ def quantize_mxfp8_cutedsl(
         # dummy; the kernel never touches it when cfg.WITH_DBIAS is False.
         dbias_workspace = dummy_float32
     # nvtx.range_pop()  # dsl.dbias_workspace
-    t1 = time.perf_counter_ns()
-    timing_func("dbias_workspace", (t1 - t0) / 1e6)
+    # t1 = time.perf_counter_ns()
+    # timing_func("dbias_workspace", (t1 - t0) / 1e6)
 
-    t0 = time.perf_counter_ns()
+    # t0 = time.perf_counter_ns()
     # nvtx.range_push("dsl.launch")
     compiled(x, act_input,
         out_row_data, out_row_scale,
         out_col_data, out_col_scale,
-        noop, amax, dbias_workspace,
-        Int32(M), Float32(max_norm_rcp))
+        noop, amax, dbias_workspace)
     # nvtx.range_pop()  # dsl.launch
-    t1 = time.perf_counter_ns()
-    timing_func("launch", (t1 - t0) / 1e6)
+    # t1 = time.perf_counter_ns()
+    # timing_func("launch", (t1 - t0) / 1e6)
 
-    t0 = time.perf_counter_ns()
+    # t0 = time.perf_counter_ns()
     if compute_dbias:
         # Reduce blocks_Y partial sums along the block axis. torch.sum is
         # tree-based (single CUDA launch) — fast, but its association order
@@ -2245,8 +2244,8 @@ def quantize_mxfp8_cutedsl(
         # nvtx.range_pop()  # dsl.reduce_dbias
     if with_amax:
         result["amax"] = amax[0].item()
-    t1 = time.perf_counter_ns()
-    timing_func("postprocess_output", (t1 - t0) / 1e6)
-    t_end = time.perf_counter_ns()
-    timing_func("total_time", (t_end - t_start) / 1e6)
+    # t1 = time.perf_counter_ns()
+    # timing_func("postprocess_output", (t1 - t0) / 1e6)
+    # t_end = time.perf_counter_ns()
+    # timing_func("total_time", (t_end - t_start) / 1e6)
     return result
