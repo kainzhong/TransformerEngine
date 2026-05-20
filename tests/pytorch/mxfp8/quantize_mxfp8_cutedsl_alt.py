@@ -2046,7 +2046,7 @@ _FP8_DTYPES = {
     "e5m2": tex.DType.kFloat8E5M2,
 }
 
-noop_flag = torch.tensor([1], dtype=torch.float32, device="cuda")  # if noop_flag[0] == 1.0 at launch, kernel returns immediately
+noop_flag = torch.tensor(1.0, dtype=torch.float32, device="cuda")  # if noop_flag[0] == 1.0 at launch, kernel returns immediately
 
 def _tvm_ffi_dummy(shape, dtype, device):
     """Reusable empty buffer for tvm-ffi call-time shape checks on inactive
@@ -2063,6 +2063,7 @@ def _tvm_ffi_dummy(shape, dtype, device):
 
 def quantize_mxfp8_cutedsl(
     x: torch.Tensor,
+    quantized_output,
     fp8_dtype: str = "e4m3",
     rowwise: bool = True,
     colwise: bool = False,
@@ -2175,25 +2176,16 @@ def quantize_mxfp8_cutedsl(
     # out_col_data  = result["colwise_data"]  if colwise else dummy_uint8
     # out_col_scale = result["colwise_scale"] if colwise else dummy_uint8
 
-    quantizer = MXFP8Quantizer(
-        fp8_dtype=_FP8_DTYPES[fp8_dtype],
-        rowwise=rowwise,
-        columnwise=colwise,
-    )
-    quantizer.internal = True
-    if with_gemm_swizzled_scales:
-        quantizer.optimize_for_gemm = True
-    output_placeholder = tex.quantize(x, quantizer, None, noop_flag)
-    out_row_data = output_placeholder._rowwise_data if rowwise else dummy_uint8
-    out_row_scale = output_placeholder._rowwise_scale_inv if rowwise else dummy_uint8
-    out_col_data = quantizer._columnwise_data if colwise else dummy_uint8
-    out_col_scale = quantizer._columnwise_scale_inv if colwise else dummy_uint8
+    # output_placeholder = tex.quantize(x, quantizer, None, noop_flag)
+    # out_row_data = output_placeholder._rowwise_data if rowwise else dummy_uint8
+    # out_row_scale = output_placeholder._rowwise_scale_inv if rowwise else dummy_uint8
+    # out_col_data = output_placeholder._columnwise_data if colwise else dummy_uint8
+    # out_col_scale = output_placeholder._columnwise_scale_inv if colwise else dummy_uint8
 
-    # quantized_output = quantizer.make_empty(x.shape)
-    # out_row_data  = quantized_output._rowwise_data  if rowwise else dummy_uint8
-    # out_row_scale = quantized_output._rowwise_scale_inv if rowwise else dummy_uint8
-    # out_col_data  = quantized_output._colwise_data  if colwise else dummy_uint8
-    # out_col_scale = quantized_output._colwise_scale_inv if colwise else dummy_uint8
+    out_row_data  = quantized_output._rowwise_data  if rowwise else dummy_uint8
+    out_row_scale = quantized_output._rowwise_scale_inv if rowwise else dummy_uint8
+    out_col_data  = quantized_output._colwise_data  if colwise else dummy_uint8
+    out_col_scale = quantized_output._colwise_scale_inv if colwise else dummy_uint8
     # nvtx.range_pop()  # dsl.alloc
     t1 = time.perf_counter_ns()
     timing_func("allocate", (t1 - t0) / 1e6)

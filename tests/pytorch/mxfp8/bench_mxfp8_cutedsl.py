@@ -121,28 +121,45 @@ def make_reference_fn(combo, x, act_in, rowwise, colwise,
         return lambda: op(x, act_in, quantizer)
     raise ValueError(f"unknown combo {combo!r}")
 
+timing_dict = {}
+timing_count_dict = {}
+# Skip warm_jit (1 dsl call) + bench_once's own warmup (`warmup` dsl calls).
+skip_calls = 10
+def timing_func(label, iter_ms):
+    timing_count_dict[label] = timing_count_dict.get(label, 0) + 1
+    if timing_count_dict[label] > skip_calls:
+        timing_dict[label] = timing_dict.get(label, 0.0) + iter_ms
+
+def wrapper(quantizer, x, out, noop_flag):
+    quantize_mxfp8_cutedsl(
+        x=x,
+        quantized_output=out,
+        rowwise=quantizer.rowwise_usage,
+        colwise=quantizer.columnwise_usage,
+        fp8_dtype="e4m3" if quantizer.dtype == tex.DType.kFloat8E4M3 else "e5m2",
+        with_gemm_swizzled_scales=quantizer.optimize_for_gemm,
+        with_amax=False,
+        activation=None,
+        act_input=None,
+        compute_dbias=False,
+        is_dact=False,
+        timing_func=timing_func
+    )
+
 
 def make_dsl_fn(combo, x, act_in, rowwise, colwise,
-                fp8_dtype="e4m3", swizzle=False, with_amax=False, timing_func=lambda l, t: None):
+                fp8_dtype="e4m3", swizzle=False, with_amax=False):
     """Return a 0-arg callable that invokes the CuTeDSL kernel for `combo`."""
     _, activation, compute_dbias = COMBOS[combo]
-    if activation is None:
-        return lambda: quantize_mxfp8_cutedsl(
-            x=x,
-            rowwise=rowwise, colwise=colwise,
-            fp8_dtype=fp8_dtype,
-            with_gemm_swizzled_scales=swizzle,
-            with_amax=with_amax, timing_func=timing_func)
-    return lambda: quantize_mxfp8_cutedsl(
-        x=x,
-        rowwise=rowwise, colwise=colwise,
-        fp8_dtype=fp8_dtype,
-        with_gemm_swizzled_scales=swizzle,
-        with_amax=with_amax,
-        activation=activation, 
-        act_input=act_in,
-        compute_dbias=compute_dbias,
-        is_dact=activation.startswith("d"), timing_func=timing_func)
+    quantizer = MXFP8Quantizer(
+        fp8_dtype=_FP8_DTYPES[fp8_dtype],
+        rowwise=rowwise,
+        columnwise=colwise,
+    )
+    quantizer.internal = True
+    if swizzle:
+        quantizer.optimize_for_gemm = True
+    return lambda: tex.quantize_with_func(x, quantizer, None, None, wrapper)
 
 
 # Module-level L2 evict buffer. 256 MB f32 (covers B200's ~60 MB L2 with headroom).
@@ -259,21 +276,12 @@ def bench_shape(M, N, rowwise, colwise, warmup, iters, combo="plain",
     # Per-shape outer NVTX range so each shape is clearly grouped in the timeline
     nvtx.range_push(f"shape_{M}x{N}_{dir_label}_{tag}")
 
-    timing_dict = {}
-    timing_count_dict = {}
-    # Skip warm_jit (1 dsl call) + bench_once's own warmup (`warmup` dsl calls).
-    skip_calls = 1 + warmup
-    def timing_func(label, iter_ms):
-        timing_count_dict[label] = timing_count_dict.get(label, 0) + 1
-        if timing_count_dict[label] > skip_calls:
-            timing_dict[label] = timing_dict.get(label, 0.0) + iter_ms
-
     ref_fn = make_reference_fn(combo, x, act_in, rowwise, colwise,
                                fp8_dtype=fp8_dtype, swizzle=swizzle,
                                with_amax=with_amax)
     dsl_fn = make_dsl_fn(combo, x, act_in, rowwise, colwise,
                          fp8_dtype=fp8_dtype, swizzle=swizzle,
-                         with_amax=with_amax, timing_func=timing_func)
+                         with_amax=with_amax)
     # Warm the CuTeDSL JIT cache once (not counted against bench)
     nvtx.range_push("warm_jit")
     dsl_fn()

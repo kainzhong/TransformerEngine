@@ -65,6 +65,39 @@ py::object quantize(const at::Tensor &tensor, py::handle quantizer, const py::ob
   return output_py;
 }
 
+py::object quantize_with_func(const at::Tensor &tensor, py::handle quantizer, const py::object &output,
+                    std::optional<at::Tensor> noop_flag, const py::object &quant_func) {
+  // Convert quantizer to C++ object
+  auto quantizer_cpp = convert_quantizer(quantizer);
+
+  // Convert input tensor to C++ object
+  auto input_contiguous = tensor.contiguous();
+  auto input_cpp = makeTransformerEngineTensor(input_contiguous);
+
+  // Initialize output tensor
+  TensorWrapper output_cpp;
+  py::object output_py;
+  if (output.is_none()) {
+    const auto shape = get_tensor_shape(input_cpp);
+    const auto fake_dtype = input_cpp.dtype();
+    std::tie(output_cpp, output_py) = quantizer_cpp->create_tensor(shape, fake_dtype);
+  } else {
+    std::tie(output_cpp, output_py) = quantizer_cpp->convert_and_update_tensor(output);
+  }
+
+  // Initialize no-op flag
+  std::optional<TensorWrapper> noop_flag_cpp;
+  if (noop_flag.has_value()) {
+    noop_flag_cpp = makeTransformerEngineTensor(*noop_flag);
+  }
+
+  // Perform quantization
+  quant_func(quantizer, input_contiguous, output_py, noop_flag);
+
+  return output_py;
+}
+
+
 py::object create_empty_quantized_tensor(py::handle quantizer, const std::vector<size_t> &shape,
                                          at::ScalarType dtype, at::Device device, bool pin_memory) {
   auto quantizer_cpp = convert_quantizer(quantizer);
