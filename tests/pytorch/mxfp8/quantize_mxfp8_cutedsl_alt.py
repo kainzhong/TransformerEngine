@@ -35,7 +35,7 @@ def _detect_cute_dsl_arch() -> str:
         return "sm_100a"
     # Map known Blackwell capabilities to their CuTeDSL arch-specific targets.
     # Fall back to the plain (non-"a") target if the arch-specific one is unknown.
-    return f"sm_{major}{minor}a"
+    return f"sm_{major}{minor}"
 
 os.environ.setdefault("CUTE_DSL_ARCH", _detect_cute_dsl_arch())
 
@@ -1976,12 +1976,14 @@ class MXFP8QuantizeSmemKernel:
 # Compilation cache
 # ---------------------------------------------------------------------------
 _compile_cache_tvm_ffi: dict = {}
+_compile_cache: dict = {}
 
-def _get_compiled_kernel_tvm_ffi(cfg):
+def _get_compiled_kernel(cfg, tvm_ffi=True):
     key = (cfg.DTYPE, cfg.FP8_DTYPE, cfg.ROWWISE, cfg.COLWISE,
            cfg.WITH_GEMM_SWIZZLED_SCALES, cfg.WITH_AMAX, cfg.ACTIVATION,
-           cfg.WITH_DBIAS, "tvm_ffi")
-    if key not in _compile_cache_tvm_ffi:
+           cfg.WITH_DBIAS, "tvm_ffi" if tvm_ffi else "direct")
+    cache = _compile_cache_tvm_ffi if tvm_ffi else _compile_cache
+    if key not in cache:
         kernel_obj = MXFP8QuantizeSmemKernel(cfg)
         # Sym dims. Reuse the SAME sym_int across fakes that share a logical
         # axis — tvm-ffi unifies dims by sym identity, so reusing M lets it
@@ -2009,19 +2011,31 @@ def _get_compiled_kernel_tvm_ffi(cfg):
         scale_col_fake   = cute.runtime.make_fake_compact_tensor(cute.Uint8, (SCALED_M_COL, N), **kw_rm16) if cfg.COLWISE else dummy_cute_uint8
         ws_fake_ptr      = cute.runtime.make_fake_compact_tensor(Float32,    (WS_M, N),         **kw_rm4) if cfg.WITH_DBIAS else dummy_cute_float32
         single_fake_ptr  = dummy_cute_float32
-        compiled = cute.compile[(GPUArch(os.environ["CUTE_DSL_ARCH"]),)](
-            kernel_obj,
-            in_fake_ptr,                       # mX
-            in_fake_ptr,                       # mActIn (alias of mX unless IS_DACT)
-            out_row_fake_ptr,   scale_row_fake,   # mO_row, mS_row
-            out_col_fake_ptr,   scale_col_fake,   # mO_col, mS_col
-            single_fake_ptr,                   # mNoop
-            single_fake_ptr,                   # mAmax
-            ws_fake_ptr,                       # mDbias
-            options="--enable-tvm-ffi"
-        )
-        _compile_cache_tvm_ffi[key] = compiled
-    return _compile_cache_tvm_ffi[key]
+        if tvm_ffi:
+            compiled = cute.compile[(GPUArch(os.environ["CUTE_DSL_ARCH"]),)](
+                kernel_obj,
+                in_fake_ptr,                       # mX
+                in_fake_ptr,                       # mActIn (alias of mX unless IS_DACT)
+                out_row_fake_ptr,   scale_row_fake,   # mO_row, mS_row
+                out_col_fake_ptr,   scale_col_fake,   # mO_col, mS_col
+                single_fake_ptr,                   # mNoop
+                single_fake_ptr,                   # mAmax
+                ws_fake_ptr,                       # mDbias
+                options="--enable-tvm-ffi"
+            )
+        else:
+            compiled = cute.compile[(GPUArch(os.environ["CUTE_DSL_ARCH"]),)](
+                kernel_obj,
+                in_fake_ptr,                       # mX
+                in_fake_ptr,                       # mActIn (alias of mX unless IS_DACT)
+                out_row_fake_ptr,   scale_row_fake,   # mO_row, mS_row
+                out_col_fake_ptr,   scale_col_fake,   # mO_col, mS_col
+                single_fake_ptr,                   # mNoop
+                single_fake_ptr,                   # mAmax
+                ws_fake_ptr,                       # mDbias
+            )
+        cache[key] = compiled
+    return cache[key]
 
 
 # ---------------------------------------------------------------------------
@@ -2197,7 +2211,8 @@ def quantize_mxfp8_cutedsl(
                                with_gemm_swizzled_scales=with_gemm_swizzled_scales,
                                with_amax=with_amax, activation=activation,
                                with_dbias=compute_dbias, is_dact=is_dact)
-    compiled = _get_compiled_kernel_tvm_ffi(cfg)
+    # compiled = _get_compiled_kernel_tvm_ffi(cfg)
+    compiled = _get_compiled_kernel(cfg, True)
     # nvtx.range_pop()  # dsl.cache_lookup
     # t1 = time.perf_counter_ns()
     # timing_func("compile_kernel", (t1 - t0) / 1e6)
