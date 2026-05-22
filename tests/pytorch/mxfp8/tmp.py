@@ -29,14 +29,15 @@ class DoNothingKernel:
     def __call__(self):
         pass
 
-compiled = cute.compile(DoNothingKernel())
+compiled = cute.compile(DoNothingKernel(), options="--enable-tvm-ffi")
 
 
 def warmup_cutedsl(x, warmup):
     for _ in range(warmup):
+        out = tex.quantize_with_func(x, quantizer, None, None, None)
         quantize_mxfp8_cutedsl(
             x=x,
-            quantized_output=tex.quantize_with_func(x, quantizer, None, None, None),
+            quantized_output=out,
             rowwise=quantizer.rowwise_usage,
             colwise=quantizer.columnwise_usage,
             fp8_dtype="e4m3" if quantizer.dtype == tex.DType.kFloat8E4M3 else "e5m2",
@@ -54,9 +55,10 @@ def measure_cutedsl(x, iters, batches):
     for _ in range(batches):
         t0 = time.perf_counter_ns()
         for i in range(iters):
+            out = tex.quantize_with_func(x, quantizer, None, None, None)
             quantize_mxfp8_cutedsl(
                 x=x,
-                quantized_output=tex.quantize_with_func(x, quantizer, None, None, None),
+                quantized_output=out,
                 rowwise=quantizer.rowwise_usage,
                 colwise=quantizer.columnwise_usage,
                 fp8_dtype="e4m3" if quantizer.dtype == tex.DType.kFloat8E4M3 else "e5m2",
@@ -66,6 +68,33 @@ def measure_cutedsl(x, iters, batches):
                 act_input=None,
                 compute_dbias=False,
                 is_dact=False,
+            )
+        t1 = time.perf_counter_ns()
+        torch.cuda.synchronize()
+        per_iter_us.append((t1 - t0) / 1e3 / iters)
+    avg_us = sum(per_iter_us) / len(per_iter_us)
+    print(f"[CuTeDSL] Time: {avg_us:.3f} us")
+    return avg_us
+
+def measure_cutedsl_do_nothing(x, iters, batches):
+    per_iter_us = []
+    for _ in range(batches):
+        t0 = time.perf_counter_ns()
+        for i in range(iters):
+            out = tex.quantize_with_func(x, quantizer, None, None, None)
+            quantize_mxfp8_cutedsl(
+                x=x,
+                quantized_output=out,
+                rowwise=quantizer.rowwise_usage,
+                colwise=quantizer.columnwise_usage,
+                fp8_dtype="e4m3" if quantizer.dtype == tex.DType.kFloat8E4M3 else "e5m2",
+                with_gemm_swizzled_scales=quantizer.optimize_for_gemm,
+                with_amax=False,
+                activation=None,
+                act_input=None,
+                compute_dbias=False,
+                is_dact=False,
+                do_nothing=True
             )
         t1 = time.perf_counter_ns()
         torch.cuda.synchronize()
@@ -125,4 +154,5 @@ if __name__ == "__main__":
     measure_baseline(x, iters, batches)
     measure_cpp(x, iters, batches)
     measure_cutedsl(x, iters, batches)
+    measure_cutedsl_do_nothing(x, iters, batches)
 
