@@ -130,23 +130,6 @@ def timing_func(label, iter_ms):
     if timing_count_dict[label] > skip_calls:
         timing_dict[label] = timing_dict.get(label, 0.0) + iter_ms
 
-def wrapper(quantizer, x, out, noop_flag):
-    quantize_mxfp8_cutedsl(
-        x=x,
-        quantized_output=out,
-        rowwise=quantizer.rowwise_usage,
-        colwise=quantizer.columnwise_usage,
-        fp8_dtype="e4m3" if quantizer.dtype == tex.DType.kFloat8E4M3 else "e5m2",
-        with_gemm_swizzled_scales=quantizer.optimize_for_gemm,
-        with_amax=False,
-        activation=None,
-        act_input=None,
-        compute_dbias=False,
-        is_dact=False,
-        timing_func=timing_func
-    )
-
-
 def make_dsl_fn(combo, x, act_in, rowwise, colwise,
                 fp8_dtype="e4m3", swizzle=False, with_amax=False):
     """Return a 0-arg callable that invokes the CuTeDSL kernel for `combo`."""
@@ -159,8 +142,20 @@ def make_dsl_fn(combo, x, act_in, rowwise, colwise,
     quantizer.internal = True
     if swizzle:
         quantizer.optimize_for_gemm = True
-    return lambda: tex.quantize_with_func(x, quantizer, None, None, wrapper)
-
+    return lambda: quantize_mxfp8_cutedsl(
+            x=x,
+            quantized_output=tex.quantize_with_func(x, quantizer, None, None, None),
+            rowwise=quantizer.rowwise_usage,
+            colwise=quantizer.columnwise_usage,
+            fp8_dtype="e4m3" if quantizer.dtype == tex.DType.kFloat8E4M3 else "e5m2",
+            with_gemm_swizzled_scales=quantizer.optimize_for_gemm,
+            with_amax=False,
+            activation=None,
+            act_input=None,
+            compute_dbias=False,
+            is_dact=False,
+            timing_func=timing_func
+        )
 
 # Module-level L2 evict buffer. 256 MB f32 (covers B200's ~60 MB L2 with headroom).
 # Allocated lazily, reused across calls to avoid alloc churn between bench runs.
