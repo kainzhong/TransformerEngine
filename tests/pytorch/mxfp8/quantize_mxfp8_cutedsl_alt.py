@@ -40,7 +40,7 @@ def _detect_cute_dsl_arch() -> str:
 os.environ.setdefault("CUTE_DSL_ARCH", _detect_cute_dsl_arch())
 
 from types import SimpleNamespace
-from typing import Type
+from typing import Optional, Type
 
 import cuda.bindings.driver as cuda
 import torch
@@ -644,11 +644,11 @@ class MXFP8QuantizeSmemKernel:
         self,
         mX: cute.Tensor, # Input tensor to quantize
         mActIn: cute.Tensor, # Forward activation output, only used in IS_DACT path
-        mO_row: cute.Tensor, mS_row: cute.Tensor, # Rowwise output and scale tensors
-        mO_col: cute.Tensor, mS_col: cute.Tensor, # Colwise output and scale tensors
+        mO_row: Optional[cute.Tensor], mS_row: Optional[cute.Tensor], # Rowwise output and scale tensors
+        mO_col: Optional[cute.Tensor], mS_col: Optional[cute.Tensor], # Colwise output and scale tensors
         mNoop: cute.Tensor, # Skip flag — if *noop == 1.0, kernel exits immediately
         mAmax: cute.Tensor, # Global amax accumulator, only used in WITH_AMAX path
-        mDbias: cute.Tensor, # Per-CTA-row partial dbias sums which is reduced down to (N,) by a separate kernel, only used in WITH_DBIAS path
+        mDbias: Optional[cute.Tensor], # Per-CTA-row partial dbias sums which is reduced down to (N,) by a separate kernel, only used in WITH_DBIAS path
     ):
         M = mX.shape[0]
         N = mX.shape[1]
@@ -2022,11 +2022,11 @@ def _get_compiled_kernel(cfg, tvm_ffi=True):
         kw_rm4 = dict(stride_order=(1, 0),
                       memspace=cute.AddressSpace.gmem, assumed_align=4)
         in_fake_ptr      = cute.runtime.make_fake_compact_tensor(cfg.DTYPE,  (M, N),            **kw_rm16)
-        out_row_fake_ptr    = cute.runtime.make_fake_compact_tensor(cute.Uint8, (M, N),            **kw_rm16) if cfg.ROWWISE else dummy_cute_uint8
-        out_col_fake_ptr   = cute.runtime.make_fake_compact_tensor(cute.Uint8, (M, N),            **kw_rm16) if cfg.COLWISE else dummy_cute_uint8
-        scale_row_fake   = cute.runtime.make_fake_compact_tensor(cute.Uint8, (M, SCALED_N_ROW), **kw_rm16) if cfg.ROWWISE else dummy_cute_uint8
-        scale_col_fake   = cute.runtime.make_fake_compact_tensor(cute.Uint8, (SCALED_M_COL, N), **kw_rm16) if cfg.COLWISE else dummy_cute_uint8
-        ws_fake_ptr      = cute.runtime.make_fake_compact_tensor(Float32,    (WS_M, N),         **kw_rm4) if cfg.WITH_DBIAS else dummy_cute_float32
+        out_row_fake_ptr    = cute.runtime.make_fake_compact_tensor(cute.Uint8, (M, N),            **kw_rm16) if cfg.ROWWISE else None
+        out_col_fake_ptr   = cute.runtime.make_fake_compact_tensor(cute.Uint8, (M, N),            **kw_rm16) if cfg.COLWISE else None
+        scale_row_fake   = cute.runtime.make_fake_compact_tensor(cute.Uint8, (M, SCALED_N_ROW), **kw_rm16) if cfg.ROWWISE else None
+        scale_col_fake   = cute.runtime.make_fake_compact_tensor(cute.Uint8, (SCALED_M_COL, N), **kw_rm16) if cfg.COLWISE else None
+        ws_fake_ptr      = cute.runtime.make_fake_compact_tensor(Float32,    (WS_M, N),         **kw_rm4) if cfg.WITH_DBIAS else None
         single_fake_ptr  = dummy_cute_float32
         if tvm_ffi:
             compiled = cute.compile(
@@ -2212,10 +2212,10 @@ def quantize_mxfp8_cutedsl(
     # out_row_scale = output_placeholder._rowwise_scale_inv if rowwise else dummy_uint8
     # out_col_data = output_placeholder._columnwise_data if colwise else dummy_uint8
     # out_col_scale = output_placeholder._columnwise_scale_inv if colwise else dummy_uint8
-    out_row_data  = quantized_output._rowwise_data  if rowwise else dummy_uint8
-    out_row_scale = quantized_output._rowwise_scale_inv if rowwise else dummy_uint8
-    out_col_data  = quantized_output._colwise_data  if colwise else dummy_uint8
-    out_col_scale = quantized_output._colwise_scale_inv if colwise else dummy_uint8
+    out_row_data  = quantized_output._rowwise_data  if rowwise else None
+    out_row_scale = quantized_output._rowwise_scale_inv if rowwise else None
+    out_col_data  = quantized_output._colwise_data  if colwise else None
+    out_col_scale = quantized_output._colwise_scale_inv if colwise else None
     # nvtx.range_pop()  # dsl.alloc
     # t1 = time.perf_counter_ns()
     # timing_func("allocate", (t1 - t0) / 1e6)
@@ -2245,7 +2245,7 @@ def quantize_mxfp8_cutedsl(
     else:
         # Fake declares (WS_M, N) — any positive WS_M is OK. Use a 1-row
         # dummy; the kernel never touches it when cfg.WITH_DBIAS is False.
-        dbias_workspace = dummy_float32
+        dbias_workspace = None
     # nvtx.range_pop()  # dsl.dbias_workspace
     # t1 = time.perf_counter_ns()
     # timing_func("dbias_workspace", (t1 - t0) / 1e6)
