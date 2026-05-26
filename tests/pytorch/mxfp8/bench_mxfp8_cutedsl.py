@@ -154,7 +154,6 @@ def make_dsl_fn(combo, x, act_in, rowwise, colwise,
             act_input=None,
             compute_dbias=False,
             is_dact=False,
-            timing_func=timing_func
         )
 
 # Module-level L2 evict buffer. 256 MB f32 (covers B200's ~60 MB L2 with headroom).

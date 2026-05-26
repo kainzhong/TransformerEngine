@@ -2040,7 +2040,7 @@ def _get_compiled_kernel(cfg, tvm_ffi=True):
                 options="--enable-tvm-ffi"
             )
         else:
-            compiled = cute.compile[(GPUArch(os.environ["CUTE_DSL_ARCH"]),)](
+            compiled = cute.compile(
                 kernel_obj,
                 in_fake_ptr,                       # mX
                 in_fake_ptr,                       # mActIn (alias of mX unless IS_DACT)

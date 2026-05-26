@@ -91,6 +91,10 @@ py::object quantize_with_func(const at::Tensor &tensor, py::handle quantizer, co
     noop_flag_cpp = makeTransformerEngineTensor(*noop_flag);
   }
 
+  if (quant_func.is_none()){
+    return output_py;
+  }
+
   // Perform quantization
   quant_func(quantizer, input_contiguous, output_py, noop_flag);
 
