@@ -651,118 +651,118 @@ class MXFP8QuantizeSmemKernel:
         mDbias: cute.Tensor, # Per-CTA-row partial dbias sums which is reduced down to (N,) by a separate kernel, only used in WITH_DBIAS path
     ):
         M = mX.shape[0]
-        # N = mX.shape[1]
-        # cfg = self.cfg
-        # max_norm_rcp = cfg.MAX_NORM_RCP
-        # num_scale_cols = N // SCALE_DIM
-        # num_scale_rows = M // SCALE_DIM
+        N = mX.shape[1]
+        cfg = self.cfg
+        max_norm_rcp = cfg.MAX_NORM_RCP
+        num_scale_cols = N // SCALE_DIM
+        num_scale_rows = M // SCALE_DIM
+        
+        # Rewrap mS_row / mS_col with the GEMM-swizzled layout when requested.
+        # Wrapper passes in a tensor with the compact (M, N/32):(N/32, 1) layout
+        # (built from a compact fake-ptr at compile time), and we re-view the
+        # underlying buffer here so the per-block scale stores below land at the
+        # cuBLAS-swizzled byte offsets.
+        # See https://docs.nvidia.com/cuda/cublas/#d-block-scaling-factors-layout
+        # and swizzle_demo.svg for a visual of the byte permutation.
+        if cutlass.const_expr(cfg.WITH_GEMM_SWIZZLED_SCALES):
+            num_tiles_M = (cfg.M + 127) // 128
+            num_tiles_SC = (num_scale_cols + 3) // 4   # = ceil(N / 128)
+            num_tiles_SR = (num_scale_rows + 3) // 4   # = ceil(M / 128)
+            num_tiles_N = (cfg.N + 127) // 128
+            # row i = i_lo + 32 * (i_hi + 4 * tile_Y);  col j = j_lo + 4 * tile_X.
+            # Within one 128×4 tile: byte = i_lo*16 + i_hi*4 + j_lo.
+        
+            # Tile-major outer dims add (tile_Y * num_tiles_SC + tile_X) * 512.
+            # For example, if M=256, N=512, then num_scale_cols = 16, num_scale_rows = 8, and num_tiles_M=2, num_tiles_SC=4, num_tiles_SR=2, num_tiles_N=4
+            # The swizzled layout is ((32, 4, 2), (4, 4)):((16, 4, 2048), (1, 512))
+            mS_row = cute.make_tensor(
+                mS_row.iterator,
+                cute.make_layout(
+                    ((32, 4, num_tiles_M), (4, num_tiles_SC)),
+                    stride=((16, 4, num_tiles_SC * 512), (1, 512)),
+                ),
+            )
+            # Colwise: same swizzle, axes swap roles — col axis gets the 32×4
+            # inner decomp, scale-row axis gets the 4-extent dim.
+            mS_col = cute.make_tensor(
+                mS_col.iterator,
+                cute.make_layout(
+                    ((4, num_tiles_SR), (32, 4, num_tiles_N)),
+                    stride=((1, 512), (16, 4, num_tiles_SR * 512)),
+                ),
+            )
+        
+        # Divide by the STAGE tile (TILE_Y, TILE_X // SCALE_DIM), not the CTA
+        # tile. Each CTA owns NUM_TILES consecutive row-tiles; the kernel walks
+        # them by indexing GRID's row dim with `bidy * NUM_TILES + stage` (cute
+        # auto-decomposes a flat coord onto GRID's hierarchical row modes).
         #
-        # # Rewrap mS_row / mS_col with the GEMM-swizzled layout when requested.
-        # # Wrapper passes in a tensor with the compact (M, N/32):(N/32, 1) layout
-        # # (built from a compact fake-ptr at compile time), and we re-view the
-        # # underlying buffer here so the per-block scale stores below land at the
-        # # cuBLAS-swizzled byte offsets.
-        # # See https://docs.nvidia.com/cuda/cublas/#d-block-scaling-factors-layout
-        # # and swizzle_demo.svg for a visual of the byte permutation.
-        # if cutlass.const_expr(cfg.WITH_GEMM_SWIZZLED_SCALES):
-        #     num_tiles_M = (cfg.M + 127) // 128
-        #     num_tiles_SC = (num_scale_cols + 3) // 4   # = ceil(N / 128)
-        #     num_tiles_SR = (num_scale_rows + 3) // 4   # = ceil(M / 128)
-        #     num_tiles_N = (cfg.N + 127) // 128
-        #     # row i = i_lo + 32 * (i_hi + 4 * tile_Y);  col j = j_lo + 4 * tile_X.
-        #     # Within one 128×4 tile: byte = i_lo*16 + i_hi*4 + j_lo.
-        #
-        #     # Tile-major outer dims add (tile_Y * num_tiles_SC + tile_X) * 512.
-        #     # For example, if M=256, N=512, then num_scale_cols = 16, num_scale_rows = 8, and num_tiles_M=2, num_tiles_SC=4, num_tiles_SR=2, num_tiles_N=4
-        #     # The swizzled layout is ((32, 4, 2), (4, 4)):((16, 4, 2048), (1, 512))
-        #     mS_row = cute.make_tensor(
-        #         mS_row.iterator,
-        #         cute.make_layout(
-        #             ((32, 4, num_tiles_M), (4, num_tiles_SC)),
-        #             stride=((16, 4, num_tiles_SC * 512), (1, 512)),
-        #         ),
-        #     )
-        #     # Colwise: same swizzle, axes swap roles — col axis gets the 32×4
-        #     # inner decomp, scale-row axis gets the 4-extent dim.
-        #     mS_col = cute.make_tensor(
-        #         mS_col.iterator,
-        #         cute.make_layout(
-        #             ((4, num_tiles_SR), (32, 4, num_tiles_N)),
-        #             stride=((1, 512), (16, 4, num_tiles_SR * 512)),
-        #         ),
-        #     )
-        #
-        # # Divide by the STAGE tile (TILE_Y, TILE_X // SCALE_DIM), not the CTA
-        # # tile. Each CTA owns NUM_TILES consecutive row-tiles; the kernel walks
-        # # them by indexing GRID's row dim with `bidy * NUM_TILES + stage` (cute
-        # # auto-decomposes a flat coord onto GRID's hierarchical row modes).
-        # #
-        # # Critically, this is the only divide that cleanly cuts both layouts:
-        # #   - compact `(M, N/32):(N/32, 1)`  → SCALE_TILE = (32, 2):(N/32, 1)
-        # #   - swizzled `((32,4,n_M),(4,n_SC)):((16,4,n_SC·512),(1,512))`
-        # #                                    → SCALE_TILE = (32, 2):(16, 1)
-        # # The bigger (TILE_Y * NUM_TILES, ...) divide we used before tangles the
-        # # swizzle's (32, 4) row hierarchy under flatten + sub-divide chain.
-        #
-        # # Declare TMA descriptors on the host side.
-        # # make_tiled_tma_atom returns the UNTILED gmem tensor with basis strides.
-        # # Tile it inside the kernel with zipped_divide so each coord selects
-        # # one (TILE_Y, TILE_X) tile.
-        # smem_tile_layout = cute.make_ordered_layout((TILE_Y, TILE_X), order=(1, 0))
-        # cta_tiler = (TILE_Y, TILE_X)
-        #
-        # # Input: TMA G2S (bf16/fp16 → smem).
-        # op_load = cute.nvgpu.cpasync.CopyBulkTensorTileG2SOp()
-        # tma_atom, tma_src = cute.nvgpu.cpasync.make_tiled_tma_atom(
-        #     op_load, mX, smem_tile_layout, cta_tiler, num_multicast=1,
-        # )
-        #
-        # if cutlass.const_expr(cfg.IS_DACT):
-        #     # Second input descriptor — only consumed by the IS_DACT path. When
-        #     # not is_dact, the wrapper aliases this onto x's data ptr so the
-        #     # descriptor is well-formed but never read.
-        #     tma_atom_act, tma_src_act = cute.nvgpu.cpasync.make_tiled_tma_atom(
-        #         op_load, mActIn, smem_tile_layout, cta_tiler, num_multicast=1,
-        #     )
-        # else:
-        #     tma_atom_act = None
-        #     tma_src_act = None
-        #
-        # # Output: TMA S2G (uint8 smem → gmem) for both directions. Creating
-        # # both atoms unconditionally — if a direction is disabled the kernel
-        # # simply won't dispatch its copy, and the atom cost is negligible.
-        # op_store = cute.nvgpu.cpasync.CopyBulkTensorTileS2GOp()
-        # out_smem_layout = cute.make_ordered_layout((TILE_Y, TILE_X), order=(1, 0))
-        # if cutlass.const_expr(cfg.ROWWISE):
-        #     tma_atom_out_row, tma_dst_out_row = cute.nvgpu.cpasync.make_tiled_tma_atom(
-        #         op_store, mO_row, out_smem_layout, cta_tiler, num_multicast=1,
-        #     )
-        #     tma_atom_out_col = None
-        #     tma_dst_out_col = None
-        # if cutlass.const_expr(cfg.COLWISE):
-        #     tma_atom_out_col, tma_dst_out_col = cute.nvgpu.cpasync.make_tiled_tma_atom(
-        #         op_store, mO_col, out_smem_layout, cta_tiler, num_multicast=1,
-        #     )
-        #     tma_atom_out_row = None
-        #     tma_dst_out_row = None
-        #
-        # grid = [
-        #     cute.ceil_div(Int32(N), TILE_X),
-        #     cute.ceil_div(M, TILE_Y * NUM_TILES),
-        # ]
-        # block = [THREADS_PER_CHUNK,]
-        #
-        # self.kernel(
-        #     mX, mO_row, mS_row, mO_col, mS_col, mNoop, mAmax, mDbias,
-        #     max_norm_rcp, mX.element_type,
-        #     tma_atom, tma_src,
-        #     tma_atom_act, tma_src_act,
-        #     tma_atom_out_row, tma_dst_out_row,
-        #     tma_atom_out_col, tma_dst_out_col,
-        # ).launch(
-        #     grid=grid,
-        #     block=block,
-        # )
+        # Critically, this is the only divide that cleanly cuts both layouts:
+        #   - compact `(M, N/32):(N/32, 1)`  → SCALE_TILE = (32, 2):(N/32, 1)
+        #   - swizzled `((32,4,n_M),(4,n_SC)):((16,4,n_SC·512),(1,512))`
+        #                                    → SCALE_TILE = (32, 2):(16, 1)
+        # The bigger (TILE_Y * NUM_TILES, ...) divide we used before tangles the
+        # swizzle's (32, 4) row hierarchy under flatten + sub-divide chain.
+        
+        # Declare TMA descriptors on the host side.
+        # make_tiled_tma_atom returns the UNTILED gmem tensor with basis strides.
+        # Tile it inside the kernel with zipped_divide so each coord selects
+        # one (TILE_Y, TILE_X) tile.
+        smem_tile_layout = cute.make_ordered_layout((TILE_Y, TILE_X), order=(1, 0))
+        cta_tiler = (TILE_Y, TILE_X)
+        
+        # Input: TMA G2S (bf16/fp16 → smem).
+        op_load = cute.nvgpu.cpasync.CopyBulkTensorTileG2SOp()
+        tma_atom, tma_src = cute.nvgpu.cpasync.make_tiled_tma_atom(
+            op_load, mX, smem_tile_layout, cta_tiler, num_multicast=1,
+        )
+        
+        if cutlass.const_expr(cfg.IS_DACT):
+            # Second input descriptor — only consumed by the IS_DACT path. When
+            # not is_dact, the wrapper aliases this onto x's data ptr so the
+            # descriptor is well-formed but never read.
+            tma_atom_act, tma_src_act = cute.nvgpu.cpasync.make_tiled_tma_atom(
+                op_load, mActIn, smem_tile_layout, cta_tiler, num_multicast=1,
+            )
+        else:
+            tma_atom_act = None
+            tma_src_act = None
+        
+        # Output: TMA S2G (uint8 smem → gmem) for both directions. Creating
+        # both atoms unconditionally — if a direction is disabled the kernel
+        # simply won't dispatch its copy, and the atom cost is negligible.
+        op_store = cute.nvgpu.cpasync.CopyBulkTensorTileS2GOp()
+        out_smem_layout = cute.make_ordered_layout((TILE_Y, TILE_X), order=(1, 0))
+        if cutlass.const_expr(cfg.ROWWISE):
+            tma_atom_out_row, tma_dst_out_row = cute.nvgpu.cpasync.make_tiled_tma_atom(
+                op_store, mO_row, out_smem_layout, cta_tiler, num_multicast=1,
+            )
+            tma_atom_out_col = None
+            tma_dst_out_col = None
+        if cutlass.const_expr(cfg.COLWISE):
+            tma_atom_out_col, tma_dst_out_col = cute.nvgpu.cpasync.make_tiled_tma_atom(
+                op_store, mO_col, out_smem_layout, cta_tiler, num_multicast=1,
+            )
+            tma_atom_out_row = None
+            tma_dst_out_row = None
+        
+        grid = [
+            cute.ceil_div(Int32(N), TILE_X),
+            cute.ceil_div(M, TILE_Y * NUM_TILES),
+        ]
+        block = [THREADS_PER_CHUNK,]
+        
+        self.kernel(
+            mX, mO_row, mS_row, mO_col, mS_col, mNoop, mAmax, mDbias,
+            max_norm_rcp, mX.element_type,
+            tma_atom, tma_src,
+            tma_atom_act, tma_src_act,
+            tma_atom_out_row, tma_dst_out_row,
+            tma_atom_out_col, tma_dst_out_col,
+        ).launch(
+            grid=grid,
+            block=block,
+        )
 
     @cute.kernel
     def kernel(
@@ -2000,7 +2000,8 @@ def _get_compiled_kernel(cfg, tvm_ffi=True):
            cfg.WITH_DBIAS, "tvm_ffi" if tvm_ffi else "direct")
     cache = _compile_cache_tvm_ffi if tvm_ffi else _compile_cache
     if key not in cache:
-        kernel_obj = DoNothingKernel()
+        kernel_obj = MXFP8QuantizeSmemKernel(cfg)
+        # kernel_obj = DoNothingKernel()
         # Sym dims. Reuse the SAME sym_int across fakes that share a logical
         # axis — tvm-ffi unifies dims by sym identity, so reusing M lets it
         # enforce e.g. mX.shape[0] == mO_row.shape[0] == mDbias is unrelated.
