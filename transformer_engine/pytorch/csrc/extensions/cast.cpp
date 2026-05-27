@@ -11,9 +11,15 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <string>
 #include <tuple>
+#include <unordered_map>
 #include <utility>
 #include <vector>
+
+#include <tvm/ffi/container/tensor.h>
+#include <tvm/ffi/extra/module.h>
+#include <tvm/ffi/function.h>
 
 #include "../extensions.h"
 #include "common.h"
@@ -29,6 +35,77 @@ namespace {
 std::vector<size_t> get_tensor_shape(const TensorWrapper &tensor) {
   const auto &shape = tensor.shape();
   return std::vector<size_t>(shape.data, shape.data + shape.ndim);
+}
+
+// ---------------------------------------------------------------------------
+// AOT (TVM FFI) dispatch helpers — used by `quantize_with_func`.
+//
+// Python builds a per-cfg `.so` exposing `__tvm_ffi_<fn_name>` and passes us
+// the path + symbol name. We cache the loaded Module/Function so steady-state
+// calls are a hash lookup + 9-slot TensorView pack + one indirect call.
+// TE is linked against libtvm_ffi.so and libcute_dsl_runtime.so at build
+// time, so the kernel .so's DT_NEEDED entries resolve at dlopen time; users
+// building new kernel .so files do NOT need to rebuild TE.
+// ---------------------------------------------------------------------------
+
+DLDataType torch_to_dldtype(c10::ScalarType st) {
+  switch (st) {
+    case c10::ScalarType::Float:    return DLDataType{kDLFloat,  32, 1};
+    case c10::ScalarType::Half:     return DLDataType{kDLFloat,  16, 1};
+    case c10::ScalarType::BFloat16: return DLDataType{kDLBfloat, 16, 1};
+    case c10::ScalarType::Byte:     return DLDataType{kDLUInt,    8, 1};
+    case c10::ScalarType::Char:     return DLDataType{kDLInt,     8, 1};
+    case c10::ScalarType::Int:      return DLDataType{kDLInt,    32, 1};
+    case c10::ScalarType::Long:     return DLDataType{kDLInt,    64, 1};
+    default: NVTE_ERROR("unsupported scalar type for DLPack conversion");
+  }
+}
+
+DLTensor make_dltensor(const at::Tensor &t) {
+  NVTE_CHECK(t.defined(), "make_dltensor: undefined tensor");
+  DLTensor dl;
+  dl.data        = t.data_ptr();
+  dl.device      = DLDevice{kDLCUDA, static_cast<int32_t>(t.device().index())};
+  dl.ndim        = static_cast<int32_t>(t.dim());
+  dl.dtype       = torch_to_dldtype(t.scalar_type());
+  dl.shape       = const_cast<int64_t *>(t.sizes().data());
+  dl.strides     = const_cast<int64_t *>(t.strides().data());
+  dl.byte_offset = 0;
+  return dl;
+}
+
+struct AotEntry {
+  tvm::ffi::Module mod;
+  tvm::ffi::Function fn;
+};
+std::unordered_map<std::string, AotEntry> g_aot_cache;
+std::mutex g_aot_cache_mu;
+
+const AotEntry &get_or_load_aot(const std::string &fn_name, const std::string &so_path) {
+  std::lock_guard<std::mutex> lk(g_aot_cache_mu);
+  auto it = g_aot_cache.find(fn_name);
+  if (it != g_aot_cache.end()) return it->second;
+  auto mod = tvm::ffi::Module::LoadFromFile(so_path);
+  auto fn = mod->GetFunction(fn_name).value();
+  auto [ins, _] = g_aot_cache.emplace(fn_name, AotEntry{std::move(mod), std::move(fn)});
+  return ins->second;
+}
+
+// Persistent 1-element f32 device buffers for the mNoop / mAmax slots when
+// the caller doesn't supply one. The kernel never reads the dummies for the
+// v1 cfg (WITH_AMAX=false), but the AOT signature still requires a real
+// tensor in those slots. Allocated lazily on first use to keep extension
+// init free of CUDA work.
+std::once_flag g_dummy_init_flag;
+at::Tensor g_noop_dummy;   // zeros(1) → != 1.0 → kernel doesn't early-exit
+at::Tensor g_amax_dummy;   // unused content
+
+void init_dummies() {
+  std::call_once(g_dummy_init_flag, []() {
+    auto opts = at::TensorOptions().dtype(at::kFloat).device(at::kCUDA);
+    g_noop_dummy = at::zeros({1}, opts);
+    g_amax_dummy = at::zeros({1}, opts);
+  });
 }
 
 }  // namespace
@@ -65,16 +142,19 @@ py::object quantize(const at::Tensor &tensor, py::handle quantizer, const py::ob
   return output_py;
 }
 
-py::object quantize_with_func(const at::Tensor &tensor, py::handle quantizer, const py::object &output,
-                    std::optional<at::Tensor> noop_flag, const py::object &quant_func) {
-  // Convert quantizer to C++ object
+py::object quantize_with_func(const at::Tensor &tensor, py::handle quantizer,
+                              const py::object &output,
+                              std::optional<at::Tensor> noop_flag,
+                              const std::string &fn_name, const std::string &so_path,
+                              const std::vector<int> &active_slots) {
+  // Quantizer / output setup mirrors `quantize`. Python no longer hands us a
+  // callback — instead it tells us which prebuilt AOT artifact to dispatch
+  // to. The artifact's `__tvm_ffi_<fn_name>` symbol is the kernel entry.
   auto quantizer_cpp = convert_quantizer(quantizer);
 
-  // Convert input tensor to C++ object
   auto input_contiguous = tensor.contiguous();
   auto input_cpp = makeTransformerEngineTensor(input_contiguous);
 
-  // Initialize output tensor
   TensorWrapper output_cpp;
   py::object output_py;
   if (output.is_none()) {
@@ -85,19 +165,47 @@ py::object quantize_with_func(const at::Tensor &tensor, py::handle quantizer, co
     std::tie(output_cpp, output_py) = quantizer_cpp->convert_and_update_tensor(output);
   }
 
-  // Initialize no-op flag
-  std::optional<TensorWrapper> noop_flag_cpp;
-  if (noop_flag.has_value()) {
-    noop_flag_cpp = makeTransformerEngineTensor(*noop_flag);
+  init_dummies();
+  const AotEntry &entry = get_or_load_aot(fn_name, so_path);
+
+  // Logical-slot order matches the Python compile signature:
+  //   0=mX  1=mActIn  2=mO_row  3=mS_row  4=mO_col  5=mS_col
+  //   6=mNoop  7=mAmax  8=mDbias
+  // Inactive slots stay default-constructed in `args` (= TVMFFI None) and
+  // get dropped by the kernel's const-expr gating.
+  at::Tensor slot[9];
+  slot[0] = input_contiguous;
+  slot[1] = input_contiguous;  // mActIn aliased; IS_DACT path lands in v2.
+  auto attr_or_empty = [&](const char *name) -> at::Tensor {
+    py::object o = output_py.attr(name);
+    if (o.is_none()) return at::Tensor();
+    return o.cast<at::Tensor>();
+  };
+  slot[2] = attr_or_empty("_rowwise_data");
+  slot[3] = attr_or_empty("_rowwise_scale_inv");
+  slot[4] = attr_or_empty("_columnwise_data");
+  slot[5] = attr_or_empty("_columnwise_scale_inv");
+  slot[6] = noop_flag.has_value() ? *noop_flag : g_noop_dummy;
+  slot[7] = g_amax_dummy;  // mAmax slot — kernel ignores when WITH_AMAX=false.
+  // slot[8] (mDbias) — unused in v1.
+
+  // TensorView is a thin wrapper around an inline DLTensor copy. AnyView's
+  // TensorView assignment stores a pointer INTO the TensorView's internal
+  // DLTensor — so the TensorView must outlive the CallPacked. Use optional
+  // for in-place construction (TensorView has no default ctor).
+  DLTensor dl[9];
+  std::optional<tvm::ffi::TensorView> tvs[9];
+  tvm::ffi::AnyView args[9];  // default ctor → None
+  for (int s : active_slots) {
+    NVTE_CHECK(s >= 0 && s < 9, "active_slots index out of range");
+    NVTE_CHECK(slot[s].defined(), "active slot ", s, " has no tensor");
+    dl[s] = make_dltensor(slot[s]);
+    tvs[s].emplace(&dl[s]);
+    args[s] = *tvs[s];
   }
 
-  if (quant_func.is_none()){
-    return output_py;
-  }
-
-  // Perform quantization
-  quant_func(quantizer, input_contiguous, output_py, noop_flag);
-
+  tvm::ffi::Any result;
+  entry.fn.CallPacked(args, 9, &result);
   return output_py;
 }
 

@@ -1,7 +1,12 @@
-"""Benchmark CuTeDSL MXFP8 quantization vs. C++ reference.
+"""Benchmark AOT-dispatched CuTeDSL MXFP8 quantization vs. C++ reference.
 
-Produces NVTX-tagged iterations for Nsight Systems timeline profiling.
-Run directly for wall-clock timings, or via run_nsys_profile.sh for nsys capture.
+Same harness as bench_mxfp8_cutedsl.py but invokes the AOT path:
+  Python → tex.quantize_with_func → cached tvm_ffi.Function → CUDA kernel
+instead of the JIT path's per-launch Python wrapper. e2e Python overhead per
+call is the goal of the comparison.
+
+v1 limitation: only `combo='plain'` is supported (the AOT compile gates
+out activation/AMAX/DBIAS/DACT for now).
 """
 
 import argparse
@@ -16,7 +21,10 @@ import transformer_engine.pytorch as te
 import transformer_engine_torch as tex
 from transformer_engine.pytorch import MXFP8Quantizer
 
-from quantize_mxfp8_cutedsl_alt import quantize_mxfp8_cutedsl
+from quantize_mxfp8_cutedsl_alt import (
+    MXFP8QuantizeConfig, _get_aot_kernel,
+    _torch_to_cutlass_dtype, quantize_mxfp8_cutedsl_aot,
+)
 
 # Shape presets — names map to lists of (M, N) pairs.
 # All shapes are multiples of 64 (the CuTeDSL kernel's CHUNK_DIM).
@@ -132,33 +140,39 @@ def timing_func(label, iter_ms):
 
 def make_dsl_fn(combo, x, act_in, rowwise, colwise,
                 fp8_dtype="e4m3", swizzle=False, with_amax=False):
-    """Return a 0-arg callable that invokes the CuTeDSL kernel for `combo`."""
-    _, activation, compute_dbias = COMBOS[combo]
+    """Return a 0-arg callable that AOT-dispatches the CuTeDSL kernel.
+
+    v1 only supports `combo='plain'`; other combos require kernel features
+    (atomic_max, activation, dbias path) the AOT compile gates out for now.
+    """
+    if combo != "plain":
+        raise NotImplementedError(
+            f"AOT bench v1 only supports combo='plain', got {combo!r}. "
+            "Re-enable activation/AMAX/DBIAS in `_build_aot_fake_args` once "
+            "those paths trace cleanly with constexpr shapes.")
+    if swizzle:
+        raise NotImplementedError("AOT v1 does not yet handle swizzled scales")
+    if with_amax:
+        raise NotImplementedError("AOT v1 does not yet handle WITH_AMAX")
     quantizer = MXFP8Quantizer(
         fp8_dtype=_FP8_DTYPES[fp8_dtype],
         rowwise=rowwise,
         columnwise=colwise,
     )
     quantizer.internal = True
-    if swizzle:
-        quantizer.optimize_for_gemm = True
-    # quantize_with_func no longer supports the legacy "allocate-only" mode
-    # (quant_func=None) — its signature now requires AOT fn_name/so_path. For
-    # this JIT bench we just want the output buffer; use the dedicated entry.
-    return lambda: quantize_mxfp8_cutedsl(
-            x=x,
-            quantized_output=tex.create_empty_quantized_tensor(
-                quantizer, list(x.shape), x.dtype, x.device, False),
-            rowwise=quantizer.rowwise_usage,
-            colwise=quantizer.columnwise_usage,
-            fp8_dtype="e4m3" if quantizer.dtype == tex.DType.kFloat8E4M3 else "e5m2",
-            with_gemm_swizzled_scales=quantizer.optimize_for_gemm,
-            with_amax=False,
-            activation=None,
-            act_input=None,
-            compute_dbias=False,
-            is_dact=False,
-        )
+    # Pre-build the AOT artifact and capture (fn_name, so_path, active_slots)
+    # in the closure so the hot path is a single C++ call — matching the C++
+    # reference's `tex.quantize(...)` shape and stripping the Python wrapper.
+    M, N = x.shape
+    cfg = MXFP8QuantizeConfig(
+        _torch_to_cutlass_dtype[x.dtype], fp8_dtype,
+        rowwise=quantizer.rowwise_usage, colwise=quantizer.columnwise_usage,
+        with_gemm_swizzled_scales=False,
+        with_amax=False, activation=None, with_dbias=False, is_dact=False,
+    )
+    fn_name, so_path, active_slots, _ = _get_aot_kernel(cfg, M, N)
+    qwf = tex.quantize_with_func   # bind once, avoid attr lookup per call
+    return lambda: qwf(x, quantizer, None, None, fn_name, so_path, active_slots)
 
 # Module-level L2 evict buffer. 256 MB f32 (covers B200's ~60 MB L2 with headroom).
 # Allocated lazily, reused across calls to avoid alloc churn between bench runs.
@@ -218,11 +232,15 @@ def bench_once(name, fn, warmup, iters, evict_l2=False, single=False):
         t0 = time.perf_counter_ns()
         for i in range(iters):
             fn()                      # host wrapper + kernel launch
-        # NO trailing sync — pure CPU-side dispatch time.
+        # NO trailing sync — we want pure CPU-side dispatch time. The kernel
+        # queue can still be draining when t1 is taken. (Backpressure from a
+        # full CUDA launch queue can still inflate this on very large shapes.)
         t1 = time.perf_counter_ns()
         total_ms = (t1 - t0) / 1e6
         nvtx.range_pop()
-        torch.cuda.synchronize()      # drain queue outside the timed region
+        # Drain the queue OUTSIDE the timed region so subsequent benches
+        # start from a clean GPU state.
+        torch.cuda.synchronize()
         return total_ms / iters
 
     # Default (warm-cache) path — one event pair across the whole loop.

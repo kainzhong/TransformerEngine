@@ -2056,6 +2056,148 @@ def _get_compiled_kernel(cfg, tvm_ffi=True):
 
 
 # ---------------------------------------------------------------------------
+# AOT compilation (CuTe DSL → .o → .so) with TVM FFI export.
+#
+# Each (cfg, M, N) gets its own `.so` with a deterministic, hash-named
+# `__tvm_ffi_<fn_name>` symbol the C++ side can `dlsym` directly. Skipping
+# fake-tensor sym dims means the kernel specializes to literal (M, N); the
+# AOT struct collapses to `{ void* data; }` per arg.
+# ---------------------------------------------------------------------------
+import hashlib
+import pathlib
+
+AOT_CACHE_DIR = pathlib.Path.home() / ".cache" / "transformer_engine" / "cutedsl_aot"
+
+# TE itself is linked against `libtvm_ffi.so` and `libcute_dsl_runtime.so`
+# (see build_tools/pytorch.py), so once TE is imported both libs are
+# resident in the process and the AOT kernel `.so`'s DT_NEEDED entries
+# resolve at dlopen time — no LD_LIBRARY_PATH or ctypes preload needed.
+
+# cfg_key -> (fn_name, so_path, active_slots)
+_aot_cache: dict = {}
+
+# 9 logical slot positions in the kernel signature, in compile order.
+# active_slots[i] = the logical slot index of TVM FFI arg position i.
+_SLOT_MX, _SLOT_MACTIN, _SLOT_MO_ROW, _SLOT_MS_ROW, \
+_SLOT_MO_COL, _SLOT_MS_COL, _SLOT_MNOOP, _SLOT_MAMAX, _SLOT_MDBIAS = range(9)
+
+
+def _cfg_to_fn_name(cfg, M, N) -> str:
+    """Deterministic name from cfg + shape. Used as both the on-disk filename
+    stem and the exported TVM FFI symbol suffix (`__tvm_ffi_<fn_name>`)."""
+    key = (cfg.DTYPE.__name__, cfg.FP8_DTYPE,
+           int(cfg.ROWWISE), int(cfg.COLWISE),
+           int(cfg.WITH_GEMM_SWIZZLED_SCALES), int(cfg.WITH_AMAX),
+           cfg.ACTIVATION or "none",
+           int(cfg.WITH_DBIAS), int(cfg.IS_DACT),
+           M, N)
+    h = hashlib.sha1(repr(key).encode()).hexdigest()[:16]
+    return f"mxfp8_{h}"
+
+
+def _build_aot_fake_args(cfg, M, N):
+    """Build the 9-arg tuple for `cute.compile`. Active slots get a fake-tensor
+    with literal (constexpr) shape; inactive slots are None and drop out of
+    the AOT wrapper signature entirely.
+
+    Returns `(args, active_slots)` where `active_slots` is the ordered list of
+    logical slot indices that map to TVM FFI arg positions [0, len-1]."""
+    # 2D row-major: stride_order=(1, 0). 1D: stride_order=(0,).
+    kw_rm16_2d = dict(stride_order=(1, 0),
+                      memspace=cute.AddressSpace.gmem, assumed_align=16)
+    kw_rm4_2d = dict(stride_order=(1, 0),
+                     memspace=cute.AddressSpace.gmem, assumed_align=4)
+    kw_rm4_1d = dict(stride_order=(0,),
+                     memspace=cute.AddressSpace.gmem, assumed_align=4)
+
+    def fake(dtype, shape, kw):
+        return cute.runtime.make_fake_compact_tensor(dtype, shape, **kw)
+
+    in_fake = fake(cfg.DTYPE, (M, N), kw_rm16_2d)
+    single_fake = fake(Float32, (1,), kw_rm4_1d)
+
+    args = [None] * 9
+    active_slots = []
+
+    # MXFP8 scale tensors are over-allocated by TE to the cuBLAS-padded shape
+    # `(ceil(M/128)*128, ceil(N/128)*4)` regardless of `_with_gemm_swizzled_scales`.
+    # AOT compile-time shape must match the runtime tensor shape (TVM FFI checks
+    # this), so we use the same padded shape here.
+    def _padded_scale_row_shape(M, N):
+        return (((M + 127) // 128) * 128, ((N + 127) // 128) * 4)
+    def _padded_scale_col_shape(M, N):
+        return (((M + 127) // 128) * 4, ((N + 127) // 128) * 128)
+
+    args[_SLOT_MX]      = in_fake; active_slots.append(_SLOT_MX)
+    args[_SLOT_MACTIN]  = in_fake; active_slots.append(_SLOT_MACTIN)
+    if cfg.ROWWISE:
+        args[_SLOT_MO_ROW] = fake(cute.Uint8, (M, N), kw_rm16_2d)
+        args[_SLOT_MS_ROW] = fake(cute.Uint8, _padded_scale_row_shape(M, N), kw_rm16_2d)
+        active_slots += [_SLOT_MO_ROW, _SLOT_MS_ROW]
+    if cfg.COLWISE:
+        args[_SLOT_MO_COL] = fake(cute.Uint8, (M, N), kw_rm16_2d)
+        args[_SLOT_MS_COL] = fake(cute.Uint8, _padded_scale_col_shape(M, N), kw_rm16_2d)
+        active_slots += [_SLOT_MO_COL, _SLOT_MS_COL]
+    args[_SLOT_MNOOP] = single_fake; active_slots.append(_SLOT_MNOOP)
+    args[_SLOT_MAMAX] = single_fake; active_slots.append(_SLOT_MAMAX)
+    if cfg.WITH_DBIAS:
+        WS_M = (M + TILE_Y * NUM_TILES - 1) // (TILE_Y * NUM_TILES)
+        args[_SLOT_MDBIAS] = fake(Float32, (WS_M, N), kw_rm4_2d)
+        active_slots.append(_SLOT_MDBIAS)
+
+    return tuple(args), active_slots
+
+
+def _build_aot(cfg, M, N):
+    """Compile + export + link the cfg's kernel into a cached `.so`. Returns
+    `(fn_name, so_path, active_slots)`. On-disk artifacts are reused across
+    runs — the `.so` is rebuilt only if it isn't already present."""
+    fn_name = _cfg_to_fn_name(cfg, M, N)
+    AOT_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    so_path = AOT_CACHE_DIR / f"lib{fn_name}.so"
+    slots_path = AOT_CACHE_DIR / f"{fn_name}.slots"
+    args, active_slots = _build_aot_fake_args(cfg, M, N)
+    if so_path.exists() and slots_path.exists():
+        # Trust the cached active_slots match — they're a function of cfg alone.
+        return fn_name, str(so_path), active_slots
+
+    kernel_obj = MXFP8QuantizeSmemKernel(cfg)
+    compiled = cute.compile(kernel_obj, *args, options="--enable-tvm-ffi")
+    o_path = AOT_CACHE_DIR / f"{fn_name}.o"
+    compiled.export_to_c(str(o_path), function_name=fn_name)
+
+    runtime_libs = cute.runtime.find_runtime_libraries(enable_tvm_ffi=True)
+    cmd = ["gcc", "-shared", "-fPIC", "-O2", "-o", str(so_path), str(o_path),
+           *runtime_libs]
+    subprocess.run(cmd, check=True)
+    slots_path.write_text(",".join(str(s) for s in active_slots))
+    return fn_name, str(so_path), active_slots
+
+
+def _get_aot_kernel(cfg, M, N):
+    """Process-local AOT cache. Wraps `_build_aot` with an in-memory dict so
+    repeated calls within a process skip the file-system check entirely.
+    Returns `(fn_name, so_path, active_slots, fn)` where `fn` is the loaded
+    `tvm_ffi.Function`, kept resident to amortize the load cost."""
+    cfg_key = (cfg.DTYPE, cfg.FP8_DTYPE, cfg.ROWWISE, cfg.COLWISE,
+               cfg.WITH_GEMM_SWIZZLED_SCALES, cfg.WITH_AMAX,
+               cfg.ACTIVATION, cfg.WITH_DBIAS, cfg.IS_DACT, M, N)
+    hit = _aot_cache.get(cfg_key)
+    if hit is not None:
+        return hit
+    fn_name, so_path, active_slots = _build_aot(cfg, M, N)
+    # The Python sibling loads via tvm_ffi for parity testing; C++ does the
+    # equivalent dlopen + dlsym on its own cache. Module handle is held
+    # implicitly via the Function ref.
+    import tvm_ffi
+    mod = tvm_ffi.load_module(so_path)
+    fn = getattr(mod, fn_name)
+    out = (fn_name, so_path, active_slots, fn)
+    _aot_cache[cfg_key] = out
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 _torch_to_cutlass_dtype = {
@@ -2281,3 +2423,34 @@ def quantize_mxfp8_cutedsl(
     # t_end = time.perf_counter_ns()
     # timing_func("total_time", (t_end - t_start) / 1e6)
     return result
+
+
+def quantize_mxfp8_cutedsl_aot(
+    x: torch.Tensor,
+    quantizer,
+    noop: torch.Tensor = None,
+):
+    """AOT-dispatched sibling of `quantize_mxfp8_cutedsl`. v1 supports the
+    minimum-traceable cfg set (rowwise/colwise, e4m3/e5m2, bf16/fp16/fp32 in;
+    no activation/AMAX/DBIAS/DACT/swizzle).
+
+    Looks up (or builds) the AOT artifact for this (cfg, M, N) and dispatches
+    via `tex.quantize_with_func`, which dlopens the `.so` once per process and
+    calls the cached `tvm_ffi.Function` from C++ — no Python on the hot path.
+    Returns the freshly-created `MXFP8TensorStorage` produced by the quantizer."""
+    M, N = x.shape
+    cutlass_dtype = _torch_to_cutlass_dtype[x.dtype]
+    fp8_dtype = "e4m3" if quantizer.dtype == tex.DType.kFloat8E4M3 else "e5m2"
+
+    cfg = MXFP8QuantizeConfig(
+        cutlass_dtype, fp8_dtype,
+        rowwise=quantizer.rowwise_usage, colwise=quantizer.columnwise_usage,
+        with_gemm_swizzled_scales=False,
+        with_amax=False, activation=None, with_dbias=False, is_dact=False,
+    )
+    fn_name, so_path, active_slots, _ = _get_aot_kernel(cfg, M, N)
+
+    return tex.quantize_with_func(
+        tensor=x, quantizer=quantizer, output=None, noop=noop,
+        fn_name=fn_name, so_path=so_path, active_slots=active_slots,
+    )

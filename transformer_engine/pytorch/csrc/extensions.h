@@ -329,8 +329,11 @@ py::object create_empty_quantized_tensor(py::handle quantizer, const std::vector
 py::object quantize(const at::Tensor &tensor, py::handle quantizer, const py::object &output,
                     std::optional<at::Tensor> noop_flag);
 
-py::object quantize_with_func(const at::Tensor &tensor, py::handle quantizer, const py::object &output,
-                    std::optional<at::Tensor> noop_flag, const py::object &quant_func);
+py::object quantize_with_func(const at::Tensor &tensor, py::handle quantizer,
+                              const py::object &output,
+                              std::optional<at::Tensor> noop_flag,
+                              const std::string &fn_name, const std::string &so_path,
+                              const std::vector<int> &active_slots);
 
 py::object dequantize(const py::handle &input, DType otype);
 

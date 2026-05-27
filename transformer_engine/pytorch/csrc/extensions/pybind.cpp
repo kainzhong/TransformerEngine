@@ -139,7 +139,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("output") = py::none(), py::arg("noop") = py::none());
   m.def("quantize_with_func", transformer_engine::pytorch::quantize_with_func,
         py::arg("tensor"), py::arg("quantizer"), py::arg("output") = py::none(),
-        py::arg("noop") = py::none(), py::arg("quant_func"));
+        py::arg("noop") = py::none(),
+        py::arg("fn_name"), py::arg("so_path"), py::arg("active_slots"));
   m.def("dequantize", &transformer_engine::pytorch::dequantize, "Dequantize", py::arg("input"),
         py::arg("otype"));
   m.def("create_empty_quantized_tensor",
