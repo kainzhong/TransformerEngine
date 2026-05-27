@@ -74,6 +74,49 @@ DLTensor make_dltensor(const at::Tensor &t) {
   return dl;
 }
 
+DLDataType nvte_to_dldtype(NVTEDType dt) {
+  switch (dt) {
+    case kNVTEFloat32:    return DLDataType{kDLFloat,  32, 1};
+    case kNVTEFloat16:    return DLDataType{kDLFloat,  16, 1};
+    case kNVTEBFloat16:   return DLDataType{kDLBfloat, 16, 1};
+    case kNVTEByte:       return DLDataType{kDLUInt,    8, 1};
+    case kNVTEInt32:      return DLDataType{kDLInt,    32, 1};
+    case kNVTEInt64:      return DLDataType{kDLInt,    64, 1};
+    case kNVTEFloat8E4M3: return DLDataType{kDLUInt,    8, 1};  // FP8 → 1B uint
+    case kNVTEFloat8E5M2: return DLDataType{kDLUInt,    8, 1};
+    case kNVTEFloat8E8M0: return DLDataType{kDLUInt,    8, 1};
+    default:
+      NVTE_ERROR("unsupported NVTEDType for DLPack conversion: ",
+                 static_cast<int>(dt));
+  }
+}
+
+// Fill `dl` from an NVTE param + caller-provided storage for shape/strides.
+// TE tensors are always row-major contiguous; we synthesize strides from the
+// shape. Avoids the 4× py::object.attr(...).cast<at::Tensor>() round-trips
+// the previous implementation paid to re-extract tensors that `create_tensor`
+// already built in C++.
+//
+// `shape_buf` / `stride_buf` must outlive any TensorView referring to `dl`.
+void fill_dltensor_from_nvte(DLTensor &dl, const NVTEBasicTensor &nt,
+                             int64_t *shape_buf, int64_t *stride_buf,
+                             int32_t device_index) {
+  const int ndim = static_cast<int>(nt.shape.ndim);
+  int64_t stride = 1;
+  for (int i = ndim - 1; i >= 0; --i) {
+    shape_buf[i] = static_cast<int64_t>(nt.shape.data[i]);
+    stride_buf[i] = stride;
+    stride *= shape_buf[i];
+  }
+  dl.data        = nt.data_ptr;
+  dl.device      = DLDevice{kDLCUDA, device_index};
+  dl.ndim        = ndim;
+  dl.dtype       = nvte_to_dldtype(nt.dtype);
+  dl.shape       = shape_buf;
+  dl.strides     = stride_buf;
+  dl.byte_offset = 0;
+}
+
 struct AotEntry {
   tvm::ffi::Module mod;
   tvm::ffi::Function fn;
@@ -173,36 +216,49 @@ py::object quantize_with_func(const at::Tensor &tensor, py::handle quantizer,
   //   6=mNoop  7=mAmax  8=mDbias
   // Inactive slots stay default-constructed in `args` (= TVMFFI None) and
   // get dropped by the kernel's const-expr gating.
-  at::Tensor slot[9];
-  slot[0] = input_contiguous;
-  slot[1] = input_contiguous;  // mActIn aliased; IS_DACT path lands in v2.
-  auto attr_or_empty = [&](const char *name) -> at::Tensor {
-    py::object o = output_py.attr(name);
-    if (o.is_none()) return at::Tensor();
-    return o.cast<at::Tensor>();
-  };
-  slot[2] = attr_or_empty("_rowwise_data");
-  slot[3] = attr_or_empty("_rowwise_scale_inv");
-  slot[4] = attr_or_empty("_columnwise_data");
-  slot[5] = attr_or_empty("_columnwise_scale_inv");
-  slot[6] = noop_flag.has_value() ? *noop_flag : g_noop_dummy;
-  slot[7] = g_amax_dummy;  // mAmax slot — kernel ignores when WITH_AMAX=false.
-  // slot[8] (mDbias) — unused in v1.
-
-  // TensorView is a thin wrapper around an inline DLTensor copy. AnyView's
-  // TensorView assignment stores a pointer INTO the TensorView's internal
-  // DLTensor — so the TensorView must outlive the CallPacked. Use optional
-  // for in-place construction (TensorView has no default ctor).
+  //
+  // Output slots (2-5) come from output_cpp's NVTE accessors directly —
+  // `create_tensor` already built them in C++; pulling them via
+  // `output_py.attr(...).cast<at::Tensor>()` would round-trip through
+  // Python for tensors we already have in hand.
   DLTensor dl[9];
+  int64_t shape_storage[9][8];   // up to 8-D per slot, sized for headroom
+  int64_t stride_storage[9][8];
   std::optional<tvm::ffi::TensorView> tvs[9];
   tvm::ffi::AnyView args[9];  // default ctor → None
-  for (int s : active_slots) {
-    NVTE_CHECK(s >= 0 && s < 9, "active_slots index out of range");
-    NVTE_CHECK(slot[s].defined(), "active slot ", s, " has no tensor");
-    dl[s] = make_dltensor(slot[s]);
+
+  const int32_t dev_idx = static_cast<int32_t>(input_contiguous.device().index());
+
+  auto set_slot_at = [&](int s, const at::Tensor &t) {
+    dl[s] = make_dltensor(t);
     tvs[s].emplace(&dl[s]);
     args[s] = *tvs[s];
+  };
+  auto set_slot_nvte = [&](int s, const NVTEBasicTensor &nt) {
+    fill_dltensor_from_nvte(dl[s], nt, shape_storage[s], stride_storage[s], dev_idx);
+    tvs[s].emplace(&dl[s]);
+    args[s] = *tvs[s];
+  };
+
+  // Build a slot mask so we know which logical positions Python expects
+  // to be filled (the AOT signature was compiled with `None` for inactive
+  // slots; filling one that should be None — or vice versa — fails at the
+  // wrapper's runtime check).
+  bool want[9] = {};
+  for (int s : active_slots) {
+    NVTE_CHECK(s >= 0 && s < 9, "active_slots index out of range");
+    want[s] = true;
   }
+
+  if (want[0]) set_slot_at(0, input_contiguous);
+  if (want[1]) set_slot_at(1, input_contiguous);  // mActIn aliased
+  if (want[2]) set_slot_nvte(2, output_cpp.get_rowwise_data());
+  if (want[3]) set_slot_nvte(3, output_cpp.get_rowwise_scale_inv());
+  if (want[4]) set_slot_nvte(4, output_cpp.get_columnwise_data());
+  if (want[5]) set_slot_nvte(5, output_cpp.get_columnwise_scale_inv());
+  if (want[6]) set_slot_at(6, noop_flag.has_value() ? *noop_flag : g_noop_dummy);
+  if (want[7]) set_slot_at(7, g_amax_dummy);
+  // slot[8] (mDbias) — unused in v1.
 
   tvm::ffi::Any result;
   entry.fn.CallPacked(args, 9, &result);
