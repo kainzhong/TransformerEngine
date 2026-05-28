@@ -241,6 +241,60 @@ def test_mxfp8_cutedsl_vs_reference(
     )
 
 
+# ---------------------------------------------------------------------------
+# Shapes that are multiples of SCALE_DIM (=32) but not of the CTA tile (=64).
+# Before bounds-checking the scale stores, these would write past the scale
+# tensor on the partial last CTA. They are spec-legal MXFP8 inputs (one scale
+# per 32-element block) and now produce bit-exact output against the reference.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize(
+    "M, N",
+    [
+        (32, 32),       # smallest legal shape; single partial CTA per axis
+        (32, 64),       # M = 32 only, N 64-aligned
+        (64, 32),       # N = 32 only, M 64-aligned
+        (96, 96),       # both dims 32-aligned but not 64
+        (96, 128),      # asymmetric: M is the irregular axis
+        (128, 96),      # asymmetric: N is the irregular axis
+        (160, 256),     # larger, M still not a multiple of 64
+        (1024, 96),     # tall-narrow with irregular N
+        (96, 1024),     # short-wide with irregular M
+    ],
+)
+@pytest.mark.parametrize("x_dtype", [torch.bfloat16], ids=str)
+@pytest.mark.parametrize(
+    "quantize_mode",
+    ["rowwise_only", "colwise_only", "both_directions"],
+)
+def test_mxfp8_cutedsl_irregular_shapes(
+    x_dtype: torch.dtype,
+    M: int,
+    N: int,
+    quantize_mode: str,
+) -> None:
+    """Multiples of SCALE_DIM that aren't multiples of the 64-element CTA tile.
+    Exercises the scale-store bounds check for the partial last CTA."""
+    if quantize_mode == "rowwise_only":
+        return_rowwise, return_transpose = True, False
+    elif quantize_mode == "colwise_only":
+        return_rowwise, return_transpose = False, True
+    elif quantize_mode == "both_directions":
+        return_rowwise, return_transpose = True, True
+    else:
+        raise ValueError(f"Invalid quantize mode: {quantize_mode}")
+
+    check_mxfp8_cutedsl_vs_reference(
+        x_dtype=x_dtype,
+        M=M,
+        N=N,
+        return_rowwise=return_rowwise,
+        return_transpose=return_transpose,
+    )
+
+
 @pytest.mark.parametrize(
     "M, N",
     [

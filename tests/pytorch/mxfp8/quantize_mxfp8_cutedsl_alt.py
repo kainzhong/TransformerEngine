@@ -498,10 +498,12 @@ class MXFP8QuantizeSmemKernel:
                 self._process_colwise(
                     sX_tile, sO_col_tile,
                     mS_col_stage, max_norm_rcp,
+                    tile_idx_y * TILE_Y, bidx * TILE_X, M, N,
                 )
                 amax_c = self._process_colwise(
                     sX_tile, sO_col_tile,
                     mS_col_stage, max_norm_rcp,
+                    tile_idx_y * TILE_Y, bidx * TILE_X, M, N,
                 )
                 if cutlass.const_expr(cfg.WITH_AMAX):
                     block_amax = cute.arch.fmax(block_amax, amax_c)
@@ -522,6 +524,7 @@ class MXFP8QuantizeSmemKernel:
                 amax_r = self._process_rowwise(
                     sX_tile, sO_row_tile,
                     mS_row_stage, max_norm_rcp,
+                    tile_idx_y * TILE_Y, bidx * TILE_X, M, N,
                 )
 
                 if cutlass.const_expr(cfg.WITH_AMAX):
@@ -594,6 +597,9 @@ class MXFP8QuantizeSmemKernel:
         sO_row_tile,    # (TILE_Y, TILE_X) uint8 smem view (rowwise FP8 output)
         mS_row_stage,   # rowwise scale tensor (1D swizzled, or 2D linear)
         max_norm_rcp,
+        tile_row_start, # Int32 — global row of this stage's row 0
+        tile_col_start, # Int32 — global col of this CTA's col 0
+        M, N,           # Int32 — full input extents, for OOB masking
     ):
         """Rowwise MXFP8 pass: thread `(tid_Y, tid_X) = (tidx % 32, tidx // 32)`
         owns one 32-element scale block (row `tid_Y`, columns `tid_X*32 .. +32`).
@@ -612,6 +618,10 @@ class MXFP8QuantizeSmemKernel:
             sO_row_tile,
             mS_row_stage,
             max_norm_rcp,
+            tile_row_start,
+            tile_col_start,
+            M,
+            N,
             ACTIVATION=cfg.ACTIVATION,
             DTYPE=cfg.DTYPE,
             ROWWISE=cfg.ROWWISE,
@@ -632,6 +642,9 @@ class MXFP8QuantizeSmemKernel:
         sO_col_tile,    # (TILE_Y, TILE_X) uint8 smem view (colwise FP8 output)
         mS_col_stage,   # colwise scale tensor (1D swizzled, or 2D linear)
         max_norm_rcp,
+        tile_row_start, # Int32 — global row of this stage's row 0
+        tile_col_start, # Int32 — global col of this CTA's col 0
+        M, N,           # Int32 — full input extents, for OOB masking
     ):
         """Colwise MXFP8 pass: thread `tidx` owns column `tidx` of the (32, 64)
         smem tile — 32 elements down. Writes quantized bytes into `sO_col_tile`
@@ -644,6 +657,10 @@ class MXFP8QuantizeSmemKernel:
             sO_col_tile,
             mS_col_stage,
             max_norm_rcp,
+            tile_row_start,
+            tile_col_start,
+            M,
+            N,
             ACTIVATION=cfg.ACTIVATION,
             DTYPE=cfg.DTYPE,
             FP8_DTYPE=cfg.FP8_DTYPE,
