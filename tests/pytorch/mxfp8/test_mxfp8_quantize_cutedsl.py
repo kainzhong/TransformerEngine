@@ -361,39 +361,3 @@ def test_mxfp8_cutedsl_activation(
     _assert_quant_equal(dsl, ref, rowwise, colwise,
                         tag=f"{activation}/{direction}/{x_dtype}")
 
-
-@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
-@pytest.mark.parametrize("M, N", _COMBO_SHAPES)
-@pytest.mark.parametrize("x_dtype", _COMBO_DTYPES, ids=str)
-@pytest.mark.parametrize("activation", sorted(_TE_BWD_ACT))
-@pytest.mark.parametrize("direction", _DIRECTIONS)
-def test_mxfp8_cutedsl_dact(
-    x_dtype: torch.dtype,
-    M: int,
-    N: int,
-    activation: str,
-    direction: str,
-) -> None:
-    """IS_DACT path: fused backward activation + MXFP8 quantize vs. tex.{drelu,dgelu,dsilu}."""
-    rowwise, colwise = _dirs(direction)
-    torch.manual_seed(0)
-    grad = torch.randn((M, N), dtype=x_dtype, device="cuda")
-    act_in = torch.randn((M, N), dtype=x_dtype, device="cuda")
-
-    quantizer = MXFP8Quantizer(
-        fp8_dtype=tex.DType.kFloat8E4M3,
-        rowwise=rowwise, columnwise=colwise,
-    )
-    ref = _TE_BWD_ACT[activation](grad, act_in, quantizer)
-
-    dsl = quantize_mxfp8_cutedsl(
-        grad, rowwise=rowwise, colwise=colwise,
-        activation=activation, act_input=act_in,
-        is_dact=True
-    )
-    torch.cuda.synchronize()
-
-    _assert_quant_equal(dsl, ref, rowwise, colwise,
-                        tag=f"{activation}/{direction}/{x_dtype}")
-
-

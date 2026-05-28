@@ -107,22 +107,22 @@ py::object quantize_with_func(const at::Tensor &tensor, py::handle quantizer,
     std::tie(output_cpp, output_py) = quantizer_cpp->convert_and_update_tensor(output);
   }
 
-  // Build the 9-slot arg list. `vector<optional<DLTensorWrapper>>` can't be
-  // constructed from a braced-init-list because DLTensorWrapper's copy is
+  // Build the 6-slot arg list matching the Python kernel signature
+  // `(mX, mO_row, mS_row, mO_col, mS_col, mAmax)`. `vector<optional<DLTensorWrapper>>`
+  // can't be constructed from a braced-init-list because DLTensorWrapper's copy is
   // deleted and initializer_list always copies; use a sized vector + emplace
   // (which forwards into optional's in-place ctor and moves into the slot
   // when the vector grows).
   const int32_t dev_idx = static_cast<int32_t>(input_contiguous.device().index());
-  std::vector<std::optional<DLTensorWrapper>> args(9);
+  std::vector<std::optional<DLTensorWrapper>> args(6);
   args[0].emplace(input_contiguous);                                     // mX
-  args[1].emplace(input_contiguous);                                     // mActIn (aliased)
   // Output slots: present only if the quantizer allocated that direction.
   // `data_ptr == nullptr` means the direction is disabled — leave nullopt.
-  if (auto nt = output_cpp.get_rowwise_data();         nt.data_ptr) args[2].emplace(nt, dev_idx);
-  if (auto nt = output_cpp.get_rowwise_scale_inv();    nt.data_ptr) args[3].emplace(nt, dev_idx);
-  if (auto nt = output_cpp.get_columnwise_data();      nt.data_ptr) args[4].emplace(nt, dev_idx);
-  if (auto nt = output_cpp.get_columnwise_scale_inv(); nt.data_ptr) args[5].emplace(nt, dev_idx);
-  // args[6..8] stay nullopt — kernel slots compiled as None.
+  if (auto nt = output_cpp.get_rowwise_data();         nt.data_ptr) args[1].emplace(nt, dev_idx);
+  if (auto nt = output_cpp.get_rowwise_scale_inv();    nt.data_ptr) args[2].emplace(nt, dev_idx);
+  if (auto nt = output_cpp.get_columnwise_data();      nt.data_ptr) args[3].emplace(nt, dev_idx);
+  if (auto nt = output_cpp.get_columnwise_scale_inv(); nt.data_ptr) args[4].emplace(nt, dev_idx);
+  // args[5] (mAmax) stays nullopt — kernel slot compiled as None when WITH_AMAX=False.
   applyTVMFunction(fn_name, args);
 
   return output_py;
