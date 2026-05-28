@@ -18,6 +18,7 @@ shared memory.
 """
 
 import os
+from re import A
 import subprocess
 import time
 
@@ -39,7 +40,6 @@ def _detect_cute_dsl_arch() -> str:
 
 os.environ.setdefault("CUTE_DSL_ARCH", _detect_cute_dsl_arch())
 
-from types import SimpleNamespace
 from typing import Optional, Type
 
 import cuda.bindings.driver as cuda
@@ -60,6 +60,22 @@ from cutlass.cute.arch import cvt_f32_bf16
 
 import hashlib
 import tvm_ffi as _tvm_ffi
+
+from quantize_mxfp8_cutedsl_utils import (
+    _ACTIVATIONS,
+    FP8E4M3_MAX_NORM_RCP,
+    FP8E5M2_MAX_NORM_RCP,
+    _bitcast_f32_to_i32,
+    _cvt_f32_to_fp8,
+    _cvt_f32x2_to_fp8x2,
+    _is_packed16,
+    _packed16_kit,
+    exp2f_rcp,
+    fabs_f32,
+    float_to_e8m0,
+    quantize_colwise_mxfp8,
+    quantize_rowwise_mxfp8,
+) 
 
 # MXFP8 settings
 MXFP8_BLOCK_SIZE = 32 # Number of elements per MXFP8 scale block. They will share the same E8M0 scale factor
@@ -96,468 +112,9 @@ DBIAS_THREADS_Y = THREADS_PER_CHUNK // DBIAS_THREADS_X
 DBIAS_BUFF_WIDTH = DBIAS_THREADS_X * (SCALE_DIM + 1)
 DBIAS_BUFF_SIZE = DBIAS_THREADS_Y * DBIAS_BUFF_WIDTH
 
-# FP8E4M3 max representable value
-FP8E4M3_MAX_NORM = 448.0
-FP8E4M3_MAX_NORM_RCP = 1.0 / FP8E4M3_MAX_NORM
-FP8E5M2_MAX_NORM = 57344.0
-FP8E5M2_MAX_NORM_RCP = 1.0 / FP8E5M2_MAX_NORM
-
-FP32_MANTISSA_BITS = 23
-
 # ---------------------------------------------------------------------------
 # Low-level DSL operations
 # ---------------------------------------------------------------------------
-@dsl_user_op
-def _bitcast_f32_to_i32(val: Float32, *, loc=None, ip=None) -> Int32:
-    return Int32(mlir_arith.bitcast(T.i32(), val.ir_value(loc=loc, ip=ip), loc=loc, ip=ip))
-
-
-@dsl_user_op
-def _bitcast_i32_to_f32(val: Int32, *, loc=None, ip=None) -> Float32:
-    return Float32(mlir_arith.bitcast(T.f32(), val.ir_value(loc=loc, ip=ip), loc=loc, ip=ip))
-
-
-@dsl_user_op
-def fabs_f32(val: Float32, *, loc=None, ip=None) -> Float32:
-    val_i32 = _bitcast_f32_to_i32(val, loc=loc, ip=ip)
-    abs_i32 = val_i32 & Int32(0x7FFFFFFF)
-    return _bitcast_i32_to_f32(abs_i32, loc=loc, ip=ip)
-
-
-@dsl_user_op
-def float_to_e8m0(val: Float32, *, loc=None, ip=None) -> Int32:
-    """Branchless float->E8M0: add mantissa mask to round up, clamp to 254."""
-    val_i32 = _bitcast_f32_to_i32(val, loc=loc, ip=ip)
-    rounded = val_i32 + Int32(0x7FFFFF)
-    exponent = (rounded >> Int32(FP32_MANTISSA_BITS)) & Int32(0xFF)
-    return Int32(mlir_arith.minsi(
-        exponent.ir_value(loc=loc, ip=ip),
-        Int32(254).ir_value(loc=loc, ip=ip), loc=loc, ip=ip))
-
-
-@dsl_user_op
-def exp2f_rcp(biased_exp: Int32, *, loc=None, ip=None) -> Float32:
-    """2^(127 - biased_exp) with special-case handling."""
-    new_exp = (Int32(254) - biased_exp) << Int32(FP32_MANTISSA_BITS)
-    result = _bitcast_i32_to_f32(new_exp, loc=loc, ip=ip)
-    for (cmp_val, repl_bits) in [(255, 0x7FFFFFFF), (254, 0x00400000), (0, 0x7F000000)]:
-        cond = mlir_arith.cmpi(mlir_arith.CmpIPredicate.eq,
-                               biased_exp.ir_value(loc=loc, ip=ip),
-                               Int32(cmp_val).ir_value(loc=loc, ip=ip), loc=loc, ip=ip)
-        alt = _bitcast_i32_to_f32(Int32(repl_bits), loc=loc, ip=ip)
-        result = Float32(mlir_arith.select(
-            cond, alt.ir_value(loc=loc, ip=ip),
-            result.ir_value(loc=loc, ip=ip), loc=loc, ip=ip))
-    return result
-
-
-@dsl_user_op
-def cvt_f32_to_fp8e4m3(val: Float32, *, loc=None, ip=None) -> Int32:
-    """float32 -> fp8e4m3fn via PTX cvt.rn.satfinite.e4m3x2.f32."""
-    zero = Float32(0.0)
-    result_i16 = Int16(llvm.inline_asm(
-        T.i16(),
-        [zero.ir_value(loc=loc, ip=ip), val.ir_value(loc=loc, ip=ip)],
-        "cvt.rn.satfinite.e4m3x2.f32 $0, $1, $2;",
-        "=h,f,f", has_side_effects=False, is_align_stack=False,
-        asm_dialect=llvm.AsmDialect.AD_ATT))
-    result_i32 = Int32(mlir_arith.extui(
-        T.i32(), result_i16.ir_value(loc=loc, ip=ip), loc=loc, ip=ip))
-    return result_i32 & Int32(0xFF)
-
-
-@dsl_user_op
-def cvt_f32_to_fp8e5m2(val: Float32, *, loc=None, ip=None) -> Int32:
-    """float32 -> fp8e5m2 via PTX cvt.rn.satfinite.e5m2x2.f32."""
-    zero = Float32(0.0)
-    result_i16 = Int16(llvm.inline_asm(
-        T.i16(),
-        [zero.ir_value(loc=loc, ip=ip), val.ir_value(loc=loc, ip=ip)],
-        "cvt.rn.satfinite.e5m2x2.f32 $0, $1, $2;",
-        "=h,f,f", has_side_effects=False, is_align_stack=False,
-        asm_dialect=llvm.AsmDialect.AD_ATT))
-    result_i32 = Int32(mlir_arith.extui(
-        T.i32(), result_i16.ir_value(loc=loc, ip=ip), loc=loc, ip=ip))
-    return result_i32 & Int32(0xFF)
-
-
-@dsl_user_op
-def fma_f32(a: Float32, b: Float32, c: Float32, *, loc=None, ip=None) -> Float32:
-    """`fma.rn.f32 d, a, b, c;` — single-instruction fused multiply-add
-    matching nvcc's FFMA. Used for explicit `partial += a * b` patterns
-    where we need the same rounding as TE's compiler-fused FFMA."""
-    return Float32(llvm.inline_asm(
-        T.f32(),
-        [a.ir_value(loc=loc, ip=ip),
-         b.ir_value(loc=loc, ip=ip),
-         c.ir_value(loc=loc, ip=ip)],
-        "fma.rn.f32 $0, $1, $2, $3;",
-        "=f,f,f,f", has_side_effects=False, is_align_stack=False,
-        asm_dialect=llvm.AsmDialect.AD_ATT))
-
-
-@dsl_user_op
-def tanh_approx(val: Float32, *, loc=None, ip=None) -> Float32:
-    """`tanh.approx.f32` — fast tanh approximation. Matches CUDA `__tanhf`."""
-    return Float32(llvm.inline_asm(
-        T.f32(),
-        [val.ir_value(loc=loc, ip=ip)],
-        "tanh.approx.f32 $0, $1;",
-        "=f,f", has_side_effects=False, is_align_stack=False,
-        asm_dialect=llvm.AsmDialect.AD_ATT))
-
-
-@dsl_user_op
-def pack_f32x2(lo: Float32, hi: Float32, *, loc=None, ip=None) -> Int64:
-    """Pack two f32 scalars into a single 64-bit register (`floatx2` layout).
-
-    Low 32 bits = `lo`, high 32 bits = `hi`. Uses `mov.b64 %dst, {%lo, %hi};`
-    which lowers to a single register move — no actual memory traffic.
-    """
-    return Int64(llvm.inline_asm(
-        T.i64(),
-        [lo.ir_value(loc=loc, ip=ip), hi.ir_value(loc=loc, ip=ip)],
-        "mov.b64 $0, {$1, $2};",
-        "=l,f,f", has_side_effects=False, is_align_stack=False,
-        asm_dialect=llvm.AsmDialect.AD_ATT))
-
-
-# ---------------------------------------------------------------------------
-# 16-bit packed input PTX kit (bf16 / f16)
-#
-# bf16 and f16 share the same fast-path shape: packed-x2 amax via
-# `max.xorsign.abs.<fmt>x2`, then per-lane widen-to-f32 + `mul.f32x2` +
-# `cvt.rn.satfinite.<out>x2.f32`. Only the opcodes differ. Build one PTX kit
-# per format at module load and let the kernel pick the right kit at JIT
-# trace time via `cfg.DTYPE` — equivalent to a C++ template arg specialization
-# on `IType`, with no runtime branch.
-# ---------------------------------------------------------------------------
-def _build_packed16_kit(in_fmt: str):
-    """Build a kit of PTX wrappers for a 16-bit input format.
-
-    `in_fmt` is the PTX format string ('bf16' or 'f16'). Returns a namespace
-    with the per-format ops the rowwise/colwise inner loops need:
-
-      abs_max_x2(Int32, Int32)  -> Int32   # `max.xorsign.abs.<fmt>x2`
-      abs_max_scalar(Int16, Int16) -> Int16  # `max.xorsign.abs.<fmt>`
-      bits_to_f32(Int16) -> Float32          # widen one 16-bit element
-      x2_lo_to_f32(Int32) -> Float32         # extract+widen low half
-      x2_hi_to_f32(Int32) -> Float32         # extract+widen high half
-      mul_cvt_to_fp8x2(fp8_dtype) -> callable(Int32, Int64)->Int32
-                                            # fused <fmt>x2 * f32x2 -> fp8x2
-    """
-
-    @dsl_user_op
-    def abs_max_x2(a: Int32, b: Int32, *, loc=None, ip=None) -> Int32:
-        return Int32(llvm.inline_asm(
-            T.i32(),
-            [a.ir_value(loc=loc, ip=ip), b.ir_value(loc=loc, ip=ip)],
-            f"max.xorsign.abs.{in_fmt}x2 $0, $1, $2;",
-            "=r,r,r", has_side_effects=False, is_align_stack=False,
-            asm_dialect=llvm.AsmDialect.AD_ATT))
-    
-    @dsl_user_op
-    def max_x2(a: Int32, b: Int32, *, loc=None, ip=None) -> Int32:
-        return Int32(llvm.inline_asm(
-            T.i32(),
-            [a.ir_value(loc=loc, ip=ip), b.ir_value(loc=loc, ip=ip)],
-            f"max.{in_fmt}x2 $0, $1, $2;",
-            "=r,r,r", has_side_effects=False, is_align_stack=False,
-            asm_dialect=llvm.AsmDialect.AD_ATT))
-
-    @dsl_user_op
-    def abs_max_scalar(a: Int16, b: Int16, *, loc=None, ip=None) -> Int16:
-        return Int16(llvm.inline_asm(
-            T.i16(),
-            [a.ir_value(loc=loc, ip=ip), b.ir_value(loc=loc, ip=ip)],
-            f"max.xorsign.abs.{in_fmt} $0, $1, $2;",
-            "=h,h,h", has_side_effects=False, is_align_stack=False,
-            asm_dialect=llvm.AsmDialect.AD_ATT))
-
-    if in_fmt == "bf16":
-        # bf16 == top 16 bits of f32 — widening is a free bit-shift.
-        @dsl_user_op
-        def bits_to_f32(bits: Int16, *, loc=None, ip=None) -> Float32:
-            i32 = Int32(mlir_arith.extui(
-                T.i32(), bits.ir_value(loc=loc, ip=ip), loc=loc, ip=ip))
-            return _bitcast_i32_to_f32(i32 << Int32(16), loc=loc, ip=ip)
-
-        @dsl_user_op
-        def x2_lo_to_f32(bits: Int32, *, loc=None, ip=None) -> Float32:
-            return _bitcast_i32_to_f32(
-                (bits & Int32(0xFFFF)) << Int32(16), loc=loc, ip=ip)
-
-        @dsl_user_op
-        def x2_hi_to_f32(bits: Int32, *, loc=None, ip=None) -> Float32:
-            # `(x >> 16) << 16` ≡ `x & 0xFFFF0000`, sidestepping signed-literal
-            # issues. Sign bits from the arith-right shift get zeroed by the
-            # left shift.
-            return _bitcast_i32_to_f32(
-                (bits >> Int32(16)) << Int32(16), loc=loc, ip=ip)
-
-        @dsl_user_op
-        def truncate_f32(val: Float32, *, loc=None, ip=None) -> Float32:
-            """Round f32 to bf16 precision (round-to-nearest-even), keep f32.
-            Matches C++'s `static_cast<float>(static_cast<bf16>(elt))`."""
-            bf16_bits = Int16(llvm.inline_asm(
-                T.i16(), [val.ir_value(loc=loc, ip=ip)],
-                "cvt.rn.bf16.f32 $0, $1;",
-                "=h,f", has_side_effects=False, is_align_stack=False,
-                asm_dialect=llvm.AsmDialect.AD_ATT))
-            i32 = Int32(mlir_arith.extui(
-                T.i32(), bf16_bits.ir_value(loc=loc, ip=ip), loc=loc, ip=ip))
-            return _bitcast_i32_to_f32(i32 << Int32(16), loc=loc, ip=ip)
-    else:
-        # f16 has its own bit layout; widening requires `cvt.f32.f16`.
-        @dsl_user_op
-        def bits_to_f32(bits: Int16, *, loc=None, ip=None) -> Float32:
-            return Float32(llvm.inline_asm(
-                T.f32(), [bits.ir_value(loc=loc, ip=ip)],
-                "cvt.f32.f16 $0, $1;",
-                "=f,h", has_side_effects=False, is_align_stack=False,
-                asm_dialect=llvm.AsmDialect.AD_ATT))
-
-        @dsl_user_op
-        def x2_lo_to_f32(bits: Int32, *, loc=None, ip=None) -> Float32:
-            lo_i16 = Int16(mlir_arith.trunci(
-                T.i16(), bits.ir_value(loc=loc, ip=ip), loc=loc, ip=ip))
-            return bits_to_f32(lo_i16, loc=loc, ip=ip)
-
-        @dsl_user_op
-        def x2_hi_to_f32(bits: Int32, *, loc=None, ip=None) -> Float32:
-            hi_shifted = bits >> Int32(16)
-            hi_i16 = Int16(mlir_arith.trunci(
-                T.i16(), hi_shifted.ir_value(loc=loc, ip=ip), loc=loc, ip=ip))
-            return bits_to_f32(hi_i16, loc=loc, ip=ip)
-
-        @dsl_user_op
-        def truncate_f32(val: Float32, *, loc=None, ip=None) -> Float32:
-            """Round f32 to f16 precision, keep f32."""
-            f16_bits = Int16(llvm.inline_asm(
-                T.i16(), [val.ir_value(loc=loc, ip=ip)],
-                "cvt.rn.f16.f32 $0, $1;",
-                "=h,f", has_side_effects=False, is_align_stack=False,
-                asm_dialect=llvm.AsmDialect.AD_ATT))
-            return Float32(llvm.inline_asm(
-                T.f32(), [f16_bits.ir_value(loc=loc, ip=ip)],
-                "cvt.f32.f16 $0, $1;",
-                "=f,h", has_side_effects=False, is_align_stack=False,
-                asm_dialect=llvm.AsmDialect.AD_ATT))
-
-    def _build_mul_cvt(out_fmt: str, relu: bool = False):
-        """Build a fused `<in_fmt>x2 * f32x2 → fp8<out_fmt>x2` PTX wrapper.
-
-        The shape is identical across (in_fmt, out_fmt) combos — only the
-        widening opcode (`cvt.f32.<in_fmt>`) and the final saturating cvt
-        (`cvt.rn.satfinite.<out_fmt>x2.f32`) differ.
-        """
-        out_op = "e4m3x2" if out_fmt == "e4m3" else "e5m2x2"
-        asm = (
-            "{\n"
-            ".reg.b64 vp0; .reg.b64 vp1;\n\t"
-            ".reg.b32 v1;  .reg.b32 v2;\n\t"
-            ".reg.b16 vb1; .reg.b16 vb2;\n\t"
-            "mov.b32 {vb1, vb2}, $1;\n\t"
-            f"cvt.f32.{in_fmt} v1, vb1;\n\t"
-            f"cvt.f32.{in_fmt} v2, vb2;\n\t"
-            "mov.b64 vp0, {v1, v2};\n\t"
-            "mul.f32x2 vp1, vp0, $2;\n\t"
-            "mov.b64 {v2, v1}, vp1;\n\t"
-            f"cvt.rn.satfinite{".relu" if relu else ""}.{out_op}.f32 $0, v1, v2;\n\t"
-            "}"
-        )
-
-        @dsl_user_op
-        def fn(val_2x: Int32, scale_2x: Int64, *, loc=None, ip=None) -> Int32:
-            result_i16 = Int16(llvm.inline_asm(
-                T.i16(),
-                [val_2x.ir_value(loc=loc, ip=ip),
-                 scale_2x.ir_value(loc=loc, ip=ip)],
-                asm,
-                "=h,r,l", has_side_effects=False, is_align_stack=False,
-                asm_dialect=llvm.AsmDialect.AD_ATT))
-            return Int32(mlir_arith.extui(
-                T.i32(), result_i16.ir_value(loc=loc, ip=ip), loc=loc, ip=ip))
-        return fn
-
-    def mul_cvt_to_fp8x2(fp8_dtype: str, relu: bool = False):
-        if fp8_dtype == "e5m2":
-            return _build_mul_cvt("e5m2", relu)
-        return _build_mul_cvt("e4m3", relu)
-
-    return SimpleNamespace(
-        abs_max_x2=abs_max_x2,
-        max_x2=max_x2,
-        abs_max_scalar=abs_max_scalar,
-        bits_to_f32=bits_to_f32,
-        x2_lo_to_f32=x2_lo_to_f32,
-        x2_hi_to_f32=x2_hi_to_f32,
-        truncate_f32=truncate_f32,
-        mul_cvt_to_fp8x2=mul_cvt_to_fp8x2,
-    )
-
-
-_BF16_KIT = _build_packed16_kit("bf16")
-_F16_KIT = _build_packed16_kit("f16")
-
-
-def _is_packed16(dtype) -> bool:
-    """True if `dtype` is one of the 16-bit packed input formats."""
-    return dtype is cutlass.BFloat16 or dtype is cutlass.Float16
-
-
-def _packed16_kit(dtype):
-    """Trace-time selector — pick a Packed16Kit for the input dtype."""
-    if dtype is cutlass.Float16:
-        return _F16_KIT
-    return _BF16_KIT
-
-
-# ---------------------------------------------------------------------------
-# Forward-activation registry
-#
-# Each entry is a Float32 → Float32 callable applied per element before the
-# MXFP8 amax + cast. Selection is by Python string at JIT trace time, so the
-# const-expr machinery treats `cfg.ACTIVATION` like a C++ template argument
-# — no runtime branch in the inner loop, separate kernel cached per choice.
-#
-# Math primitives match CUDA fast-math intrinsics so outputs are bit-exact
-# with PyTorch's CUDA implementations of the same activations:
-#   tanh   -> tanh.approx.f32 (== __tanhf)
-#   exp(x) -> exp2.approx.f32(x · log2(e)) (== __expf)
-# ---------------------------------------------------------------------------
-def _act_relu(x: Float32) -> Float32:
-    return cute.arch.fmax(x, Float32(0.0))
-
-
-def _act_gelu(x: Float32) -> Float32:
-    """Tanh-approximation GELU. Constants and operator grouping match TE's
-    `transformer_engine/common/util/math.h::gelu` exactly (factored form
-    `x · (0.5 + 0.5·tanh(x·(a + b·x²)))`) so quantized output is bit-exact
-    against the C++ fused IS_ACT path. Uses `cute.math.tanh(fastmath=False)`
-    rather than the `tanh.approx.f32` PTX intrinsic — TE compiles activation
-    kernels without `--use_fast_math` by default, so its `tanhf` is the
-    IEEE-precise expansion."""
-    A = Float32(0.79788456)       # sqrt(2/π) truncated to TE's 8-digit literal
-    B = Float32(0.03567741)       # = sqrt(2/π) · 0.044715, same truncation
-    return x * (Float32(0.5) + Float32(0.5) * cute.math.tanh(x * (A + B * x * x)))
-
-
-def _act_silu(x: Float32) -> Float32:
-    """SiLU/Swish: x · σ(x) = x / (1 + e^-x).
-    Matches TE's `silu` (`val / (1 + expf(-val))`)."""
-    return x / (Float32(1.0) + cute.arch.exp(-x))
-
-
-# ---- Backward (derivative) activations ----
-# Used by IS_DACT paths: kernel computes `elt = grad_y · dOP(act_in)`. The
-# entries below take `act_in` and return the derivative of the activation
-# evaluated at it; the kernel multiplies by `grad_y` afterwards. Constants
-# match TE's `transformer_engine/common/util/math.h` exactly so quantized
-# output is bit-equal to `tex.dgelu`/`tex.dsilu`/`tex.drelu`.
-@dsl_user_op
-def _act_drelu(x: Float32, *, loc=None, ip=None) -> Float32:
-    """drelu(x) = x > 0 ? 1.0 : 0.0 (NaN → 0 per IEEE OGT). Matches TE's drelu."""
-    pred = mlir_arith.cmpf(
-        mlir_arith.CmpFPredicate.OGT,
-        x.ir_value(loc=loc, ip=ip),
-        Float32(0.0).ir_value(loc=loc, ip=ip),
-        loc=loc, ip=ip,
-    )
-    return Float32(mlir_arith.select(
-        pred,
-        Float32(1.0).ir_value(loc=loc, ip=ip),
-        Float32(0.0).ir_value(loc=loc, ip=ip),
-        loc=loc, ip=ip,
-    ))
-
-
-def _act_dgelu(x: Float32) -> Float32:
-    """tanh-approximation GELU derivative.
-    Mirrors TE's dgelu: tanh(`A·x·(1 + κ·x²)`) — note the inner-arg shape
-    differs slightly from forward gelu's `x·(A + B·x²)` form (κ vs B); this
-    is TE's exact source, preserved for bit-exact match."""
-    A = Float32(0.79788456)
-    KAPPA = Float32(0.044715)
-    C = Float32(0.1070322243)   # = 3·κ·A, full-precision constant TE uses
-    inner = A * x * (Float32(1.0) + KAPPA * x * x)
-    tanh_out = cute.math.tanh(inner)
-    one_minus_tanh_sq = Float32(1.0) - tanh_out * tanh_out
-    return (Float32(0.5) * x * (one_minus_tanh_sq * (A + C * x * x))
-            + Float32(0.5) * (Float32(1.0) + tanh_out))
-
-
-def _act_dsilu(x: Float32) -> Float32:
-    """dsilu(x) = x · σ(x)·(1 - σ(x)) + σ(x). Matches TE's dsilu via
-    `cval * dsigmoid(cval) + sigmoid(cval)` after inlining."""
-    s = Float32(1.0) / (Float32(1.0) + cute.arch.exp(-x))
-    return x * (s * (Float32(1.0) - s)) + s
-
-
-_ACTIVATIONS = {
-    "relu": _act_relu,
-    "gelu": _act_gelu,
-    "silu": _act_silu,
-    "drelu": _act_drelu,
-    "dgelu": _act_dgelu,
-    "dsilu": _act_dsilu,
-}
-
-
-def _is_derivative_activation(name) -> bool:
-    """True if `name` is one of the registered backward (derivative) activations."""
-    return isinstance(name, str) and name.startswith("d") and name in _ACTIVATIONS
-
-
-@dsl_user_op
-def cvt_f32x2_to_fp8e4m3x2(val_hi: Float32, val_lo: Float32, relu: bool = False,
-                             *, loc=None, ip=None) -> Int32:
-    """Convert two float32 values to two packed fp8e4m3fn bytes in one instruction.
-
-    Returns an int32 where bits [7:0] = fp8(val_lo), bits [15:8] = fp8(val_hi).
-    This mirrors ptx::mul_cvt_2x which converts 2 values in one instruction.
-    """
-    result_i16 = Int16(llvm.inline_asm(
-        T.i16(),
-        [val_hi.ir_value(loc=loc, ip=ip), val_lo.ir_value(loc=loc, ip=ip)],
-        f"cvt.rn.satfinite{".relu" if relu else ""}.e4m3x2.f32 $0, $1, $2;",
-        "=h,f,f", has_side_effects=False, is_align_stack=False,
-        asm_dialect=llvm.AsmDialect.AD_ATT))
-    return Int32(mlir_arith.extui(
-        T.i32(), result_i16.ir_value(loc=loc, ip=ip), loc=loc, ip=ip))
-
-
-@dsl_user_op
-def cvt_f32x2_to_fp8e5m2x2(val_hi: Float32, val_lo: Float32, relu: bool = False,
-                             *, loc=None, ip=None) -> Int32:
-    """e5m2 sibling of `cvt_f32x2_to_fp8e4m3x2`."""
-    result_i16 = Int16(llvm.inline_asm(
-        T.i16(),
-        [val_hi.ir_value(loc=loc, ip=ip), val_lo.ir_value(loc=loc, ip=ip)],
-        f"cvt.rn.satfinite{".relu" if relu else ""}.e5m2x2.f32 $0, $1, $2;",
-        "=h,f,f", has_side_effects=False, is_align_stack=False,
-        asm_dialect=llvm.AsmDialect.AD_ATT))
-    return Int32(mlir_arith.extui(
-        T.i32(), result_i16.ir_value(loc=loc, ip=ip), loc=loc, ip=ip))
-
-
-def _cvt_f32_to_fp8(fp8_dtype: str):
-    """Const-expr dispatch: pick the f32→fp8 scalar PTX op based on output dtype.
-
-    `fp8_dtype` is the Python string from `cfg.FP8_DTYPE`, evaluated at JIT
-    trace time; the unused branch is never traced.
-    """
-    if fp8_dtype == "e5m2":
-        return cvt_f32_to_fp8e5m2
-    return cvt_f32_to_fp8e4m3
-
-
-def _cvt_f32x2_to_fp8x2(fp8_dtype: str):
-    """Const-expr dispatch for the packed f32x2→fp8x2 cvt."""
-    if fp8_dtype == "e5m2":
-        return cvt_f32x2_to_fp8e5m2x2
-    return cvt_f32x2_to_fp8e4m3x2
-
 # ---------------------------------------------------------------------------
 # Kernel configuration
 # ---------------------------------------------------------------------------
@@ -600,23 +157,6 @@ class MXFP8QuantizeConfig:
         if with_dbias and not (rowwise or colwise):
             raise ValueError("with_dbias=True requires rowwise or colwise to be True")
         self.MAX_NORM_RCP = FP8E4M3_MAX_NORM_RCP if fp8_dtype == "e4m3" else FP8E5M2_MAX_NORM_RCP
-
-
-class DoNothingKernel:
-    @cute.jit
-    def __call__(
-        self,
-        x0: cute.Tensor,
-        x1: cute.Tensor,
-        x2: cute.Tensor,
-        x3: cute.Tensor,
-        x4: cute.Tensor,
-        x5: cute.Tensor,
-        x6: cute.Tensor,
-        x7: cute.Tensor,
-        x8: cute.Tensor,
-    ):
-        n = 1
 
 # ---------------------------------------------------------------------------
 # Unified MXFP8 quantization kernel — shared memory tiled, single-pass
@@ -668,32 +208,34 @@ class MXFP8QuantizeSmemKernel:
         # See https://docs.nvidia.com/cuda/cublas/#d-block-scaling-factors-layout
         # and swizzle_demo.svg for a visual of the byte permutation.
         if cutlass.const_expr(cfg.WITH_GEMM_SWIZZLED_SCALES):
-            num_tiles_M = (cfg.M + 127) // 128
+            num_tiles_M = (M + 127) // 128
             num_tiles_SC = (num_scale_cols + 3) // 4   # = ceil(N / 128)
             num_tiles_SR = (num_scale_rows + 3) // 4   # = ceil(M / 128)
-            num_tiles_N = (cfg.N + 127) // 128
+            num_tiles_N = (N + 127) // 128
             # row i = i_lo + 32 * (i_hi + 4 * tile_Y);  col j = j_lo + 4 * tile_X.
             # Within one 128×4 tile: byte = i_lo*16 + i_hi*4 + j_lo.
         
             # Tile-major outer dims add (tile_Y * num_tiles_SC + tile_X) * 512.
             # For example, if M=256, N=512, then num_scale_cols = 16, num_scale_rows = 8, and num_tiles_M=2, num_tiles_SC=4, num_tiles_SR=2, num_tiles_N=4
             # The swizzled layout is ((32, 4, 2), (4, 4)):((16, 4, 2048), (1, 512))
-            mS_row = cute.make_tensor(
-                mS_row.iterator,
-                cute.make_layout(
-                    ((32, 4, num_tiles_M), (4, num_tiles_SC)),
-                    stride=((16, 4, num_tiles_SC * 512), (1, 512)),
-                ),
-            )
+            if cutlass.const_expr(cfg.ROWWISE):
+                mS_row = cute.make_tensor(
+                    mS_row.iterator,
+                    cute.make_layout(
+                        ((32, 4, num_tiles_M), (4, num_tiles_SC)),
+                        stride=((16, 4, num_tiles_SC * 512), (1, 512)),
+                    ),
+                )
             # Colwise: same swizzle, axes swap roles — col axis gets the 32×4
             # inner decomp, scale-row axis gets the 4-extent dim.
-            mS_col = cute.make_tensor(
-                mS_col.iterator,
-                cute.make_layout(
-                    ((4, num_tiles_SR), (32, 4, num_tiles_N)),
-                    stride=((1, 512), (16, 4, num_tiles_SR * 512)),
-                ),
-            )
+            if cutlass.const_expr(cfg.COLWISE):
+                mS_col = cute.make_tensor(
+                    mS_col.iterator,
+                    cute.make_layout(
+                        ((4, num_tiles_SR), (32, 4, num_tiles_N)),
+                        stride=((1, 512), (16, 4, num_tiles_SR * 512)),
+                    ),
+                )
         
         # Divide by the STAGE tile (TILE_Y, TILE_X // SCALE_DIM), not the CTA
         # tile. Each CTA owns NUM_TILES consecutive row-tiles; the kernel walks
@@ -720,6 +262,8 @@ class MXFP8QuantizeSmemKernel:
             op_load, mX, smem_tile_layout, cta_tiler, num_multicast=1,
         )
         
+        tma_atom_act = None
+        tma_src_act = None
         if cutlass.const_expr(cfg.IS_DACT):
             # Second input descriptor — only consumed by the IS_DACT path. When
             # not is_dact, the wrapper aliases this onto x's data ptr so the
@@ -727,28 +271,27 @@ class MXFP8QuantizeSmemKernel:
             tma_atom_act, tma_src_act = cute.nvgpu.cpasync.make_tiled_tma_atom(
                 op_load, mActIn, smem_tile_layout, cta_tiler, num_multicast=1,
             )
-        else:
-            tma_atom_act = None
-            tma_src_act = None
         
         # Output: TMA S2G (uint8 smem → gmem) for both directions. Creating
         # both atoms unconditionally — if a direction is disabled the kernel
         # simply won't dispatch its copy, and the atom cost is negligible.
         op_store = cute.nvgpu.cpasync.CopyBulkTensorTileS2GOp()
         out_smem_layout = cute.make_ordered_layout((TILE_Y, TILE_X), order=(1, 0))
+        tma_atom_out_row = None
+        tma_dst_out_row = None
+        tma_atom_out_col = None
+        tma_dst_out_col = None
         if cutlass.const_expr(cfg.ROWWISE):
             tma_atom_out_row, tma_dst_out_row = cute.nvgpu.cpasync.make_tiled_tma_atom(
                 op_store, mO_row, out_smem_layout, cta_tiler, num_multicast=1,
             )
-            tma_atom_out_col = None
-            tma_dst_out_col = None
         if cutlass.const_expr(cfg.COLWISE):
             tma_atom_out_col, tma_dst_out_col = cute.nvgpu.cpasync.make_tiled_tma_atom(
                 op_store, mO_col, out_smem_layout, cta_tiler, num_multicast=1,
             )
-            tma_atom_out_row = None
-            tma_dst_out_row = None
         
+        # CUDA launches in (0,0), (1,0), (2,0)... order, so we should make N the leading dimension for better access pattern 
+        # So consecutive blocks will move along the N dimension first, which is the innermost dimension in memory and we can use cache better
         grid = [
             cute.ceil_div(Int32(N), TILE_X),
             cute.ceil_div(M, TILE_Y * NUM_TILES),
@@ -770,14 +313,14 @@ class MXFP8QuantizeSmemKernel:
     @cute.kernel
     def kernel(
         self,
-        mX, # (M, N):(N, 1), the tensor to quantize
-        mO_row, # (M, N):(N, 1), rowwise quantized output tensor (uint8)
-        mS_row, # TODO: What is this
-        mO_col, # (M, N):(N, 1), colwise quantized output tensor (uint8)
-        mS_col, # (M // 32, N):(N, 1), colwise scale tensor (uint8)
-        mNoop,  # (1,) f32 — skip all work if mNoop[0] == 1.0
-        mAmax,  # (1,) f32 — global amax accumulator (only used if cfg.WITH_AMAX)
-        mDbias, # (blocks_Y, N) f32 dbias workspace (only used if cfg.WITH_DBIAS)
+        mX,
+        mO_row,
+        mS_row,
+        mO_col,
+        mS_col,
+        mNoop, 
+        mAmax, 
+        mDbias,
         max_norm_rcp,
         dtype: cutlass.Constexpr[Type[cutlass.Numeric]],
         tma_atom, tma_src, # how to use TMA to copy the input
@@ -787,7 +330,10 @@ class MXFP8QuantizeSmemKernel:
     ):
         cfg = self.cfg
 
-        mS_row = cute.zipped_divide(mS_row, (TILE_Y, TILE_X // SCALE_DIM))
+        if cutlass.const_expr(cfg.ROWWISE):
+            mS_row = cute.zipped_divide(mS_row, (TILE_Y, TILE_X // SCALE_DIM))
+        if cutlass.const_expr(cfg.COLWISE):
+            mS_col = cute.zipped_divide(mS_col, (TILE_Y // SCALE_DIM, TILE_X))
         # For M=256, N=512:
         # Non-swizzled: https://kainzhong.github.io/CuTe-Layout-Visualizer/?key=zipped_divide-%28256%2C+16%29%3A%2816%2C+1%29-32%0A2
         # Swizzled: https://kainzhong.github.io/CuTe-Layout-Visualizer/?key=zipped_divide-%28%2832%2C+4%2C+2%29%2C+%284%2C+4%29%29%3A%28%2816%2C+4%2C+2048%29%2C+%281%2C+512%29%29-32%0A2
@@ -1038,17 +584,38 @@ class MXFP8QuantizeSmemKernel:
             mainloop_pipeline.consumer_wait(cons_state)
             sX_tile = sX[(None, stage)]          # (TILE_Y, TILE_X) bf16
 
+            """
+            grid = [
+                cute.ceil_div(Int32(N), TILE_X),
+                cute.ceil_div(M, TILE_Y * NUM_TILES),
+            ]
+            So to obtain the tile that belongs to this CTA.
+            """
+            # This is just block's x axis idx
+            tile_idx_x = bidx
+            # Each CTA has `NUM_TILES` tiles. Each stage we need to obtain the tile for that specific stage. 
+            # So the tile index along Y dimension is `bidy * NUM_TILES + stage`
+            tile_idx_y = bidy * NUM_TILES + stage
             if cutlass.const_expr(cfg.COLWISE):
                 # The first row that belongs to this CTA. Each CTA handles NUM_TILES of (TILE_Y, TILE_X) tiles stacked vertically,
                 # and each stage handles one of them.
-                base_row = (bidy * NUM_TILES + stage) * TILE_Y
                 sO_col_tile = sO_col[(None, stage)]
-                amax_c, block_dbias = self._process_colwise(
-                    sX_tile, sO_col_tile, base_row, bidx, tidx,
-                    mS_col, max_norm_rcp, block_dbias,
+                mS_col_stage = cute.flatten(mS_col[(None, (tile_idx_y, tile_idx_x))])
+
+                self._process_colwise(
+                    sX_tile, sO_col_tile,
+                    mS_col_stage, max_norm_rcp, block_dbias,
                 )
-                if cutlass.const_expr(cfg.WITH_AMAX):
-                    block_amax = cute.arch.fmax(block_amax, amax_c)
+
+
+
+
+                # amax_c, block_dbias = self._process_colwise(
+                #     sX_tile, sO_col_tile,
+                #     mS_col_stage, max_norm_rcp, block_dbias,
+                # )
+                # if cutlass.const_expr(cfg.WITH_AMAX):
+                #     block_amax = cute.arch.fmax(block_amax, amax_c)
             if cutlass.const_expr(cfg.ROWWISE):
                 sO_row_tile = sO_row[(None, stage)]
                 # mS_row is ((SCALE_TILE), (GRID)) where SCALE_TILE = (32, 2).
@@ -1057,8 +624,11 @@ class MXFP8QuantizeSmemKernel:
                 # onto GRID's hierarchical row modes — which is the
                 # (i_hi, tile_Y) tile-major order for swizzled, and the plain
                 # row-tile order for compact. Same source, both layouts correct.
-                row_tile_idx = bidy * NUM_TILES + stage
-                mS_row_stage = cute.flatten(mS_row[(None, (row_tile_idx, bidx))])
+                mS_row_stage = cute.flatten(mS_row[(None, (tile_idx_y, tile_idx_x))])
+                # print(f"s0_row_tile: {sO_row_tile}\n")
+                # print(f"sO_row: {sO_row}\n")
+                # print(f"mS_row: {mS_row}\n")
+                # print(f"mS_row_stage: {mS_row_stage}\n")
                 # print(f"mS_row_stage: {mS_row_stage}\n")
                 # amax_r, thread_dbias_rw = self._process_rowwise(
                 amax_r, thread_dbias_rw = self._process_rowwise(
@@ -1383,8 +953,8 @@ class MXFP8QuantizeSmemKernel:
                     block_amax = cute.arch.fmax(block_amax, amax_r)
 
             cute.arch.fence_proxy(
-                cute.arch.ProxyKind.async_shared,
-                space=cute.arch.SharedSpace.shared_cta,
+                "async.shared",
+                space="cta",
             )
             cute.arch.sync_threads()
 
@@ -1437,125 +1007,12 @@ class MXFP8QuantizeSmemKernel:
                     amax_i32.iterator, _bitcast_f32_to_i32(cta_amax),
                 )
 
-
-    @cute.jit
-    def _process_colwise(
-        self,
-        sX_tile,        # (TILE_Y, TILE_X) bf16/fp16 smem view, post-TMA
-        sO_col_tile,    # (TILE_Y, TILE_X) uint8 smem view (colwise FP8 output)
-        base_row,       # Int32: global Y offset of this tile's first row
-        bidx,           # Int32: block X index (column tile)
-        tidx,           # Int32: thread index within the CTA
-        mS_col,         # colwise scale tensor (1D swizzled, or 2D linear)
-        max_norm_rcp,
-        partial_dbias_in,  # Float32 — running per-thread, per-column dbias
-                           # accumulator. We extend it one element at a time
-                           # so cross-stage sum order matches TE bit-exactly.
-    ):
-        """Colwise MXFP8 pass: thread `tidx` owns column `tidx` of the (32, 64)
-        smem tile — 32 elements down. Writes quantized bytes into `sO_col_tile`
-        so the caller can flush with a TMA S2G — matches C++'s
-        `out_colwise_data_sh` + `cp.async.bulk.tensor.2d.shared_to_global`.
-        """
-        cfg = self.cfg
-        block_off_X = bidx * TILE_X
-        col_global = block_off_X + tidx
-
-        # Flat views (sX[(None, stage)] has nested shape ((TILE_Y, TILE_X),)).
-        sX_flat = cute.make_tensor(
-            sX_tile.iterator,
-            cute.make_layout((TILE_Y, TILE_X), stride=(TILE_X, 1)),
-        )
-        sO_col_flat = cute.make_tensor(
-            sO_col_tile.iterator,
-            cute.make_layout((TILE_Y, TILE_X), stride=(TILE_X, 1)),
-        )
-
-        # 0. Load the 32-element column from smem into registers once (matches
-        # C++'s `in_colwise_IType[i]` cache). Amax and cast both reuse these.
-        # Path selection:
-        #   - 16-bit input WITHOUT activation AND without dbias: packed-x2
-        #     amax in IType, fast.
-        #   - everything else (16-bit + activation, with_dbias, OR fp32 input):
-        #     scalar f32 path. With activation, apply OP and (for 16-bit
-        #     input) round-trip through IType to match C++'s
-        #     `static_cast<IType>(elt)` numerical truncation. with_dbias
-        #     accumulates the per-column sum BEFORE truncation (C++ order).
-        partial_dbias = partial_dbias_in
-        if cutlass.const_expr(_is_packed16(cfg.DTYPE) and cfg.ACTIVATION is None
-                              and not cfg.WITH_DBIAS):
-            kit = _packed16_kit(cfg.DTYPE)
-            sX_i16 = cute.make_tensor(
-                cute.recast_ptr(sX_tile.iterator, dtype=Int16),
-                cute.make_layout((TILE_Y, TILE_X), stride=(TILE_X, 1)),
-            )
-            in_c = [sX_i16[i, tidx] for i in range(SCALE_DIM)]
-
-            amax_bits = Int16(0)
-            for i in cutlass.range_constexpr(SCALE_DIM):
-                amax_bits = kit.abs_max_scalar(amax_bits, in_c[i])
-            amax_c = fabs_f32(kit.bits_to_f32(amax_bits))
-        else:
-            in_c = [Float32(sX_flat[i, tidx]) for i in range(SCALE_DIM)]
-            # Apply activation in f32 (no truncation yet — dbias must
-            # accumulate from the pre-truncation value to match C++ order).
-            if cutlass.const_expr(cfg.ACTIVATION is not None):
-                op = _ACTIVATIONS[cfg.ACTIVATION]
-                for i in cutlass.range_constexpr(SCALE_DIM):
-                    in_c[i] = op(in_c[i])
-            # Accumulate per-column dbias from f32 (pre-truncation) values.
-            # IMPORTANT: caller passes the running block_dbias accumulator and
-            # we extend it one element at a time. This matches C++'s flat
-            # `partial_dbias_colwise += elt` order across the inner loop —
-            # grouping by stage (stage0_sum + stage1_sum) rounds slightly
-            # differently and produces ULP-level fp32 mismatches.
-            if cutlass.const_expr(cfg.WITH_DBIAS):
-                for i in cutlass.range_constexpr(SCALE_DIM):
-                    partial_dbias = partial_dbias + in_c[i]
-            # Numerical truncation through IType so amax/cast match C++.
-            # Only needed when 16-bit input + activation; without activation
-            # the widening was already exact.
-            if cutlass.const_expr(_is_packed16(cfg.DTYPE)
-                                  and cfg.ACTIVATION is not None):
-                kit_act = _packed16_kit(cfg.DTYPE)
-                for i in cutlass.range_constexpr(SCALE_DIM):
-                    in_c[i] = kit_act.truncate_f32(in_c[i])
-            amax_c = Float32(0.0)
-            for i in cutlass.range_constexpr(SCALE_DIM):
-                amax_c = cute.arch.fmax(amax_c, fabs_f32(in_c[i]))
-
-        # 2. E8M0 scale → gmem. mS_col's layout already encodes the swizzle
-        # when cfg.WITH_GEMM_SWIZZLED_SCALES=True, so 2D access just works.
-        biased_exp_c = float_to_e8m0(amax_c * max_norm_rcp)
-        scale_row = base_row // SCALE_DIM
-        mS_col[scale_row, col_global] = Uint8(biased_exp_c)
-
-        # 3. scale + FP8 cast → smem (one byte per (row, tidx)). Caller
-        # flushes the whole (TILE_Y, TILE_X) tile with a TMA S2G.
-        inv_scale_c = exp2f_rcp(biased_exp_c)
-        cvt_to_fp8 = _cvt_f32_to_fp8(cfg.FP8_DTYPE)
-        if cutlass.const_expr(_is_packed16(cfg.DTYPE) and cfg.ACTIVATION is None
-                              and not cfg.WITH_DBIAS):
-            kit_cast = _packed16_kit(cfg.DTYPE)
-            for i in cutlass.range_constexpr(SCALE_DIM):
-                v_f32 = kit_cast.bits_to_f32(in_c[i])
-                sO_col_flat[i, tidx] = Uint8(cvt_to_fp8(v_f32 * inv_scale_c))
-        else:
-            # in_c[i] is already Float32 in the activation/f32 path.
-            for i in cutlass.range_constexpr(SCALE_DIM):
-                sO_col_flat[i, tidx] = Uint8(cvt_to_fp8(in_c[i] * inv_scale_c))
-
-        # Per-thread amax + per-thread per-column dbias accumulator. Both
-        # are folded across stages by the caller; dbias is later written to
-        # the workspace and reduced externally.
-        return amax_c, partial_dbias
-
     @cute.jit
     def _process_rowwise(
         self,
         sX_tile,        # (TILE_Y, TILE_X) bf16/fp16 smem view, post-TMA
         sO_row_tile,    # (TILE_Y, TILE_X) uint8 smem view (rowwise FP8 output)
-        mS_row_stage,         # rowwise scale tensor (1D swizzled, or 2D linear)
+        mS_row_stage,   # rowwise scale tensor (1D swizzled, or 2D linear)
         max_norm_rcp,
         thread_dbias_in,  # list[Float32] of length SCALE_DIM — per-element
                           # rowwise dbias accumulator. Only used when
@@ -1574,187 +1031,58 @@ class MXFP8QuantizeSmemKernel:
         caller is responsible for the TMA S2G flush.
         """
         cfg = self.cfg
-        tidx, _, _ = cute.arch.thread_idx()
-
-        # Match the C++ reference's thread layout: pairs of adjacent lanes
-        # share a row (lanes 2k / 2k+1 both own row k), each pair covering
-        # the two 32-element scale blocks of that row. Express as a cute
-        # layout mapping `(tid_Y, tid_X) -> tidx` with stride (2, 1):
-        # linear(tidx) = tid_Y*2 + tid_X, so `get_flat_coord` inverts to
-        # `(tidx // 2, tidx % 2)` — semantically clearer than the raw
-        # divmod, and readily reusable if we later partition via TiledCopy.
-        # print(f"sX_tile: {sX_tile}")
-        # print(f"sO_row_tile: {sO_row_tile}")
-        # print(f"mS_row_stage: {mS_row_stage}")
-        
-        tiler, tv_layout = cute.make_layout_tv(
-            thr_layout=cute.make_layout((TILE_Y, 2), stride=(2, 1)),
-            val_layout=cute.make_layout((1, SCALE_DIM), stride=(0, 1))
+        return quantize_rowwise_mxfp8(
+            sX_tile,
+            sO_row_tile,
+            mS_row_stage,
+            max_norm_rcp,
+            thread_dbias_in,
+            ACTIVATION=cfg.ACTIVATION,
+            WITH_DBIAS=cfg.WITH_DBIAS,
+            DTYPE=cfg.DTYPE,
+            ROWWISE=cfg.ROWWISE,
+            COLWISE=cfg.COLWISE,
+            FP8_DTYPE=cfg.FP8_DTYPE,
+            TILE_Y=TILE_Y,
+            SCALE_DIM=SCALE_DIM,
+            WAVES=WAVES,
+            THREADS_PER_WARP=THREADS_PER_WARP,
+            THREADS_PER_BANK=THREADS_PER_BANK,
+            PACK_SIZE=PACK_SIZE
         )
-        # print(f"tv_layout: {tv_layout}")
-        # print(f"tiler: {tiler}")
-        
-        sX_tv = cute.composition(sX_tile, tv_layout)
-        sO_tv = cute.composition(sO_row_tile, tv_layout)
 
-        # I/O Elements that belong to this thread
-        sX_thread = sX_tv[tidx, None]   # shape (32,) bf16
-        sO_thread = sO_tv[tidx, None]   # shape (32,) uint8
-
-        # See https://kainzhong.github.io/CuTe-Layout-Visualizer/?key=tv-2-%2832%2C+2%29%3A%282%2C1%29-%281%2C+32%29%3A%280%2C1%29
-        # print(f"sX_thread: {sX_thread}")
-        # print(f"sO_thread: {sO_thread}")
-
-        sO_thread_u32_ptr = cute.recast_ptr(sO_thread.iterator, dtype=Uint32)
-        # Each wave it writes 32 bytes = 8 uint32s, so in 4 waves we write all 32 quantized elements.
-        sO_thread_u32 = cute.make_tensor(
-            sO_thread_u32_ptr,
-            cute.make_layout((SCALE_DIM // 4,), stride=(1,)), # 1 uint32 is 4 fp8 elements
+    @cute.jit
+    def _process_colwise(
+        self,
+        sX_tile,        # (TILE_Y, TILE_X) bf16/fp16 smem view, post-TMA
+        sO_col_tile,    # (TILE_Y, TILE_X) uint8 smem view (colwise FP8 output)
+        mS_col_stage,   # colwise scale tensor (1D swizzled, or 2D linear)
+        max_norm_rcp,
+        partial_dbias_in,  # Float32 — running per-thread, per-column dbias
+                           # accumulator. We extend it one element at a time
+                           # so cross-stage sum order matches TE bit-exactly.
+    ):
+        """Colwise MXFP8 pass: thread `tidx` owns column `tidx` of the (32, 64)
+        smem tile — 32 elements down. Writes quantized bytes into `sO_col_tile`
+        so the caller can flush with a TMA S2G — matches C++'s
+        `out_colwise_data_sh` + `cp.async.bulk.tensor.2d.shared_to_global`.
+        """
+        cfg = self.cfg
+        return quantize_colwise_mxfp8(
+            sX_tile,
+            sO_col_tile,
+            mS_col_stage,
+            max_norm_rcp,
+            partial_dbias_in,
+            ACTIVATION=cfg.ACTIVATION,
+            DTYPE=cfg.DTYPE,
+            FP8_DTYPE=cfg.FP8_DTYPE,
+            WITH_DBIAS=cfg.WITH_DBIAS,
+            SWIZZLE=cfg.WITH_GEMM_SWIZZLED_SCALES,
+            TILE_X=TILE_X,
+            TILE_Y=TILE_Y,
+            SCALE_DIM=SCALE_DIM,
         )
-        # print(f"sO_thread_u32: {sO_thread_u32}")
-
-        thread_dbias = thread_dbias_in
-
-        FUSE_RELU = cutlass.const_expr(cfg.ACTIVATION == "relu" and not cfg.WITH_DBIAS)
-        # For this fast paht we can read in pack of 2 instead of reading individual f16 / bf16 element
-        _row_fast = (_is_packed16(cfg.DTYPE) and (cfg.ACTIVATION is None or FUSE_RELU)
-                     and not (cfg.WITH_DBIAS and not cfg.COLWISE))
-
-        if cutlass.const_expr(_row_fast):
-            # If no activation, no dbias, f16 / bf16 and rowwise quantization, we can read 2 f16 / bf16 at once in a pack
-            # and use max.xorsign.abs.f16x2 / max.xorsign.abs.bf16x2 to compute
-            kit = _packed16_kit(cfg.DTYPE)
-            sX_thread_rw_i32 = cute.make_tensor(
-                cute.recast_ptr(sX_thread.iterator, dtype=Int32),
-                cute.make_layout((1, SCALE_DIM // 2), stride=(0, 1)), # 1 int32 is 2 fp16/bf16 elements
-            )
-            # print(f"sX_thread_rw_i32: {sX_thread_rw_i32}")
-            # Each wave we read 2 packed i32, which is 4 fp16/bf16 elements (PACK_SIZE)
-            # In total we have 8 waves where each wave reads 
-            in_r = [[None, None] for _ in range(WAVES)]
-            bank_group = (tidx % THREADS_PER_WARP) // THREADS_PER_BANK # Each 4 threads share the same bank, which forms a bank group
-            offset = bank_group * 2 # Each bank group will read 2 i32 from their bank
-            for w in cutlass.range_constexpr(WAVES):
-                idx = (w * 2 + offset) % (SCALE_DIM // 2)
-                in_r[w][0] = sX_thread_rw_i32[0, idx]
-                in_r[w][1] = sX_thread_rw_i32[0, idx + 1]
-
-            # 1. Packed-x2 amax — 2 PTX per wave, 16 total per thread.
-            # Accumulates `|elt|` in both lanes (with xorsign-drifted signs);
-            # final horizontal max reduces the two lanes to a single f32.
-            amax_2x = Int32(0)
-            # Each wave will use max.xorsign.abs.f16x2 or max.xorsign.abs.bf16x2 to compare 2 packed elements in parallel
-            for w in cutlass.range_constexpr(WAVES):
-                if cutlass.const_expr(FUSE_RELU):
-                    # If we fuse relu then we don't want to do abs since negative value will be set to 0 and they will lose comparison automatically
-                    amax_2x = kit.max_x2(amax_2x, in_r[w][0])
-                    amax_2x = kit.max_x2(amax_2x, in_r[w][1])
-                else:
-                    amax_2x = kit.abs_max_x2(amax_2x, in_r[w][0])
-                    amax_2x = kit.abs_max_x2(amax_2x, in_r[w][1])
-            if cutlass.const_expr(FUSE_RELU):
-                # Compare the 2 packed max without abs
-                amax_r = cute.arch.fmax(
-                    kit.x2_lo_to_f32(amax_2x),
-                    kit.x2_hi_to_f32(amax_2x),
-                )
-                # For relu the max is at least 0
-                if cutlass.const_expr(FUSE_RELU):
-                    amax_r = cute.arch.fmax(amax_r, Float32(0.0))
-            else:
-                # Compare the 2 packed abs max
-                amax_r = cute.arch.fmax(
-                    fabs_f32(kit.x2_lo_to_f32(amax_2x)),
-                    fabs_f32(kit.x2_hi_to_f32(amax_2x)),
-                )
-        else:
-            # Since we need to do computation on individual f16 / bf16 elements, we can't read in pack
-            sX_thread_rw = cute.make_tensor(
-                sX_thread.iterator,
-                cute.make_layout((1, SCALE_DIM), stride=(0, 1)),
-            )
-            in_r = [[None] * PACK_SIZE for _ in range(WAVES)]
-            bank_group = (tidx % THREADS_PER_WARP) // THREADS_PER_BANK # Each 4 threads share the same bank, which forms a bank group
-            offset = bank_group * 4 # Each bank group will read 4 f16 from their bank
-
-            if cutlass.const_expr(cfg.ACTIVATION is not None):
-                op = _ACTIVATIONS[cfg.ACTIVATION]
-
-            if cutlass.const_expr(_is_packed16(cfg.DTYPE) and cfg.ACTIVATION is not None):
-                kit_act = _packed16_kit(cfg.DTYPE)
-
-            amax_r = Float32(0.0)
-            for w in cutlass.range_constexpr(WAVES):
-                idx = (w * PACK_SIZE + offset) % SCALE_DIM
-                for e in cutlass.range_constexpr(PACK_SIZE):
-                    x = Float32(sX_thread_rw[0, idx + e])
-                    # If IS_ACT, apply activation function to x in f32
-                    if cutlass.const_expr(cfg.ACTIVATION is not None):
-                        # If it's relu, we can handle it later
-                        if not cutlass.const_expr(FUSE_RELU):
-                            x = op(x)
-                    # If IS_DBIAS and not colwise, accumulate dbias from x in f32
-                    if cutlass.const_expr(cfg.WITH_DBIAS and not cfg.COLWISE): 
-                        j = w * PACK_SIZE + e
-                        thread_dbias[j] = thread_dbias[j] + x
-                    # If 16-bit input with activation, truncate to IType
-                    if cutlass.const_expr(_is_packed16(cfg.DTYPE) and cfg.ACTIVATION is not None):
-                        x = kit_act.truncate_f32(x) # TODO: Why not just qunatize from f32?
-                    in_r[w][e] = x
-                    if cutlass.const_expr(FUSE_RELU):
-                        amax_r = cute.arch.fmax(amax_r, x) # For relu cases, we don't need abs since negative values will be 0 so they lose comparison automatically
-                    else:
-                        amax_r = cute.arch.fmax(amax_r, fabs_f32(x))
-            if cutlass.const_expr(FUSE_RELU):
-                amax_r = cute.arch.fmax(amax_r, Float32(0.0)) # If relu, the amax is at least 0
-
-        # 2. E8M0 scale → gmem. mS_row's layout already encodes the swizzle
-        # when cfg.WITH_GEMM_SWIZZLED_SCALES=True, so 2D access just works.
-        biased_exp_r = float_to_e8m0(amax_r * max_norm_rcp)
-        # mS_row_stage has logical shape (32, 2) and we have 64 threads where each is mapped to one scale factor
-        # The TV layout is equivalent to https://kainzhong.github.io/CuTe-Layout-Visualizer/?key=tv-2-%2832%2C+2%29%3A%282%2C+1%29-%281%29
-        # but it's too trival so let's just index it directly without using layout
-        # Note this is the logical layout, which is on top of the swizzled / non-swizzled scale factor layout that mappes the logical index to the physical offset
-        mS_row_stage[(tidx // 2, tidx % 2)] = Uint8(biased_exp_r)
-
-        # 3. scale + packed fp8 cast → smem as one u32 per wave.
-        inv_scale_r = exp2f_rcp(biased_exp_r) # f32 reciprocal of the scale
-        # Fetch the conversion function based on the FP8 format
-        cvt_f32x2 = _cvt_f32x2_to_fp8x2(cfg.FP8_DTYPE)
-        if cutlass.const_expr(_row_fast):
-            kit_cast = _packed16_kit(cfg.DTYPE)
-            mul_cvt_x2 = kit_cast.mul_cvt_to_fp8x2(cfg.FP8_DTYPE, FUSE_RELU)
-            # Pack `(inv_scale_r, inv_scale_r)` as a single 64-bit f32x2 once;
-            # the per-wave mul_cvt consumes this directly.
-            scale_2x = pack_f32x2(inv_scale_r, inv_scale_r)
-
-        bank_group = (tidx % THREADS_PER_WARP) // THREADS_PER_BANK # Each 4 threads share the same bank, which forms a bank group
-        offset = bank_group * 4 # Each bank group will write 4 fp8 to
-        for w in cutlass.range_constexpr(WAVES):
-            idx = (w * 4 + offset) % SCALE_DIM
-            idx = idx // 4
-            if cutlass.const_expr(_row_fast):
-                # One fused PTX per <fmt>x2 pair: <fmt>x2 × f32x2 → fp8x2.
-                # Byte layout: byte[0]=fp8(lo * s), byte[1]=fp8(hi * s).
-                p01 = mul_cvt_x2(in_r[w][0], scale_2x)
-                p23 = mul_cvt_x2(in_r[w][1], scale_2x)
-            else:
-                # cvt PTX semantics: `cvt.rn.satfinite.<fmt>.f32 d, a, b` gives
-                # d[15:8]=fp8(a), d[7:0]=fp8(b). Pass (v1, v0) so the u16 low
-                # byte ends up as fp8(v0) and the high byte as fp8(v1).
-                v0 = in_r[w][0] * inv_scale_r
-                v1 = in_r[w][1] * inv_scale_r
-                v2 = in_r[w][2] * inv_scale_r
-                v3 = in_r[w][3] * inv_scale_r
-                p01 = cvt_f32x2(v1, v0, FUSE_RELU)  # u16 little-endian: v0,v1
-                p23 = cvt_f32x2(v3, v2, FUSE_RELU)  # u16 little-endian: v2,v3
-            quad = (p23 << Int32(16)) | p01
-            sO_thread_u32[idx] = Uint32(quad)
-
-        # Per-thread amax over the thread's 32-elt scale block. Also returns
-        # the (possibly updated) thread_dbias accumulator — extended in the
-        # path-B branch above; passed through unchanged otherwise.
-        return amax_r, thread_dbias
 
     @cute.jit
     def _process_colwise_dact(
@@ -2110,161 +1438,37 @@ def get_quantize_mxfp8_cutedsl_func(
 
 def quantize_mxfp8_cutedsl(
     x: torch.Tensor,
-    quantized_output,
     fp8_dtype: str = "e4m3",
     rowwise: bool = True,
     colwise: bool = False,
     with_gemm_swizzled_scales: bool = False,
-    noop: torch.Tensor = None,
     with_amax: bool = False,
     activation: str = None,
     act_input: torch.Tensor = None,
     compute_dbias: bool = False,
     is_dact: bool = False,
-    do_nothing = False
-) -> dict:
-    """Quantize a 2D tensor to MXFP8 format using CuTeDSL kernels with smem tiling.
-
-    Args:
-        activation: forward fused activation ('relu'/'gelu'/'silu') or
-            backward derivative ('drelu'/'dgelu'/'dsilu'), or None.
-        act_input: REQUIRED when activation is a derivative. Holds the
-            saved forward input `x` from the forward pass; the kernel
-            evaluates `dOP(act_input)` and multiplies by `x` (the upstream
-            grad). Same shape & dtype as `x`. Ignored otherwise.
-        compute_dbias: when True, the kernel additionally computes the
-            per-column sum of post-activation values (the bias gradient),
-            returned as `result["dbias"]` of shape (N,) and dtype matching
-            x.dtype. Currently requires `colwise=True` (only path A of the
-            C++ kernel is implemented).
-        noop: optional 1-element f32 cuda tensor. If `noop[0] == 1.0` at launch
-            time, the kernel returns immediately and output buffers are left as
-            allocated (uninitialised). Used for CUDA-Graph-friendly skip — see
-            `swizzle_demo.svg`-adjacent docs / the C++ reference for semantics.
-        with_amax: optional 1-element f32 cuda tensor. When supplied, the kernel
-            atomic-maxes max(|x|) over the whole tensor into amax[0] (across
-            all CTAs). Used by delayed-scaling FP8 modes that need a per-tensor
-            amax alongside the per-32-element MXFP8 scales. Caller is
-            responsible for initialising amax (e.g. to 0.0) before launch.
-    """
-    # t_start = time.perf_counter_ns()
-    # print(f"Input tensor: shape={x.shape}, dtype={x.dtype}, device={x.device}")
-    # nvtx = torch.cuda.nvtx
-    # nvtx.range_push("dsl.validate")
-    # assert x.is_cuda and x.is_contiguous() and x.ndim == 2
-    # t0 = time.perf_counter_ns()
-    M, N = x.shape
-    # assert rowwise or colwise
-    # assert M % TILE_Y == 0, f"M={M} must be a multiple of {TILE_Y}"
-    # assert N % TILE_X == 0, f"N={N} must be a multiple of {TILE_X}"
+):
+    quantizer = MXFP8Quantizer(
+        fp8_dtype=_FP8_DTYPES[fp8_dtype],
+        rowwise=rowwise,
+        columnwise=colwise,
+    )
+    quantizer.internal = True
     if with_gemm_swizzled_scales:
-        # Swizzled tile is 128×4 in (M, N/32) → requires M and N to be
-        # multiples of 128 to avoid partial-tile padding (which the host
-        # would have to memset).
-        # assert M % 128 == 0 and N % 128 == 0, (
-        #     f"with_gemm_swizzled_scales requires M and N multiples of 128, "
-        #     f"got M={M}, N={N}")
-        pass
-    if noop is None:
-        noop = dummy_float32
-    else:
-        # assert noop.is_cuda and noop.dtype == torch.float32 and noop.numel() == 1, (
-        #     f"noop must be a 1-element float32 cuda tensor, got "
-        #     f"shape={tuple(noop.shape)}, dtype={noop.dtype}")
-        pass
-    if with_amax:
-        # assert amax.is_cuda and amax.dtype == torch.float32 and amax.numel() == 1, (
-        #     f"amax must be a 1-element float32 cuda tensor, got "
-        #     f"shape={tuple(amax.shape)}, dtype={amax.dtype}")
-        amax = torch.zeros(1, dtype=torch.float32, device="cuda")
-        pass
-    else:
-        # Reuse the noop dummy slot — the kernel never reads/writes it when
-        # cfg.WITH_AMAX is False, so any non-null pointer is fine.
-        amax = dummy_float32
-    if is_dact:
-        # assert act_input is not None, (
-        #     f"activation={activation!r} is a derivative — caller must pass "
-        #     f"act_input (saved forward x).")
-        # assert act_input.is_cuda and act_input.shape == x.shape and \
-        #        act_input.dtype == x.dtype and act_input.is_contiguous(), (
-        #     f"act_input must be a contiguous {x.dtype} cuda tensor with "
-        #     f"shape={tuple(x.shape)}, got shape={tuple(act_input.shape)}, "
-        #     f"dtype={act_input.dtype}")
-        pass
-    else:
-        # Alias to x — the kernel ignores act_in_ptr in non-DACT paths, so
-        # any valid (well-formed) pointer is fine. Aliasing avoids needing
-        # a same-size dummy buffer.
-        act_input = x
-    if compute_dbias:
-        # assert rowwise or colwise, (
-        #     "compute_dbias=True requires rowwise or colwise to be True.")
-        pass
-
-    cutlass_dtype = _torch_to_cutlass_dtype[x.dtype]
-    max_norm_rcp = FP8E4M3_MAX_NORM_RCP if fp8_dtype == "e4m3" else FP8E5M2_MAX_NORM_RCP
-    # stream = torch.cuda.current_stream()
-    # nvtx.range_pop()  # dsl.validate
-    # t1 = time.perf_counter_ns()
-    # timing_func("prepare_args", (t1 - t0) / 1e6)
-
-    # t0 = time.perf_counter_ns()
-    # nvtx.range_push("dsl.alloc")
-    result = {}
+        quantizer.optimize_for_gemm = True
+    fn_name = get_quantize_mxfp8_cutedsl_func(
+        x=x,
+        quantized_output=tex.prepare_quantize(x, quantizer),
+        rowwise=quantizer.rowwise_usage,
+        colwise=quantizer.columnwise_usage,
+        fp8_dtype="e4m3" if quantizer.dtype == tex.DType.kFloat8E4M3 else "e5m2",
+        with_gemm_swizzled_scales=quantizer.optimize_for_gemm,
+        with_amax=with_amax,
+        activation=activation,
+        act_input=act_input,
+        compute_dbias=compute_dbias,
+        is_dact=is_dact,
+    )
+    output = tex.quantize_with_func(x, quantizer, None, fn_name)
+    return output
     
-    out_row_data  = quantized_output._rowwise_data  if rowwise else None
-    out_row_scale = quantized_output._rowwise_scale_inv if rowwise else None
-    out_col_data  = quantized_output._colwise_data  if colwise else None
-    out_col_scale = quantized_output._colwise_scale_inv if colwise else None
-    # nvtx.range_pop()  # dsl.alloc
-    # t1 = time.perf_counter_ns()
-    # timing_func("allocate", (t1 - t0) / 1e6)
-
-    # t0 = time.perf_counter_ns()
-    # nvtx.range_push("dsl.cache_lookup")
-    # Single unified kernel launch — loads global memory once for both directions
-    cfg = MXFP8QuantizeConfig(cutlass_dtype, fp8_dtype, rowwise=rowwise, colwise=colwise,
-                               with_gemm_swizzled_scales=with_gemm_swizzled_scales,
-                               with_amax=with_amax, activation=activation,
-                               with_dbias=compute_dbias, is_dact=is_dact)
-    # compiled = _get_compiled_kernel_tvm_ffi(cfg)
-    fn_name = _get_compiled_kernel(cfg, M, N)
-    if compute_dbias:
-        blocks_Y = (M + TILE_Y * NUM_TILES - 1) // (TILE_Y * NUM_TILES)
-        dbias_workspace = torch.empty(
-            (blocks_Y, N), dtype=torch.float32, device=x.device)
-    else:
-        # Fake declares (WS_M, N) — any positive WS_M is OK. Use a 1-row
-        # dummy; the kernel never touches it when cfg.WITH_DBIAS is False.
-        dbias_workspace = None
-
-    tex.applyTVMFunction(fn_name, [
-        x, x,
-        out_row_data,
-        out_row_scale,
-        out_col_data,
-        out_col_scale,
-        noop, amax,
-        None,
-    ])
-
-    if compute_dbias:
-        # Reduce blocks_Y partial sums along the block axis. torch.sum is
-        # tree-based (single CUDA launch) — fast, but its association order
-        # differs from TE's reduce_dbias kernel (sequential left-fold) so
-        # fp32 dbias output drifts by ≤1 ULP. bf16/fp16 outputs round to
-        # the same final byte. Workload-relevant trade: a sequential
-        # Python-loop reduce would be bit-exact but launches `blocks_Y`
-        # element-wise add kernels, dwarfing the quantize kernel time at
-        # large shapes (e.g. 256 launches for M=16384).
-        # nvtx.range_push("dsl.reduce_dbias")
-        result["dbias"] = dbias_workspace.sum(dim=0).to(x.dtype)
-        # nvtx.range_pop()  # dsl.reduce_dbias
-    if with_amax:
-        result["amax"] = amax[0].item()
-    # t1 = time.perf_counter_ns()
-    # timing_func("postprocess_output", (t1 - t0) / 1e6)
-    # t_end = time.perf_counter_ns()
-    # timing_func("total_time", (t_end - t_start) / 1e6)
-    return result

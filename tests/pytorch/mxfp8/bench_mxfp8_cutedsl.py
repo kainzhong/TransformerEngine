@@ -16,7 +16,7 @@ import transformer_engine.pytorch as te
 import transformer_engine_torch as tex
 from transformer_engine.pytorch import MXFP8Quantizer
 
-from quantize_mxfp8_cutedsl_alt import get_quantize_mxfp8_cutedsl_func, quantize_mxfp8_cutedsl
+from quantize_mxfp8_cutedsl_alt import get_quantize_mxfp8_cutedsl_func
 
 # Shape presets — names map to lists of (M, N) pairs.
 # All shapes are multiples of 64 (the CuTeDSL kernel's CHUNK_DIM).
@@ -227,19 +227,16 @@ def bench_once(name, fn, warmup, iters, evict_l2=False, single=False):
         evict = _l2_evict_buf()
         total_ms = 0.0
         nvtx.range_push(f"{name}_measure")
-        t0 = time.perf_counter_ns()
         for i in range(iters):
-            # evict.zero_()             # async L2 flush
-            # torch.cuda.synchronize()  # ← drain evict before timing starts
-            # nvtx.range_push(f"{name}_iter_{i}")
-            # t0 = time.perf_counter_ns()
+            evict.zero_()             # async L2 flush
+            torch.cuda.synchronize()  # ← drain evict before timing starts
+            nvtx.range_push(f"{name}_iter_{i}")
+            t0 = time.perf_counter_ns()
             fn()                      # host wrapper + kernel launch
-            # torch.cuda.synchronize()  # wait for kernel
-            # t1 = time.perf_counter_ns()
-            # nvtx.range_pop()
-            # total_ms += (t1 - t0) / 1e6
-        t1 = time.perf_counter_ns()
-        total_ms = (t1 - t0) / 1e6
+            torch.cuda.synchronize()  # wait for kernel
+            t1 = time.perf_counter_ns()
+            nvtx.range_pop()
+            total_ms += (t1 - t0) / 1e6
         nvtx.range_pop()
         return total_ms / iters
 
@@ -248,20 +245,23 @@ def bench_once(name, fn, warmup, iters, evict_l2=False, single=False):
         fn()
     torch.cuda.synchronize()
 
-    start = torch.cuda.Event(enable_timing=True)
-    end = torch.cuda.Event(enable_timing=True)
-
+    evict = _l2_evict_buf()
+    total_ms = 0.0
     nvtx.range_push(f"{name}_measure")
-    start.record()
+    t0 = time.perf_counter_ns()
     for i in range(iters):
-        nvtx.range_push(f"{name}_iter_{i}")
-        fn()
-        nvtx.range_pop()
-    end.record()
+        # evict.zero_()             # async L2 flush
+        # torch.cuda.synchronize()  # ← drain evict before timing starts
+        # nvtx.range_push(f"{name}_iter_{i}")
+        # t0 = time.perf_counter_ns()
+        fn()                      # host wrapper + kernel launch
+        # torch.cuda.synchronize()  # wait for kernel
+        # t1 = time.perf_counter_ns()
+        # nvtx.range_pop()
+        # total_ms += (t1 - t0) / 1e6
+    t1 = time.perf_counter_ns()
+    total_ms = (t1 - t0) / 1e6
     nvtx.range_pop()
-    torch.cuda.synchronize()
-
-    total_ms = start.elapsed_time(end)
     return total_ms / iters
 
 
