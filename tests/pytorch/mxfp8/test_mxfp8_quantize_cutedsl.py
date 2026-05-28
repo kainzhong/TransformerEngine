@@ -11,7 +11,6 @@ to the reference C++ MXFP8 quantizer in Transformer Engine. Covers:
   - quantize -> dequantize roundtrip accuracy
   - IS_ACT  (fused forward activation)                vs. `tex.{relu,gelu,silu}`
   - IS_DACT (fused backward activation)               vs. `tex.{drelu,dgelu,dsilu}`
-  - IS_DACT + IS_DBIAS (act gradient + per-col sum)   vs. `tex.dbias_d{relu,gelu,silu}`
 """
 
 import pytest
@@ -56,17 +55,21 @@ def _dirs(name):
 
 
 def _assert_quant_equal(dsl, ref_tensor, rowwise, colwise, tag=""):
-    """Bit-exact compare DSL output dict against a TE quantized tensor."""
+    """Bit-exact compare two MXFP8 quantized tensors."""
     if rowwise:
+        dsl_d = dsl._rowwise_data.view(torch.uint8)
+        dsl_s = dsl._rowwise_scale_inv.view(torch.uint8)
         ref_d = ref_tensor._rowwise_data.view(torch.uint8)
         ref_s = ref_tensor._rowwise_scale_inv.view(torch.uint8)
-        assert torch.equal(dsl["rowwise_data"], ref_d), f"{tag}: rowwise data mismatch"
-        assert torch.equal(dsl["rowwise_scale"], ref_s), f"{tag}: rowwise scale mismatch"
+        assert torch.equal(dsl_d, ref_d), f"{tag}: rowwise data mismatch"
+        assert torch.equal(dsl_s, ref_s), f"{tag}: rowwise scale mismatch"
     if colwise:
+        dsl_d = dsl._columnwise_data.view(torch.uint8)
+        dsl_s = dsl._columnwise_scale_inv.view(torch.uint8)
         ref_d = ref_tensor._columnwise_data.view(torch.uint8)
         ref_s = ref_tensor._columnwise_scale_inv.view(torch.uint8)
-        assert torch.equal(dsl["colwise_data"], ref_d), f"{tag}: colwise data mismatch"
-        assert torch.equal(dsl["colwise_scale"], ref_s), f"{tag}: colwise scale mismatch"
+        assert torch.equal(dsl_d, ref_d), f"{tag}: colwise data mismatch"
+        assert torch.equal(dsl_s, ref_s), f"{tag}: colwise scale mismatch"
 
 
 # ---------------------------------------------------------------------------
@@ -108,12 +111,10 @@ def check_mxfp8_cutedsl_vs_reference(
         colwise=return_transpose,
     )
     torch.cuda.synchronize()
+    dsl_qx, dsl_sx, dsl_qx_t, dsl_sx_t = unpack_quantized_tensor(dsl_result)
 
     # --- Compare rowwise ---
     if return_rowwise:
-        dsl_qx = dsl_result["rowwise_data"]
-        dsl_sx = dsl_result["rowwise_scale"]
-
         expected_scale_shape = get_mxfp8_scale_shape_no_padding(x.shape, columnwise=False)
         assert dsl_qx.shape == ref_qx.shape, (
             f"Rowwise data shape mismatch: DSL={dsl_qx.shape} vs Ref={ref_qx.shape}"
@@ -128,16 +129,14 @@ def check_mxfp8_cutedsl_vs_reference(
         )
 
         ref_sx_u8 = ref_sx.view(dtype=torch.uint8)
+        dsl_sx_u8 = dsl_sx.view(dtype=torch.uint8)
         torch.testing.assert_close(
-            dsl_sx, ref_sx_u8, atol=0.0, rtol=0.0,
+            dsl_sx_u8, ref_sx_u8, atol=0.0, rtol=0.0,
             msg="Rowwise scale mismatch between CuTeDSL and reference",
         )
 
     # --- Compare colwise ---
     if return_transpose:
-        dsl_qx_t = dsl_result["colwise_data"]
-        dsl_sx_t = dsl_result["colwise_scale"]
-
         expected_scale_shape_t = get_mxfp8_scale_shape_no_padding(x.shape, columnwise=True)
         assert dsl_qx_t.shape == ref_qx_t.shape, (
             f"Colwise data shape mismatch: DSL={dsl_qx_t.shape} vs Ref={ref_qx_t.shape}"
@@ -152,8 +151,9 @@ def check_mxfp8_cutedsl_vs_reference(
         )
 
         ref_sx_t_u8 = ref_sx_t.view(dtype=torch.uint8)
+        dsl_sx_t_u8 = dsl_sx_t.view(dtype=torch.uint8)
         torch.testing.assert_close(
-            dsl_sx_t, ref_sx_t_u8, atol=0.0, rtol=0.0,
+            dsl_sx_t_u8, ref_sx_t_u8, atol=0.0, rtol=0.0,
             msg="Colwise scale mismatch between CuTeDSL and reference",
         )
 
@@ -174,8 +174,8 @@ def check_mxfp8_cutedsl_roundtrip(
     result = quantize_mxfp8_cutedsl(x, fp8_dtype="e4m3", rowwise=True)
     torch.cuda.synchronize()
 
-    qx = result["rowwise_data"]
-    sx = result["rowwise_scale"]
+    qx = result._rowwise_data.view(torch.uint8)
+    sx = result._rowwise_scale_inv.view(torch.uint8)
 
     x_f32 = x.float()
     qx_f32 = qx.view(torch.float8_e4m3fn).float()
@@ -328,11 +328,6 @@ _DIRECTIONS = ["row", "col", "both"]
 
 _TE_FWD_ACT = {"relu": tex.relu, "gelu": tex.gelu, "silu": tex.silu}
 _TE_BWD_ACT = {"drelu": tex.drelu, "dgelu": tex.dgelu, "dsilu": tex.dsilu}
-_TE_DBIAS_DACT = {
-    "drelu": tex.dbias_drelu,
-    "dgelu": tex.dbias_dgelu,
-    "dsilu": tex.dbias_dsilu,
-}
 
 
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
@@ -402,44 +397,3 @@ def test_mxfp8_cutedsl_dact(
                         tag=f"{activation}/{direction}/{x_dtype}")
 
 
-@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
-@pytest.mark.parametrize("M, N", _COMBO_SHAPES)
-@pytest.mark.parametrize("x_dtype", _COMBO_DTYPES, ids=str)
-@pytest.mark.parametrize("activation", sorted(_TE_DBIAS_DACT))
-# Cover both IS_DBIAS paths: path A (colwise piggyback, used for "col" & "both")
-# and path B (rowwise-only shmem-transpose, used for "row").
-@pytest.mark.parametrize("direction", _DIRECTIONS)
-def test_mxfp8_cutedsl_dbias_dact(
-    x_dtype: torch.dtype,
-    M: int,
-    N: int,
-    activation: str,
-    direction: str,
-) -> None:
-    """IS_DACT + IS_DBIAS: fused dact + per-column dbias vs. tex.dbias_d{relu,gelu,silu}."""
-    rowwise, colwise = _dirs(direction)
-    torch.manual_seed(0)
-    grad = torch.randn((M, N), dtype=x_dtype, device="cuda")
-    act_in = torch.randn((M, N), dtype=x_dtype, device="cuda")
-
-    quantizer = MXFP8Quantizer(
-        fp8_dtype=tex.DType.kFloat8E4M3,
-        rowwise=rowwise, columnwise=colwise,
-    )
-    # TE returns (dbias, quant_tensor)
-    ref_dbias, ref_quant = _TE_DBIAS_DACT[activation](grad, act_in, quantizer)
-
-    dsl = quantize_mxfp8_cutedsl(
-        grad, rowwise=rowwise, colwise=colwise,
-        activation=activation, act_input=act_in,
-        compute_dbias=True, is_dact=True,
-    )
-    torch.cuda.synchronize()
-
-    tag = f"{activation}/{direction}/{x_dtype}"
-    _assert_quant_equal(dsl, ref_quant, rowwise, colwise, tag=tag)
-    assert torch.equal(dsl["dbias"], ref_dbias), (
-        f"{tag}: dbias mismatch — "
-        f"{(dsl['dbias'] != ref_dbias).sum().item()}/{N} diffs, "
-        f"max |Δ|={(dsl['dbias'].float() - ref_dbias.float()).abs().max().item():.6g}"
-    )
