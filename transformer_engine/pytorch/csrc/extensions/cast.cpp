@@ -20,6 +20,7 @@
 #include "common/util/system.h"
 #include "pybind.h"
 #include "transformer_engine/transformer_engine.h"
+#include "tvm_ffi_bridge.h"
 
 namespace transformer_engine {
 namespace pytorch {
@@ -65,16 +66,37 @@ py::object quantize(const at::Tensor &tensor, py::handle quantizer, const py::ob
   return output_py;
 }
 
-py::object quantize_with_func(const at::Tensor &tensor, py::handle quantizer, const py::object &output,
-                    std::optional<at::Tensor> noop_flag, const py::object &quant_func) {
-  // Convert quantizer to C++ object
+py::object prepare_quantize(const at::Tensor &tensor, py::handle quantizer,
+                            const py::object &output) {
+  // Allocate (or rewrap) the quantized output and return the Python handle.
+  // No kernel call here — caller dispatches separately (e.g. via
+  // `tex.applyTVMFunction`). Mirrors the setup half of `quantize`.
   auto quantizer_cpp = convert_quantizer(quantizer);
-
-  // Convert input tensor to C++ object
   auto input_contiguous = tensor.contiguous();
   auto input_cpp = makeTransformerEngineTensor(input_contiguous);
 
-  // Initialize output tensor
+  TensorWrapper output_cpp;
+  py::object output_py;
+  if (output.is_none()) {
+    const auto shape = get_tensor_shape(input_cpp);
+    const auto fake_dtype = input_cpp.dtype();
+    std::tie(output_cpp, output_py) = quantizer_cpp->create_tensor(shape, fake_dtype);
+  } else {
+    std::tie(output_cpp, output_py) = quantizer_cpp->convert_and_update_tensor(output);
+  }
+  return output_py;
+}
+
+py::object quantize_with_func(const at::Tensor &tensor, py::handle quantizer,
+                            const py::object &output, const std::string &fn_name) {
+  // Allocate (or rewrap) the quantized output, build the kernel's arg list
+  // directly from NVTE tensor accessors (no Python attr round-trips), and
+  // dispatch via the global TVM FFI registry. Pairs with
+  // `_get_compiled_kernel` / `register_global_func` on the Python side.
+  auto quantizer_cpp = convert_quantizer(quantizer);
+  auto input_contiguous = tensor.contiguous();
+  auto input_cpp = makeTransformerEngineTensor(input_contiguous);
+
   TensorWrapper output_cpp;
   py::object output_py;
   if (output.is_none()) {
@@ -85,18 +107,23 @@ py::object quantize_with_func(const at::Tensor &tensor, py::handle quantizer, co
     std::tie(output_cpp, output_py) = quantizer_cpp->convert_and_update_tensor(output);
   }
 
-  // Initialize no-op flag
-  std::optional<TensorWrapper> noop_flag_cpp;
-  if (noop_flag.has_value()) {
-    noop_flag_cpp = makeTransformerEngineTensor(*noop_flag);
-  }
-
-  if (quant_func.is_none()){
-    return output_py;
-  }
-
-  // Perform quantization
-  quant_func(quantizer, input_contiguous, output_py, noop_flag);
+  // Build the 9-slot arg list. `vector<optional<DLTensorWrapper>>` can't be
+  // constructed from a braced-init-list because DLTensorWrapper's copy is
+  // deleted and initializer_list always copies; use a sized vector + emplace
+  // (which forwards into optional's in-place ctor and moves into the slot
+  // when the vector grows).
+  const int32_t dev_idx = static_cast<int32_t>(input_contiguous.device().index());
+  std::vector<std::optional<DLTensorWrapper>> args(9);
+  args[0].emplace(input_contiguous);                                     // mX
+  args[1].emplace(input_contiguous);                                     // mActIn (aliased)
+  // Output slots: present only if the quantizer allocated that direction.
+  // `data_ptr == nullptr` means the direction is disabled — leave nullopt.
+  if (auto nt = output_cpp.get_rowwise_data();         nt.data_ptr) args[2].emplace(nt, dev_idx);
+  if (auto nt = output_cpp.get_rowwise_scale_inv();    nt.data_ptr) args[3].emplace(nt, dev_idx);
+  if (auto nt = output_cpp.get_columnwise_data();      nt.data_ptr) args[4].emplace(nt, dev_idx);
+  if (auto nt = output_cpp.get_columnwise_scale_inv(); nt.data_ptr) args[5].emplace(nt, dev_idx);
+  // args[6..8] stay nullopt — kernel slots compiled as None.
+  applyTVMFunction(fn_name, args);
 
   return output_py;
 }

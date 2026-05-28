@@ -329,8 +329,14 @@ py::object create_empty_quantized_tensor(py::handle quantizer, const std::vector
 py::object quantize(const at::Tensor &tensor, py::handle quantizer, const py::object &output,
                     std::optional<at::Tensor> noop_flag);
 
-py::object quantize_with_func(const at::Tensor &tensor, py::handle quantizer, const py::object &output,
-                    std::optional<at::Tensor> noop_flag, const py::object &quant_func);
+// Pair with `applyTVMFunction`: allocate (or rewrap) the quantized output and
+// return the Python tensor handle. The actual kernel call is the caller's
+// responsibility (e.g., via tex.applyTVMFunction).
+py::object prepare_quantize(const at::Tensor &tensor, py::handle quantizer,
+                            const py::object &output);
+
+py::object quantize_with_func(const at::Tensor &tensor, py::handle quantizer,
+                            const py::object &output, const std::string &fn_name);
 
 py::object dequantize(const py::handle &input, DType otype);
 

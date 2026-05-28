@@ -18,6 +18,7 @@
 
 #include "../common.h"
 #include "../extensions.h"
+#include "../tvm_ffi_bridge.h"
 #include "common.h"
 
 namespace transformer_engine::pytorch {
@@ -137,9 +138,25 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   NVTE_DECLARE_COMMON_PYBIND11_HANDLES(m)
   m.def("quantize", transformer_engine::pytorch::quantize, py::arg("tensor"), py::arg("quantizer"),
         py::arg("output") = py::none(), py::arg("noop") = py::none());
+  m.def("prepare_quantize", transformer_engine::pytorch::prepare_quantize,
+        "Allocate (or rewrap) the quantized output for `tensor`. The actual "
+        "kernel call is the caller's responsibility — pair with applyTVMFunction.",
+        py::arg("tensor"), py::arg("quantizer"), py::arg("output") = py::none());
   m.def("quantize_with_func", transformer_engine::pytorch::quantize_with_func,
         py::arg("tensor"), py::arg("quantizer"), py::arg("output") = py::none(),
-        py::arg("noop") = py::none(), py::arg("quant_func"));
+        py::arg("fn_name"));
+  // Disambiguate the at::Tensor overload — there's a sibling
+  // applyTVMFunction(string, vector<optional<DLTensorWrapper>>) for internal
+  // C++ callers that pre-build wrappers, but only the at::Tensor form is
+  // exposed to Python.
+  m.def("applyTVMFunction",
+        static_cast<void (*)(const std::string &,
+                             const std::vector<std::optional<at::Tensor>> &)>(
+            &applyTVMFunction),
+        "Dispatch a TVM FFI globally-registered function with a list of "
+        "(optional) PyTorch tensors. None entries become TVM FFI None — used "
+        "for AOT-kernel slots that were compiled with None.",
+        py::arg("fn_name"), py::arg("args"));
   m.def("dequantize", &transformer_engine::pytorch::dequantize, "Dequantize", py::arg("input"),
         py::arg("otype"));
   m.def("create_empty_quantized_tensor",

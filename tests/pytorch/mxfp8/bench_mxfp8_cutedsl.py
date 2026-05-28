@@ -16,7 +16,7 @@ import transformer_engine.pytorch as te
 import transformer_engine_torch as tex
 from transformer_engine.pytorch import MXFP8Quantizer
 
-from quantize_mxfp8_cutedsl_alt import quantize_mxfp8_cutedsl
+from quantize_mxfp8_cutedsl_alt import get_quantize_mxfp8_cutedsl_func, quantize_mxfp8_cutedsl
 
 # Shape presets — names map to lists of (M, N) pairs.
 # All shapes are multiples of 64 (the CuTeDSL kernel's CHUNK_DIM).
@@ -142,19 +142,35 @@ def make_dsl_fn(combo, x, act_in, rowwise, colwise,
     quantizer.internal = True
     if swizzle:
         quantizer.optimize_for_gemm = True
-    return lambda: quantize_mxfp8_cutedsl(
-            x=x,
-            quantized_output=tex.quantize_with_func(x, quantizer, None, None, None),
-            rowwise=quantizer.rowwise_usage,
-            colwise=quantizer.columnwise_usage,
-            fp8_dtype="e4m3" if quantizer.dtype == tex.DType.kFloat8E4M3 else "e5m2",
-            with_gemm_swizzled_scales=quantizer.optimize_for_gemm,
-            with_amax=False,
-            activation=None,
-            act_input=None,
-            compute_dbias=False,
-            is_dact=False,
-        )
+    # quantize_with_func is gone (replaced by applyTVMFunction); for this
+    # JIT bench we just need an empty output buffer, which is what
+    # create_empty_quantized_tensor produces directly.
+    fn_name = get_quantize_mxfp8_cutedsl_func(
+        x=x,
+        quantized_output=tex.prepare_quantize(x, quantizer),
+        rowwise=quantizer.rowwise_usage,
+        colwise=quantizer.columnwise_usage,
+        fp8_dtype="e4m3" if quantizer.dtype == tex.DType.kFloat8E4M3 else "e5m2",
+        with_gemm_swizzled_scales=quantizer.optimize_for_gemm,
+        with_amax=False,
+        activation=None,
+        act_input=None,
+        compute_dbias=False,
+        is_dact=False,
+    )
+
+    def combined():
+        return tex.quantize_with_func(x, quantizer, None, fn_name)
+
+    def separate():
+        out = tex.prepare_quantize(x, quantizer)
+        return tex.quantize_with_func(x, quantizer, out, fn_name)
+    
+    print("combined")
+    return combined
+    # print("separate")
+    # return separate
+    
 
 # Module-level L2 evict buffer. 256 MB f32 (covers B200's ~60 MB L2 with headroom).
 # Allocated lazily, reused across calls to avoid alloc churn between bench runs.
