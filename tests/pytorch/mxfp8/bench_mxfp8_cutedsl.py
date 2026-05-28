@@ -49,29 +49,15 @@ def parse_shapes(shapes_str: str):
 
 
 _TEX_FORWARD_ACT = {"gelu": tex.gelu, "silu": tex.silu, "relu": tex.relu}
-_TEX_BACKWARD_ACT = {"dgelu": tex.dgelu, "dsilu": tex.dsilu, "drelu": tex.drelu}
-_TEX_DBIAS_DACT = {
-    "dbias_dgelu": tex.dbias_dgelu,
-    "dbias_dsilu": tex.dbias_dsilu,
-    "dbias_drelu": tex.dbias_drelu,
-}
 
-# combo → (needs_act_input, dsl_activation_kwarg, dsl_compute_dbias)
+# combo → dsl_activation_kwarg
 COMBOS = {
     # Plain quantize — matches MXFP8Quantizer(...).__call__.
-    "plain":         (False, None,    False),
+    "plain":  None,
     # Forward fused activation — tex.<name>.
-    "gelu":          (False, "gelu",  False),
-    "silu":          (False, "silu",  False),
-    "relu":          (False, "relu",  False),
-    # Backward activation only — tex.<name>(grad, act_in, q).
-    "dgelu":         (True,  "dgelu", False),
-    "dsilu":         (True,  "dsilu", False),
-    "drelu":         (True,  "drelu", False),
-    # Backward activation + bias gradient — tex.dbias_<name>(grad, act_in, q).
-    "dbias_dgelu":   (True,  "dgelu", True),
-    "dbias_dsilu":   (True,  "dsilu", True),
-    "dbias_drelu":   (True,  "drelu", True),
+    "gelu":   "gelu",
+    "silu":   "silu",
+    "relu":   "relu",
 }
 
 
@@ -86,7 +72,7 @@ _TORCH_IN_DTYPES = {
 }
 
 
-def make_reference_fn(combo, x, act_in, rowwise, colwise,
+def make_reference_fn(combo, x, rowwise, colwise,
                       fp8_dtype="e4m3", swizzle=False, with_amax=False):
     """Return a 0-arg callable that invokes the C++ TE reference for `combo`."""
     quantizer = MXFP8Quantizer(
@@ -113,12 +99,6 @@ def make_reference_fn(combo, x, act_in, rowwise, colwise,
     if combo in _TEX_FORWARD_ACT:
         op = _TEX_FORWARD_ACT[combo]
         return lambda: op(x, quantizer)
-    if combo in _TEX_BACKWARD_ACT:
-        op = _TEX_BACKWARD_ACT[combo]
-        return lambda: op(x, act_in, quantizer)
-    if combo in _TEX_DBIAS_DACT:
-        op = _TEX_DBIAS_DACT[combo]
-        return lambda: op(x, act_in, quantizer)
     raise ValueError(f"unknown combo {combo!r}")
 
 timing_dict = {}
@@ -130,10 +110,10 @@ def timing_func(label, iter_ms):
     if timing_count_dict[label] > skip_calls:
         timing_dict[label] = timing_dict.get(label, 0.0) + iter_ms
 
-def make_dsl_fn(combo, x, act_in, rowwise, colwise,
+def make_dsl_fn(combo, x, rowwise, colwise,
                 fp8_dtype="e4m3", swizzle=False, with_amax=False):
     """Return a 0-arg callable that invokes the CuTeDSL kernel for `combo`."""
-    _, activation, compute_dbias = COMBOS[combo]
+    activation = COMBOS[combo]
     quantizer = MXFP8Quantizer(
         fp8_dtype=_FP8_DTYPES[fp8_dtype],
         rowwise=rowwise,
@@ -147,16 +127,11 @@ def make_dsl_fn(combo, x, act_in, rowwise, colwise,
     # create_empty_quantized_tensor produces directly.
     fn_name = get_quantize_mxfp8_cutedsl_func(
         x=x,
-        quantized_output=tex.prepare_quantize(x, quantizer),
+        fp8_dtype="e4m3" if quantizer.dtype == tex.DType.kFloat8E4M3 else "e5m2",
         rowwise=quantizer.rowwise_usage,
         colwise=quantizer.columnwise_usage,
-        fp8_dtype="e4m3" if quantizer.dtype == tex.DType.kFloat8E4M3 else "e5m2",
         with_gemm_swizzled_scales=quantizer.optimize_for_gemm,
-        with_amax=False,
         activation=None,
-        act_input=None,
-        compute_dbias=False,
-        is_dact=False,
     )
 
     def combined():
@@ -245,9 +220,7 @@ def bench_once(name, fn, warmup, iters, evict_l2=False, single=False):
         fn()
     torch.cuda.synchronize()
 
-    evict = _l2_evict_buf()
     total_ms = 0.0
-    nvtx.range_push(f"{name}_measure")
     t0 = time.perf_counter_ns()
     for i in range(iters):
         # evict.zero_()             # async L2 flush
@@ -261,7 +234,6 @@ def bench_once(name, fn, warmup, iters, evict_l2=False, single=False):
         # total_ms += (t1 - t0) / 1e6
     t1 = time.perf_counter_ns()
     total_ms = (t1 - t0) / 1e6
-    nvtx.range_pop()
     return total_ms / iters
 
 
@@ -272,9 +244,6 @@ def bench_shape(M, N, rowwise, colwise, warmup, iters, combo="plain",
     torch.cuda.manual_seed(0)
     in_dt = _TORCH_IN_DTYPES[in_dtype]
     x = torch.randn(M, N, dtype=in_dt, device="cuda")
-    needs_act_input, _, has_dbias = COMBOS[combo]
-    act_in = (torch.randn(M, N, dtype=in_dt, device="cuda")
-              if needs_act_input else None)
 
     dir_label = "both" if (rowwise and colwise) else ("row" if rowwise else "col")
     tag = f"{combo}_{in_dtype}_{fp8_dtype}"
@@ -286,10 +255,10 @@ def bench_shape(M, N, rowwise, colwise, warmup, iters, combo="plain",
     # Per-shape outer NVTX range so each shape is clearly grouped in the timeline
     nvtx.range_push(f"shape_{M}x{N}_{dir_label}_{tag}")
 
-    ref_fn = make_reference_fn(combo, x, act_in, rowwise, colwise,
+    ref_fn = make_reference_fn(combo, x, rowwise, colwise,
                                fp8_dtype=fp8_dtype, swizzle=swizzle,
                                with_amax=with_amax)
-    dsl_fn = make_dsl_fn(combo, x, act_in, rowwise, colwise,
+    dsl_fn = make_dsl_fn(combo, x, rowwise, colwise,
                          fp8_dtype=fp8_dtype, swizzle=swizzle,
                          with_amax=with_amax)
     # Warm the CuTeDSL JIT cache once (not counted against bench)
@@ -319,8 +288,6 @@ def bench_shape(M, N, rowwise, colwise, warmup, iters, combo="plain",
 
     in_bytes_per_elt = x.element_size()
     bytes_in = M * N * in_bytes_per_elt
-    if needs_act_input:
-        bytes_in += M * N * in_bytes_per_elt
     bytes_out = 0
     bytes_scale = 0
     if rowwise:
@@ -329,13 +296,7 @@ def bench_shape(M, N, rowwise, colwise, warmup, iters, combo="plain",
     if colwise:
         bytes_out += M * N * 1                # colwise FP8 data
         bytes_scale += (M // 32) * N          # colwise e8m0 scales
-    bytes_dbias = 0
-    if has_dbias:
-        # Approximate: workspace = blocks_Y · N · 4 (f32). The reduce step
-        # reads it back and writes a tiny dbias[N] in input dtype.
-        blocks_Y = (M + 63) // 64
-        bytes_dbias = blocks_Y * N * 4 + N * in_bytes_per_elt
-    total_bytes = bytes_in + bytes_out + bytes_scale + bytes_dbias
+    total_bytes = bytes_in + bytes_out + bytes_scale
 
     def bw(ms):
         return total_bytes / (ms * 1e-3) / 1e9  # GB/s
