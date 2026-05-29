@@ -151,7 +151,7 @@ class MXFP8QuantizeSmemKernel:
         mX: cute.Tensor, # Input tensor to quantize
         mO_row: Optional[cute.Tensor], mS_row: Optional[cute.Tensor], # Rowwise output and scale tensors
         mO_col: Optional[cute.Tensor], mS_col: Optional[cute.Tensor], # Colwise output and scale tensors
-        mAmax: cute.Tensor, # Global amax accumulator, only used in WITH_AMAX path
+        mAmax: Optional[cute.Tensor], # Global amax accumulator, only used in WITH_AMAX path
     ):
         M = mX.shape[0]
         N = mX.shape[1]
@@ -803,4 +803,3 @@ def quantize_mxfp8_cutedsl(
     )
     output = tex.quantize_with_func(x, quantizer, None, fn_name)
     return output
-    

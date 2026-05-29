@@ -338,6 +338,8 @@ py::object prepare_quantize(const at::Tensor &tensor, py::handle quantizer,
 py::object quantize_with_func(const at::Tensor &tensor, py::handle quantizer,
                             const py::object &output, const std::string &fn_name);
 
+void apply_any_tvm_function(const std::string &fn_name, const std::vector<std::optional<at::Tensor>> &args);
+
 py::object dequantize(const py::handle &input, DType otype);
 
 py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const size_t num_tensors,

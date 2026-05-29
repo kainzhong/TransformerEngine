@@ -138,14 +138,19 @@ def make_dsl_fn(combo, x, rowwise, colwise,
         return tex.quantize_with_func(x, quantizer, None, fn_name)
 
     def separate():
-        out = tex.prepare_quantize(x, quantizer)
-        return tex.quantize_with_func(x, quantizer, out, fn_name)
+        output = tex.prepare_quantize(x, quantizer)
+        tex.apply_any_tvm_function(fn_name, [
+            x,
+            output._rowwise_data, output._rowwise_scale_inv,
+            output._columnwise_data, output._columnwise_scale_inv,
+            None,
+        ])
+        return output
     
-    print("combined")
-    return combined
-    # print("separate")
-    # return separate
-    
+    # print("combined")
+    # return combined
+    print("separate")
+    return separate
 
 # Module-level L2 evict buffer. 256 MB f32 (covers B200's ~60 MB L2 with headroom).
 # Allocated lazily, reused across calls to avoid alloc churn between bench runs.

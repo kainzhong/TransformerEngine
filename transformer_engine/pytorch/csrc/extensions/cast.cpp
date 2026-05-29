@@ -128,6 +128,22 @@ py::object quantize_with_func(const at::Tensor &tensor, py::handle quantizer,
   return output_py;
 }
 
+void apply_any_tvm_function(const std::string &fn_name, const std::vector<std::optional<at::Tensor>> &args) {
+  // Convert all at Tensor args to DLTensorWrapper
+  std::vector<std::optional<DLTensorWrapper>> dl_args;
+  for (const auto &arg : args) {
+    if (arg.has_value()) {
+      dl_args.emplace_back(*arg);
+    } else {
+      dl_args.emplace_back(std::nullopt);
+    }
+  }
+
+  // Helper for dispatching to arbitrary TVM FFI functions following the same
+  // optional-DLTensor signature pattern as above. The Python-side kernel can
+  // call this directly without needing a C++ wrapper per function.
+  applyTVMFunction(fn_name, args);
+}
 
 py::object create_empty_quantized_tensor(py::handle quantizer, const std::vector<size_t> &shape,
                                          at::ScalarType dtype, at::Device device, bool pin_memory) {

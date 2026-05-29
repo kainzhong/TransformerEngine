@@ -145,6 +145,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("quantize_with_func", transformer_engine::pytorch::quantize_with_func,
         py::arg("tensor"), py::arg("quantizer"), py::arg("output") = py::none(),
         py::arg("fn_name"));
+  m.def("apply_any_tvm_function", transformer_engine::pytorch::apply_any_tvm_function, py::arg("fn_name"),
+        py::arg("args"));
   // Disambiguate the at::Tensor overload — there's a sibling
   // applyTVMFunction(string, vector<optional<DLTensorWrapper>>) for internal
   // C++ callers that pre-build wrappers, but only the at::Tensor form is
