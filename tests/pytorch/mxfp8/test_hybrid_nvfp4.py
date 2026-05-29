@@ -66,6 +66,7 @@ if _is_blackwell():
     from quantize_mxfp8_cutedsl_alt import (
         MXFP8QuantizeConfig,
         MXFP8QuantizeSmemKernel,
+        HybridQuantizeSmemKernel,
         quantize_hybrid_cutedsl,
         SCALE_DIM,            # MXFP8 block (32)
         SCALE_DIM_NVFP4,      # NVFP4 block (16)
@@ -142,7 +143,9 @@ def quantize_hybrid(x: torch.Tensor, cfg, s_enc_val):
     args_c.append(se)
     args_r.append(se)
 
-    compiled = cute.compile(MXFP8QuantizeSmemKernel(cfg), *args_c)
+    # Hybrid kernel (11-param __call__); NVFP4 slots are None for the
+    # MXFP8-only reference run, which traces the MXFP8 path identically.
+    compiled = cute.compile(HybridQuantizeSmemKernel(cfg), *args_c)
     compiled(*args_r)
     torch.cuda.synchronize()
     return outs
