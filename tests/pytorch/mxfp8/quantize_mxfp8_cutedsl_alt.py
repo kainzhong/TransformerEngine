@@ -25,20 +25,7 @@ import time
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
 from transformer_engine.pytorch.tensor.storage.float8_tensor_storage import Float8TensorStorage
 import transformer_engine_torch as tex
-# Pin CuTeDSL compile target to the current device's Blackwell SM. Must be set
-# before cutlass imports so env detection in base_dsl picks it up; also passed
-# explicitly below.
-def _detect_cute_dsl_arch() -> str:
-    try:
-        import torch as _torch
-        major, minor = _torch.cuda.get_device_capability(_torch.cuda.current_device())
-    except Exception:
-        return "sm_100a"
-    # Map known Blackwell capabilities to their CuTeDSL arch-specific targets.
-    # Fall back to the plain (non-"a") target if the arch-specific one is unknown.
-    return f"sm_{major}{minor}"
 
-os.environ.setdefault("CUTE_DSL_ARCH", _detect_cute_dsl_arch())
 
 from typing import Optional, Type
 
@@ -75,7 +62,10 @@ from quantize_mxfp8_cutedsl_utils import (
     float_to_e8m0,
     quantize_colwise_mxfp8,
     quantize_rowwise_mxfp8,
-) 
+    quantize_rowwise_nvfp4,
+    quantize_colwise_nvfp4,
+    SCALE_DIM_NVFP4,
+)
 
 # MXFP8 settings
 MXFP8_BLOCK_SIZE = 32 # Number of elements per MXFP8 scale block. They will share the same E8M0 scale factor
@@ -107,11 +97,17 @@ NUM_WARPS = THREADS_PER_CHUNK // 32
 class MXFP8QuantizeConfig:
     def __init__(self, dtype, fp8_dtype="e4m3", rowwise=True, colwise=False,
                  with_gemm_swizzled_scales=False, with_amax=False,
-                 activation=None):
+                 activation=None, nvfp4_rowwise=False, nvfp4_colwise=False):
         self.DTYPE = dtype
         self.FP8_DTYPE = fp8_dtype
         self.ROWWISE = rowwise
         self.COLWISE = colwise
+        # Hybrid extension: optionally also emit NVFP4 in the "other" direction
+        # (rowwise MXFP8 + colwise NVFP4, or colwise MXFP8 + rowwise NVFP4).
+        # Both NVFP4 passes reuse the same 64-thread CTA and the same input
+        # smem tile as the MXFP8 pass — no second DRAM read.
+        self.NVFP4_ROWWISE = nvfp4_rowwise
+        self.NVFP4_COLWISE = nvfp4_colwise
         self.WITH_GEMM_SWIZZLED_SCALES = with_gemm_swizzled_scales
         self.WITH_AMAX = with_amax
         if activation is not None and activation not in _ACTIVATIONS:
@@ -149,9 +145,19 @@ class MXFP8QuantizeSmemKernel:
     def __call__(
         self,
         mX: cute.Tensor, # Input tensor to quantize
-        mO_row: Optional[cute.Tensor], mS_row: Optional[cute.Tensor], # Rowwise output and scale tensors
-        mO_col: Optional[cute.Tensor], mS_col: Optional[cute.Tensor], # Colwise output and scale tensors
+        mO_row: Optional[cute.Tensor], mS_row: Optional[cute.Tensor], # Rowwise MXFP8 output and scale tensors
+        mO_col: Optional[cute.Tensor], mS_col: Optional[cute.Tensor], # Colwise MXFP8 output and scale tensors
         mAmax: cute.Tensor, # Global amax accumulator, only used in WITH_AMAX path
+        # --- Hybrid NVFP4 outputs (all None unless the matching cfg flag is set) ---
+        # Data tiles are written to smem by the NVFP4 utils and TMA-flushed here;
+        # scale tensors (E4M3 bytes) are written straight to gmem by the utils.
+        #   rowwise NVFP4: mO_nvfp4_row (M, N//2),  mS_nvfp4_row (M, N//16)
+        #   colwise NVFP4: mO_nvfp4_col (N, M//2),  mS_nvfp4_col (N, M//16) (transposed)
+        mO_nvfp4_row: Optional[cute.Tensor] = None, mS_nvfp4_row: Optional[cute.Tensor] = None,
+        mO_nvfp4_col: Optional[cute.Tensor] = None, mS_nvfp4_col: Optional[cute.Tensor] = None,
+        # Global NVFP4 encode scale S_enc = 448*6/global_amax, host-precomputed
+        # and passed as a runtime Float32 scalar (None when no NVFP4 direction).
+        s_enc=None,
     ):
         M = mX.shape[0]
         N = mX.shape[1]
@@ -239,7 +245,29 @@ class MXFP8QuantizeSmemKernel:
             tma_atom_out_col, tma_dst_out_col = cute.nvgpu.cpasync.make_tiled_tma_atom(
                 op_store, mO_col, out_smem_layout, cta_tiler, num_multicast=1,
             )
-        
+
+        # NVFP4 S2G store atoms. fp4 packs 2 elements per byte, so the output
+        # tiles are half-width in the packed dimension:
+        #   rowwise: (TILE_Y, TILE_X // 2)   — pairs packed along X
+        #   colwise: (TILE_X, TILE_Y // 2)   — TRANSPOSED, pairs packed along
+        #            the (input-)row axis to match TE's NVFP4 columnwise layout.
+        tma_atom_nvfp4_row = None
+        tma_dst_nvfp4_row = None
+        tma_atom_nvfp4_col = None
+        tma_dst_nvfp4_col = None
+        if cutlass.const_expr(cfg.NVFP4_ROWWISE):
+            nvfp4_row_tiler = (TILE_Y, TILE_X // 2)
+            nvfp4_row_smem_layout = cute.make_ordered_layout(nvfp4_row_tiler, order=(1, 0))
+            tma_atom_nvfp4_row, tma_dst_nvfp4_row = cute.nvgpu.cpasync.make_tiled_tma_atom(
+                op_store, mO_nvfp4_row, nvfp4_row_smem_layout, nvfp4_row_tiler, num_multicast=1,
+            )
+        if cutlass.const_expr(cfg.NVFP4_COLWISE):
+            nvfp4_col_tiler = (TILE_X, TILE_Y // 2)
+            nvfp4_col_smem_layout = cute.make_ordered_layout(nvfp4_col_tiler, order=(1, 0))
+            tma_atom_nvfp4_col, tma_dst_nvfp4_col = cute.nvgpu.cpasync.make_tiled_tma_atom(
+                op_store, mO_nvfp4_col, nvfp4_col_smem_layout, nvfp4_col_tiler, num_multicast=1,
+            )
+
         # CUDA launches in (0,0), (1,0), (2,0)... order, so we should make N the leading dimension for better access pattern 
         # So consecutive blocks will move along the N dimension first, which is the innermost dimension in memory and we can use cache better
         grid = [
@@ -254,6 +282,10 @@ class MXFP8QuantizeSmemKernel:
             tma_atom, tma_src,
             tma_atom_out_row, tma_dst_out_row,
             tma_atom_out_col, tma_dst_out_col,
+            mS_nvfp4_row, mS_nvfp4_col,
+            tma_atom_nvfp4_row, tma_dst_nvfp4_row,
+            tma_atom_nvfp4_col, tma_dst_nvfp4_col,
+            s_enc,
         ).launch(
             grid=grid,
             block=block,
@@ -271,6 +303,10 @@ class MXFP8QuantizeSmemKernel:
         tma_atom, tma_src, # how to use TMA to copy the input
         tma_atom_out_row, tma_dst_out_row, # how to use TMA to copy the rowwise output
         tma_atom_out_col, tma_dst_out_col, # how to use TMA to copy the colwise output
+        mS_nvfp4_row, mS_nvfp4_col, # NVFP4 scale tensors (E4M3 bytes, written direct to gmem)
+        tma_atom_nvfp4_row, tma_dst_nvfp4_row, # NVFP4 rowwise output S2G
+        tma_atom_nvfp4_col, tma_dst_nvfp4_col, # NVFP4 colwise output S2G
+        s_enc, # NVFP4 global encode scale, runtime Float32 (None if no NVFP4)
     ):
         cfg = self.cfg
 
@@ -278,6 +314,13 @@ class MXFP8QuantizeSmemKernel:
             mS_row = cute.zipped_divide(mS_row, (TILE_Y, TILE_X // SCALE_DIM))
         if cutlass.const_expr(cfg.COLWISE):
             mS_col = cute.zipped_divide(mS_col, (TILE_Y // SCALE_DIM, TILE_X))
+        # NVFP4 scale tensors (E4M3 bytes). Rowwise scale is (M, N//16) → per-stage
+        # tile (TILE_Y, TILE_X//16); colwise scale is the transposed (N, M//16) →
+        # per-stage tile (TILE_X, TILE_Y//16).
+        if cutlass.const_expr(cfg.NVFP4_ROWWISE):
+            mS_nvfp4_row = cute.zipped_divide(mS_nvfp4_row, (TILE_Y, TILE_X // SCALE_DIM_NVFP4))
+        if cutlass.const_expr(cfg.NVFP4_COLWISE):
+            mS_nvfp4_col = cute.zipped_divide(mS_nvfp4_col, (TILE_X, TILE_Y // SCALE_DIM_NVFP4))
         # For M=256, N=512:
         # Non-swizzled: https://kainzhong.github.io/CuTe-Layout-Visualizer/?key=zipped_divide-%28256%2C+16%29%3A%2816%2C+1%29-32%0A2
         # Swizzled: https://kainzhong.github.io/CuTe-Layout-Visualizer/?key=zipped_divide-%28%2832%2C+4%2C+2%29%2C+%284%2C+4%29%29%3A%28%2816%2C+4%2C+2048%29%2C+%281%2C+512%29%29-32%0A2
@@ -366,6 +409,29 @@ class MXFP8QuantizeSmemKernel:
                 )
             )
 
+        # NVFP4 output smem tiles (uint8, 2 fp4 per byte). Allocated AFTER the
+        # MXFP8 SharedStorage struct via the same allocator so the kernel only
+        # reserves them when a hybrid cfg is active — the MXFP8-only forks above
+        # are byte-for-byte unchanged.
+        if cutlass.const_expr(cfg.NVFP4_ROWWISE):
+            sO_nvfp4_row = smem.allocate_tensor(
+                Uint8,
+                cute.make_layout(
+                    ((TILE_Y, TILE_X // 2), NUM_STAGES),
+                    stride=((TILE_X // 2, 1), TILE_Y * (TILE_X // 2)),
+                ),
+                byte_alignment=128,
+            )
+        if cutlass.const_expr(cfg.NVFP4_COLWISE):
+            sO_nvfp4_col = smem.allocate_tensor(
+                Uint8,
+                cute.make_layout(
+                    ((TILE_X, TILE_Y // 2), NUM_STAGES),
+                    stride=((TILE_Y // 2, 1), TILE_X * (TILE_Y // 2)),
+                ),
+                byte_alignment=128,
+            )
+
         warp_idx = cute.arch.warp_idx()
         warp_idx = cute.arch.make_warp_uniform(warp_idx)
 
@@ -442,6 +508,22 @@ class MXFP8QuantizeSmemKernel:
                 sO_col,
                 gO_col_tiled,
             )
+        # NVFP4 output S2G partitioning (mirrors the MXFP8 outputs, half-width
+        # tiles). gO outer dims: rowwise (M/TILE_Y, N/TILE_X), colwise
+        # (N/TILE_X, M/TILE_Y) — same (tile_y, tile_x) indexing as MXFP8.
+        if cutlass.const_expr(cfg.NVFP4_ROWWISE):
+            gO_nvfp4_row_tiled = cute.zipped_divide(tma_dst_nvfp4_row, (TILE_Y, TILE_X // 2))
+            tXsO_nvfp4_row, tXgO_nvfp4_row = cute.nvgpu.cpasync.tma_partition(
+                tma_atom_nvfp4_row, 0, cute.make_layout(1), sO_nvfp4_row, gO_nvfp4_row_tiled,
+            )
+        if cutlass.const_expr(cfg.NVFP4_COLWISE):
+            gO_nvfp4_col_tiled = cute.zipped_divide(tma_dst_nvfp4_col, (TILE_X, TILE_Y // 2))
+            tXsO_nvfp4_col, tXgO_nvfp4_col = cute.nvgpu.cpasync.tma_partition(
+                tma_atom_nvfp4_col, 0, cute.make_layout(1), sO_nvfp4_col, gO_nvfp4_col_tiled,
+            )
+        # Bake the NVFP4 global encode scale into an f32 register once.
+        if cutlass.const_expr(cfg.NVFP4_ROWWISE or cfg.NVFP4_COLWISE):
+            S_enc_f32 = Float32(s_enc)
 
         # print(f"sX: {sX}\n")
         # print(f"gX_tiled: {gX_tiled}\n")
@@ -530,9 +612,36 @@ class MXFP8QuantizeSmemKernel:
                 if cutlass.const_expr(cfg.WITH_AMAX):
                     block_amax = cute.arch.fmax(block_amax, amax_r)
 
-            # Make all smem stores (sO_row and/or sO_col) visible to the TMA
-            # async proxy, then block-sync so warp 0 sees the fences from all
-            # warps before issuing the bulk store(s). Matches the C++
+            # ---- NVFP4 passes on the SAME smem input tile (no re-read) ----
+            # These quantize the identical sX_tile in the "other" direction and
+            # write fp4 bytes into their own smem tiles + E4M3 scale bytes
+            # straight to gmem. Flushed by the warp-0 TMA block below.
+            if cutlass.const_expr(cfg.NVFP4_ROWWISE):
+                sO_nvfp4_row_tile = sO_nvfp4_row[(None, stage)]
+                mS_nvfp4_row_stage = cute.flatten(
+                    mS_nvfp4_row[(None, (tile_idx_y, tile_idx_x))])
+                quantize_rowwise_nvfp4(
+                    sX_tile, sO_nvfp4_row_tile, mS_nvfp4_row_stage, S_enc_f32,
+                    tile_idx_y * TILE_Y, bidx * TILE_X, M, N,
+                    DTYPE=cfg.DTYPE, TILE_Y=TILE_Y, TILE_X=TILE_X,
+                    SCALE_DIM=SCALE_DIM_NVFP4,
+                )
+            if cutlass.const_expr(cfg.NVFP4_COLWISE):
+                sO_nvfp4_col_tile = sO_nvfp4_col[(None, stage)]
+                # Colwise scale tensor is transposed (N, M//16) → outer index
+                # (tile_idx_x, tile_idx_y).
+                mS_nvfp4_col_stage = cute.flatten(
+                    mS_nvfp4_col[(None, (tile_idx_x, tile_idx_y))])
+                quantize_colwise_nvfp4(
+                    sX_tile, sO_nvfp4_col_tile, mS_nvfp4_col_stage, S_enc_f32,
+                    tile_idx_y * TILE_Y, bidx * TILE_X, M, N,
+                    DTYPE=cfg.DTYPE, TILE_X=TILE_X, TILE_Y=TILE_Y,
+                    SCALE_DIM=SCALE_DIM_NVFP4,
+                )
+
+            # Make all smem stores (sO_row and/or sO_col, NVFP4 tiles) visible to
+            # the TMA async proxy, then block-sync so warp 0 sees the fences from
+            # all warps before issuing the bulk store(s). Matches the C++
             # reference's fence_proxy + __syncthreads pattern.
             cute.arch.fence_proxy(
                 "async.shared",
@@ -553,6 +662,20 @@ class MXFP8QuantizeSmemKernel:
                         tma_atom_out_col,
                         tXsO_col[(None, stage)],
                         tXgO_col[(None, (tile_y, bidx))],
+                    )
+                # NVFP4 stores. Rowwise out (M, N//2) indexed (tile_y, bidx);
+                # colwise out (N, M//2) indexed (bidx, tile_y) (transposed).
+                if cutlass.const_expr(cfg.NVFP4_ROWWISE):
+                    cute.copy(
+                        tma_atom_nvfp4_row,
+                        tXsO_nvfp4_row[(None, stage)],
+                        tXgO_nvfp4_row[(None, (tile_y, bidx))],
+                    )
+                if cutlass.const_expr(cfg.NVFP4_COLWISE):
+                    cute.copy(
+                        tma_atom_nvfp4_col,
+                        tXsO_nvfp4_col[(None, stage)],
+                        tXgO_nvfp4_col[(None, (bidx, tile_y))],
                     )
                 cute.arch.cp_async_bulk_commit_group()
 
@@ -803,4 +926,136 @@ def quantize_mxfp8_cutedsl(
     )
     output = tex.quantize_with_func(x, quantizer, None, fn_name)
     return output
-    
+
+
+# ---------------------------------------------------------------------------
+# Hybrid MXFP8 + NVFP4 quantization (pure-Python driver)
+# ---------------------------------------------------------------------------
+# The hybrid kernel emits MXFP8 in one direction and NVFP4 in the other, all
+# from a single shared-memory read of the input tile. It needs 4 extra output
+# buffers + a global encode scale, which the TE C++ `quantize_with_func` path
+# (fixed 6-slot tensor arg list, no scalar support) can't carry. So this driver
+# compiles the kernel directly and launches it via DLPack — no C++/rebuild, no
+# tvm-ffi. Outputs use the simple compact, NON-swizzled scale layout (matches
+# `NVFP4QuantizerRef`), not TE's production swizzled/padded layout.
+
+_hybrid_compile_cache: dict = {}
+
+
+def _get_compiled_hybrid_kernel(cfg, M, N):
+    """Compile (and cache) the hybrid kernel for (cfg flags, M, N). The arg
+    order MUST mirror MXFP8QuantizeSmemKernel.__call__; disabled slots compile
+    as None so the runtime call lines up positionally."""
+    key = (cfg.DTYPE.__name__, cfg.FP8_DTYPE,
+           int(cfg.ROWWISE), int(cfg.COLWISE),
+           int(cfg.NVFP4_ROWWISE), int(cfg.NVFP4_COLWISE), M, N)
+    if key in _hybrid_compile_cache:
+        return _hybrid_compile_cache[key]
+
+    kw = dict(stride_order=(1, 0), memspace=cute.AddressSpace.gmem, assumed_align=16)
+
+    def fake(dtype, shape):
+        return cute.runtime.make_fake_compact_tensor(dtype, shape, **kw)
+
+    use_nvfp4 = cfg.NVFP4_ROWWISE or cfg.NVFP4_COLWISE
+    args = [
+        fake(cfg.DTYPE, (M, N)),                                          # mX
+        fake(cute.Uint8, (M, N))               if cfg.ROWWISE else None,  # mO_row
+        fake(cute.Uint8, (M, N // SCALE_DIM))  if cfg.ROWWISE else None,  # mS_row
+        fake(cute.Uint8, (M, N))               if cfg.COLWISE else None,  # mO_col
+        fake(cute.Uint8, (M // SCALE_DIM, N))  if cfg.COLWISE else None,  # mS_col
+        None,                                                             # mAmax
+        fake(cute.Uint8, (M, N // 2))                if cfg.NVFP4_ROWWISE else None,  # mO_nvfp4_row
+        fake(cute.Uint8, (M, N // SCALE_DIM_NVFP4))  if cfg.NVFP4_ROWWISE else None,  # mS_nvfp4_row
+        fake(cute.Uint8, (N, M // 2))                if cfg.NVFP4_COLWISE else None,  # mO_nvfp4_col
+        fake(cute.Uint8, (N, M // SCALE_DIM_NVFP4))  if cfg.NVFP4_COLWISE else None,  # mS_nvfp4_col
+        Float32(1.0) if use_nvfp4 else None,                              # s_enc (placeholder)
+    ]
+    compiled = cute.compile[(GPUArch("sm_100a"),)](
+        MXFP8QuantizeSmemKernel(cfg), *args
+    )
+    _hybrid_compile_cache[key] = compiled
+    return compiled
+
+
+def _hybrid_global_s_enc(x: torch.Tensor) -> float:
+    """Global NVFP4 encode scale S_enc = 448*6 / global_amax, computed in fp32
+    to bit-match NVFP4QuantizerRef (clamp to FLT_MAX; 0/inf amax -> 1.0)."""
+    ga = x.abs().max().to(torch.float32)
+    flt_max = torch.finfo(torch.float32).max
+    s = torch.minimum(
+        torch.tensor(448.0 * 6.0, dtype=torch.float32, device=x.device) / ga,
+        torch.tensor(flt_max, dtype=torch.float32, device=x.device),
+    )
+    if float(ga) == 0.0 or float(s) == 0.0:
+        return 1.0
+    return float(s.item())
+
+
+def quantize_hybrid_cutedsl(
+    x: torch.Tensor,
+    fp8_dtype: str = "e4m3",
+    mxfp8_rowwise: bool = True,
+    mxfp8_colwise: bool = False,
+    nvfp4_rowwise: bool = False,
+    nvfp4_colwise: bool = True,
+):
+    """Hybrid MXFP8 + NVFP4 quantization in one fused kernel.
+
+    MXFP8 is produced in the rowwise/colwise direction(s) selected by
+    `mxfp8_*`; NVFP4 in the direction(s) selected by `nvfp4_*` — reusing the
+    same shared-memory input tile (single DRAM read). The canonical hybrid is
+    `mxfp8_rowwise + nvfp4_colwise` (the default).
+
+    Returns a dict of the enabled output torch.uint8 tensors:
+      MXFP8:  rowwise_data (M,N), rowwise_scale (M,N/32) [E8M0]
+              colwise_data (M,N), colwise_scale (M/32,N) [E8M0]
+      NVFP4:  nvfp4_rowwise_data (M,N/2),  nvfp4_rowwise_scale (M,N/16) [E4M3]
+              nvfp4_colwise_data (N,M/2),  nvfp4_colwise_scale (N,M/16) [E4M3] (transposed)
+    plus "s_enc" (the global encode scale used).
+    """
+    assert x.is_cuda and x.is_contiguous() and x.ndim == 2, "expect a contiguous 2D CUDA tensor"
+    assert x.dtype in (torch.bfloat16, torch.float16), \
+        "hybrid PoC supports 16-bit input (bf16/fp16) only"
+    M, N = x.shape
+    assert M % (TILE_Y * NUM_TILES) == 0, f"M={M} must be a multiple of {TILE_Y * NUM_TILES}"
+    assert N % TILE_X == 0, f"N={N} must be a multiple of {TILE_X}"
+    assert mxfp8_rowwise or mxfp8_colwise or nvfp4_rowwise or nvfp4_colwise, \
+        "no output direction enabled"
+
+    cfg = MXFP8QuantizeConfig(
+        _torch_to_cutlass_dtype[x.dtype], fp8_dtype,
+        rowwise=mxfp8_rowwise, colwise=mxfp8_colwise,
+        nvfp4_rowwise=nvfp4_rowwise, nvfp4_colwise=nvfp4_colwise,
+    )
+    use_nvfp4 = nvfp4_rowwise or nvfp4_colwise
+    s_enc_val = _hybrid_global_s_enc(x) if use_nvfp4 else 1.0
+
+    dev = x.device
+    out = {}
+    call = [cute.runtime.from_dlpack(x, assumed_align=16)]
+
+    def add(name, shape, enabled):
+        if enabled:
+            t = torch.empty(shape, dtype=torch.uint8, device=dev)
+            out[name] = t
+            call.append(cute.runtime.from_dlpack(t, assumed_align=16))
+        else:
+            call.append(None)
+
+    # Order MUST match _get_compiled_hybrid_kernel / __call__.
+    add("rowwise_data",  (M, N),               cfg.ROWWISE)
+    add("rowwise_scale", (M, N // SCALE_DIM),  cfg.ROWWISE)
+    add("colwise_data",  (M, N),               cfg.COLWISE)
+    add("colwise_scale", (M // SCALE_DIM, N),  cfg.COLWISE)
+    call.append(None)                                                    # mAmax
+    add("nvfp4_rowwise_data",  (M, N // 2),                cfg.NVFP4_ROWWISE)
+    add("nvfp4_rowwise_scale", (M, N // SCALE_DIM_NVFP4),  cfg.NVFP4_ROWWISE)
+    add("nvfp4_colwise_data",  (N, M // 2),                cfg.NVFP4_COLWISE)
+    add("nvfp4_colwise_scale", (N, M // SCALE_DIM_NVFP4),  cfg.NVFP4_COLWISE)
+    call.append(Float32(s_enc_val) if use_nvfp4 else None)               # s_enc
+
+    compiled = _get_compiled_hybrid_kernel(cfg, M, N)
+    compiled(*call)
+    out["s_enc"] = s_enc_val
+    return out
