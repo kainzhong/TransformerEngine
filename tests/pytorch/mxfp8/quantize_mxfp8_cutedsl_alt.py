@@ -1456,6 +1456,7 @@ def quantize_hybrid_cutedsl(
     mxfp8_colwise: bool = False,
     nvfp4_rowwise: bool = False,
     nvfp4_colwise: bool = True,
+    s_enc: Optional[float] = None,
 ):
     """Hybrid MXFP8 + NVFP4 quantization in one fused kernel.
 
@@ -1486,7 +1487,12 @@ def quantize_hybrid_cutedsl(
         nvfp4_rowwise=nvfp4_rowwise, nvfp4_colwise=nvfp4_colwise,
     )
     use_nvfp4 = nvfp4_rowwise or nvfp4_colwise
-    s_enc_val = _hybrid_global_s_enc(x) if use_nvfp4 else 1.0
+    # `_hybrid_global_s_enc` syncs (`.item()`); callers in a perf loop should
+    # precompute it once and pass `s_enc=` to avoid a per-call host sync.
+    if s_enc is not None:
+        s_enc_val = s_enc
+    else:
+        s_enc_val = _hybrid_global_s_enc(x) if use_nvfp4 else 1.0
 
     dev = x.device
     out = {}
