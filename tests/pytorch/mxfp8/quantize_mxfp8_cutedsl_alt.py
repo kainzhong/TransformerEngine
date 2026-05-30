@@ -491,11 +491,6 @@ class MXFP8QuantizeSmemKernel:
                 sO_col_tile = sO_col[(None, stage)]
                 mS_col_stage = cute.flatten(mS_col[(None, (tile_idx_y, tile_idx_x))])
 
-                self._process_colwise(
-                    sX_tile, sO_col_tile,
-                    mS_col_stage, max_norm_rcp,
-                    tile_idx_y * TILE_Y, bidx * TILE_X, M, N,
-                )
                 amax_c = self._process_colwise(
                     sX_tile, sO_col_tile,
                     mS_col_stage, max_norm_rcp,
