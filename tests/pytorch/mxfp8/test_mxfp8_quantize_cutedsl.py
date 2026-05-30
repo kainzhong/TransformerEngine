@@ -115,12 +115,18 @@ def check_mxfp8_cutedsl_vs_reference(
 
     # --- Compare rowwise ---
     if return_rowwise:
-        expected_scale_shape = get_mxfp8_scale_shape_no_padding(x.shape, columnwise=False)
+        # TE always allocates scale_inv at the *padded* shape
+        # (rowwise: roundup(M,128) x roundup(N//32,4)) for both the reference
+        # and the DSL output, so the two carry the same padded shape. Neither
+        # the DSL kernel nor TE's plain path writes the padding bytes (both
+        # bounds-check to the valid region), so only the leading unpadded
+        # sub-region is defined and may be compared.
+        valid_rows, valid_cols = get_mxfp8_scale_shape_no_padding(x.shape, columnwise=False)
         assert dsl_qx.shape == ref_qx.shape, (
             f"Rowwise data shape mismatch: DSL={dsl_qx.shape} vs Ref={ref_qx.shape}"
         )
-        assert dsl_sx.shape == expected_scale_shape, (
-            f"Rowwise scale shape mismatch: DSL={dsl_sx.shape} vs expected={expected_scale_shape}"
+        assert dsl_sx.shape == ref_sx.shape, (
+            f"Rowwise scale shape mismatch: DSL={dsl_sx.shape} vs Ref={ref_sx.shape}"
         )
 
         torch.testing.assert_close(
@@ -128,8 +134,8 @@ def check_mxfp8_cutedsl_vs_reference(
             msg="Rowwise quantized data mismatch between CuTeDSL and reference",
         )
 
-        ref_sx_u8 = ref_sx.view(dtype=torch.uint8)
-        dsl_sx_u8 = dsl_sx.view(dtype=torch.uint8)
+        ref_sx_u8 = ref_sx.view(dtype=torch.uint8)[:valid_rows, :valid_cols]
+        dsl_sx_u8 = dsl_sx.view(dtype=torch.uint8)[:valid_rows, :valid_cols]
         torch.testing.assert_close(
             dsl_sx_u8, ref_sx_u8, atol=0.0, rtol=0.0,
             msg="Rowwise scale mismatch between CuTeDSL and reference",
@@ -137,12 +143,15 @@ def check_mxfp8_cutedsl_vs_reference(
 
     # --- Compare colwise ---
     if return_transpose:
-        expected_scale_shape_t = get_mxfp8_scale_shape_no_padding(x.shape, columnwise=True)
+        # Same padding story as rowwise: scale_inv is padded to
+        # (roundup(M//32,4) x roundup(N,128)); only the valid sub-region is
+        # written by either implementation.
+        valid_rows_t, valid_cols_t = get_mxfp8_scale_shape_no_padding(x.shape, columnwise=True)
         assert dsl_qx_t.shape == ref_qx_t.shape, (
             f"Colwise data shape mismatch: DSL={dsl_qx_t.shape} vs Ref={ref_qx_t.shape}"
         )
-        assert dsl_sx_t.shape == expected_scale_shape_t, (
-            f"Colwise scale shape mismatch: DSL={dsl_sx_t.shape} vs expected={expected_scale_shape_t}"
+        assert dsl_sx_t.shape == ref_sx_t.shape, (
+            f"Colwise scale shape mismatch: DSL={dsl_sx_t.shape} vs Ref={ref_sx_t.shape}"
         )
 
         torch.testing.assert_close(
@@ -150,8 +159,8 @@ def check_mxfp8_cutedsl_vs_reference(
             msg="Colwise quantized data mismatch between CuTeDSL and reference",
         )
 
-        ref_sx_t_u8 = ref_sx_t.view(dtype=torch.uint8)
-        dsl_sx_t_u8 = dsl_sx_t.view(dtype=torch.uint8)
+        ref_sx_t_u8 = ref_sx_t.view(dtype=torch.uint8)[:valid_rows_t, :valid_cols_t]
+        dsl_sx_t_u8 = dsl_sx_t.view(dtype=torch.uint8)[:valid_rows_t, :valid_cols_t]
         torch.testing.assert_close(
             dsl_sx_t_u8, ref_sx_t_u8, atol=0.0, rtol=0.0,
             msg="Colwise scale mismatch between CuTeDSL and reference",
