@@ -15,6 +15,7 @@
 #include <vector>
 
 #include <ATen/ATen.h>
+#include <ATen/DLConvertor.h>
 #include <c10/core/ScalarType.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
@@ -71,17 +72,19 @@ inline DLDataType convert_to_dltype(NVTEDType type) {
 // ---------------------------------------------------------------------------
 class DLTensorWrapper : public DLTensor {
  public:
+  // Zero-copy borrow via torch's own non-owning DLPack export: fills our
+  // base DLTensor in place (data/shape/strides/dtype/device/byte_offset)
+  // using torch's canonical field extraction — no heap alloc, no deleter,
+  // no refcount. shape/strides point into the at::Tensor's internal arrays,
+  // so the caller must keep `tensor` alive through any use of this wrapper.
   explicit DLTensorWrapper(const at::Tensor &tensor) {
     NVTE_CHECK(tensor.defined(), "DLTensorWrapper: undefined at::Tensor");
-    this->data        = tensor.data_ptr();
-    this->device      = DLDevice{kDLCUDA, static_cast<int32_t>(tensor.device().index())};
-    this->ndim        = static_cast<int32_t>(tensor.dim());
-    this->dtype       = convert_to_dltype(tensor.scalar_type());
-    this->shape       = const_cast<int64_t *>(tensor.sizes().data());
-    this->strides     = const_cast<int64_t *>(tensor.strides().data());
-    this->byte_offset = 0;
+    at::toDLPackNonOwning(tensor, static_cast<DLTensor *>(this));
   }
 
+  // NVTEBasicTensor stores shape as size_t and has no strides. We allocate
+  // owned int64 buffers for both: copy the shape, synthesize row-major
+  // contiguous strides (TE tensors are always contiguous).
   DLTensorWrapper(const NVTEBasicTensor &tensor, int32_t device_index) {
     const int n = static_cast<int>(tensor.shape.ndim);
     shape_buf_   = std::make_unique<int64_t[]>(n);
