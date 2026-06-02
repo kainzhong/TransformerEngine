@@ -195,12 +195,18 @@ for row in csv.reader(io.StringIO(out.stdout)):
         if dsl_avg is None:
             dsl_avg, dsl_inst = avg_ns, inst
     elif hybrid:
-        # Baseline = TE MXFP8 + TE NVFP4 quantizers run separately. Sum every
-        # transformer_engine-namespace kernel's per-iter avg: NVFP4
-        # block_scaled_1d_cast_transpose, MXFP8 quantize_mxfp8_kernel, and the
-        # NVFP4 amax_kernel / zero_amax_kernel. (torch at::native reductions
-        # from the one-off s_enc precompute are not in this namespace.)
-        if "transformer_engine" in name:
+        # Baseline = TE MXFP8 + TE NVFP4 quantizers run separately. Sum the
+        # transformer_engine-namespace QUANTIZE kernels only — NVFP4
+        # block_scaled_1d_cast_transpose + MXFP8 quantize_mxfp8_kernel.
+        #
+        # We deliberately EXCLUDE the NVFP4 global-amax pre-pass
+        # (amax_kernel / zero_amax_kernel): the fused DSL kernel consumes a
+        # precomputed s_enc and does no amax, so a fair, semantically-equal
+        # comparison is quantize-vs-quantize. The amax is a shared prerequisite
+        # both designs pay once (~equal cost), so it cancels — counting it only
+        # on the TE side would inflate the hybrid's speedup. (torch at::native
+        # reductions from the one-off s_enc precompute aren't in this namespace.)
+        if "transformer_engine" in name and "amax" not in name:
             cpp_sum += avg_ns
             cpp_inst = max(cpp_inst, inst)
     else:
