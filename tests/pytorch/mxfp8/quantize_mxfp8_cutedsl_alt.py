@@ -1423,7 +1423,11 @@ def _get_compiled_hybrid_kernel(cfg, M, N):
     ]
     # Compile the 11-param `forward_hybrid` entry (NOT `__call__`): the extra
     # NVFP4 params are free here (direct compile, no --enable-tvm-ffi wrapper).
-    compiled = cute.compile[(GPUArch("sm_100a"),)](
+    # NB: plain JIT compile (no `[(GPUArch(...),)]` specialization) — pinning the
+    # arch puts the DSL into cross-compilation/AOT mode, which yields a function
+    # with no execution engine (DSLRuntimeError at call time). The current device
+    # is already sm_100a-capable, so the fp4 cvt intrinsics compile fine.
+    compiled = cute.compile(
         HybridQuantizeSmemKernel(cfg), *args
     )
     _hybrid_compile_cache[key] = compiled
