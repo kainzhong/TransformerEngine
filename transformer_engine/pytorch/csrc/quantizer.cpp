@@ -2560,8 +2560,8 @@ HybridQuantizer::HybridQuantizer(const py::handle& quantizer) : Quantizer(quanti
 void HybridQuantizer::set_quantization_params(TensorWrapper* tensor) const {}
 
 std::pair<TensorWrapper, py::object> HybridQuantizer::create_tensor(
-    const std::vector<size_t>& shape, DType dtype,
-    std::optional<at::Device> device = std::nullopt, bool pin_memory = false) const {
+    const std::vector<size_t>& shape, DType dtype, std::optional<at::Device> device_opt,
+    bool pin_memory) const {
   const auto device = resolve_device(device_opt);
   using namespace pybind11::literals;
 
@@ -2752,7 +2752,7 @@ std::pair<TensorWrapper, py::object> HybridQuantizer::convert_and_update_tensor(
   std::vector<size_t> shape;
   if (rowwise_data && this->dtype_row) {
     if (is_fp4_dtype(*this->dtype_row)) {
-      shape = convert_shape_back_from_fp4(getTensorShape(*rowwise_data), false)
+      shape = convert_shape_back_from_fp4(getTensorShape(*rowwise_data), false);
       if (this->dtype_column && is_fp4_dtype(*this->dtype_column)) {
         // If both rowwise and columnwise directions are NVFP4 quantized, check if they match
         auto col_shape = convert_shape_back_from_fp4(getTensorShape(*columnwise_data), true);
@@ -2769,7 +2769,7 @@ std::pair<TensorWrapper, py::object> HybridQuantizer::convert_and_update_tensor(
       shape = getTensorShape(*columnwise_data);
     }
   } else {
-    NVTE_ERROR("HybridTensor has neither of rowwise and columnwise data")
+    NVTE_ERROR("HybridTensor has neither of rowwise and columnwise data");
   }
 
   const auto [flat_first_dim, flat_last_dim] = get_2d_dims(shape);
@@ -2780,8 +2780,8 @@ std::pair<TensorWrapper, py::object> HybridQuantizer::convert_and_update_tensor(
   if (this->dtype_row) {
     if (!rowwise_data) {
       if (is_fp8_dtype(*this->dtype_row)) {
-        rowwise_data = at::empty(shape_int64, opts);
-      } elif (is_fp4_dtype(*this->dtype_row)) {
+        rowwise_data = at::empty(shape_int64, uint8_opts);
+      } else if (is_fp4_dtype(*this->dtype_row)) {
         rowwise_data = at::empty(convert_shape_for_fp4(shape_int64), uint8_opts);
       } else {
         NVTE_ERROR("Unsupported dtype for row-wise quantization in HybridQuantizer: ",
@@ -2791,12 +2791,12 @@ std::pair<TensorWrapper, py::object> HybridQuantizer::convert_and_update_tensor(
     }
     if (!rowwise_scale_inv) {
       if (is_fp8_dtype(*this->dtype_row)) {
-        const auto scale_inv_shape = get_scale_shape(shape, true, false);
+        const auto scale_inv_shape = get_scale_shape(shape, *this->dtype_row, false);
         const std::vector<int64_t> scale_inv_shape_int64(scale_inv_shape.begin(),
                                                        scale_inv_shape.end());
         rowwise_scale_inv = at::empty(scale_inv_shape_int64, uint8_opts);
       } else if (is_fp4_dtype(*this->dtype_row)) {
-        const auto scale_inv_shape = get_scale_shape(shape, false, false);
+        const auto scale_inv_shape = get_scale_shape(shape, *this->dtype_row, false);
         const std::vector<int64_t> scale_inv_shape_int64(scale_inv_shape.begin(),
                                                        scale_inv_shape.end());
         rowwise_scale_inv = at::empty(scale_inv_shape_int64, uint8_opts);
@@ -2846,12 +2846,12 @@ std::pair<TensorWrapper, py::object> HybridQuantizer::convert_and_update_tensor(
     }
     if (!columnwise_scale_inv) {
       if (is_fp8_dtype(*this->dtype_column)) {
-        const auto scale_inv_shape = get_scale_shape(shape, true, true);
+        const auto scale_inv_shape = get_scale_shape(shape, *this->dtype_column, true);
         const std::vector<int64_t> scale_inv_shape_int64(scale_inv_shape.begin(),
                                                        scale_inv_shape.end());
         columnwise_scale_inv = at::empty(scale_inv_shape_int64, uint8_opts);
       } else if (is_fp4_dtype(*this->dtype_column)) {
-        const auto scale_inv_shape = get_scale_shape(shape, false, true);
+        const auto scale_inv_shape = get_scale_shape(shape, *this->dtype_column, true);
         const std::vector<int64_t> scale_inv_shape_int64(scale_inv_shape.begin(),
                                                        scale_inv_shape.end());
         columnwise_scale_inv = at::empty(scale_inv_shape_int64, uint8_opts);
@@ -2921,7 +2921,8 @@ std::pair<TensorWrapper, py::object> HybridQuantizer::convert_and_update_tensor(
   return {std::move(out_cpp), std::move(tensor)};
 }
 
-void HybridQuantizer::quantize(const TensorWrapper& input, TensorWrapper& out, const std::optional<TensorWrapper>& noop_flag = std::nullopt) {
+void HybridQuantizer::quantize(const TensorWrapper& input, TensorWrapper& out,
+                               const std::optional<TensorWrapper>& noop_flag) {
   if (input.numel() == 0) {
     return;
   }

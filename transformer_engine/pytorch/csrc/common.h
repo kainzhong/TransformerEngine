@@ -403,14 +403,14 @@ class HybridQuantizer : public Quantizer {
     void quantize(const TensorWrapper& input, TensorWrapper& out,
                   const std::optional<TensorWrapper>& noop_flag = std::nullopt) override;
 
-    std::vector<size_t> get_scale_shape(const std::vector<size_t>& shape, bool is_mxfp8, bool columnwise) const;
+    std::vector<size_t> get_scale_shape(const std::vector<size_t>& shape, DType dtype, bool columnwise) const;
     std::vector<size_t> get_scale_shape(size_t flat_first_dim, size_t flat_last_dim, DType dtype, bool columnwise) const;
 
  private:
   // If nullopt, then skip quantizing that direction
   std::optional<DType> dtype_row;
   std::optional<DType> dtype_column;
-}
+};
 
 std::unique_ptr<Quantizer> convert_quantizer(py::handle quantizer);
 
