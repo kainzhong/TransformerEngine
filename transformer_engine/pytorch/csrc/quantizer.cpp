@@ -2544,12 +2544,12 @@ HybridQuantizer::HybridQuantizer(const py::handle& quantizer) : Quantizer(quanti
 
   // The quantization format for column-wise direction
   if (quantizer.attr("dtype_column").is_none()) {
-    this->dtype_col = std::nullopt;
+    this->dtype_column = std::nullopt;
     this->columnwise_usage = false;
   } else {
     DType dtype_col = quantizer.attr("dtype_column").cast<DType>();
-    if (is_fp8_dtype(dtype_col) || is_fp4_dtype(dtype)) {
-      this->dtype_col = dtype_col;
+    if (is_fp8_dtype(dtype_col) || is_fp4_dtype(dtype_col)) {
+      this->dtype_column = dtype_col;
       this->columnwise_usage = true;
     } else {
       NVTE_ERROR("Column-wise quantization for HybridQuantizer currently does not support this dtype");
@@ -2560,8 +2560,8 @@ HybridQuantizer::HybridQuantizer(const py::handle& quantizer) : Quantizer(quanti
 void HybridQuantizer::set_quantization_params(TensorWrapper* tensor) const {}
 
 std::pair<TensorWrapper, py::object> HybridQuantizer::create_tensor(
-      const std::vector<size_t>& shape, DType dtype,
-      std::optional<at::Device> device = std::nullopt, bool pin_memory = false) const {
+    const std::vector<size_t>& shape, DType dtype,
+    std::optional<at::Device> device = std::nullopt, bool pin_memory = false) const {
   const auto device = resolve_device(device_opt);
   using namespace pybind11::literals;
 
@@ -2569,9 +2569,14 @@ std::pair<TensorWrapper, py::object> HybridQuantizer::create_tensor(
   const bool with_gemm_swizzled_scales = this->optimize_for_gemm;
 
   // Tensor dimensions
+  const std::vector<int64_t> shape_int64(shape.begin(), shape.end());
   const auto [flat_first_dim, flat_last_dim] = get_2d_dims(shape);
-  const auto rowwise_scale_inv_shape = this->dtype_row ? get_scale_shape(flat_first_dim, flat_last_dim, *this->dtype_row, false) : std::nullopt;
-  const auto columnwise_scale_inv_shape = this->dtype_col ? get_scale_shape(flat_first_dim, flat_last_dim, *this->dtype_column, true) : std::nullopt;
+  const auto rowwise_scale_inv_shape = this->dtype_row
+    ? std::optional(get_scale_shape(flat_first_dim, flat_last_dim, *this->dtype_row, false))
+    : std::nullopt;
+  const auto columnwise_scale_inv_shape = this->dtype_column
+    ? std::optional(get_scale_shape(flat_first_dim, flat_last_dim, *this->dtype_column, true))
+    : std::nullopt;
 
   // Allocate tensors for quantized data and scaling factors
   at::Tensor rowwise_data_tensor, rowwise_scale_inv_tensor, amax_rowwise_tensor;
@@ -2593,7 +2598,7 @@ std::pair<TensorWrapper, py::object> HybridQuantizer::create_tensor(
                                                       rowwise_scale_inv_shape->end());
       rowwise_data_tensor = at::empty(convert_shape_for_fp4(shape_int64), bit8_tensor_opts);
       rowwise_scale_inv_tensor = at::empty(scale_inv_shape_int64, bit8_tensor_opts);
-      amax_rowwise_tensor = at::empty({amax_rows}, bit32_tensor_opts);
+      amax_rowwise_tensor = at::empty({1}, bit32_tensor_opts);
     }
   }
 
@@ -2653,7 +2658,7 @@ std::pair<TensorWrapper, py::object> HybridQuantizer::create_tensor(
   } else {
     // Use direct C API call bypassing pybind11 overhead
     py::dict kwargs;
-    const auto stride_int64 = stride_from_shape(shape)
+    const auto stride_int64 = stride_from_shape(shape_int64);
     kwargs["shape"] = py::cast(shape_int64);
     kwargs["stride"] = py::cast(stride_int64);
     kwargs["dtype"] = py::cast(GetATenDType(dtype));
@@ -2687,7 +2692,7 @@ std::pair<TensorWrapper, py::object> HybridQuantizer::create_tensor(
       out_cpp.set_rowwise_scale_inv(rowwise_scale_inv_tensor.data_ptr(), DType::kFloat8E8M0, *rowwise_scale_inv_shape);
     } else if (is_fp4_dtype(*this->dtype_row)) {
       out_cpp.set_rowwise_scale_inv(rowwise_scale_inv_tensor.data_ptr(), DType::kFloat8E4M3, *rowwise_scale_inv_shape);
-      out_cpp.set_amax(amax_rowwise_tensor.data_ptr(), Dtype::kFloat32, getTensorShape(amax_rowwise_tensor));
+      out_cpp.set_amax(amax_rowwise_tensor.data_ptr(), DType::kFloat32, getTensorShape(amax_rowwise_tensor));
     }
   }
   if (columnwise_usage && this->dtype_column) {
@@ -2702,7 +2707,7 @@ std::pair<TensorWrapper, py::object> HybridQuantizer::create_tensor(
                                   col_data_shape_fp4);
       out_cpp.set_columnwise_scale_inv(columnwise_scale_inv_tensor.data_ptr(), DType::kFloat8E4M3,
                                       *columnwise_scale_inv_shape);
-      out_cpp.set_columnwise_amax(amax_columnwise.data_ptr(), DType::kFloat32,
+      out_cpp.set_columnwise_amax(amax_columnwise_tensor.data_ptr(), DType::kFloat32,
                                   std::vector<size_t>{1});
     }
   }
@@ -2923,37 +2928,35 @@ void HybridQuantizer::quantize(const TensorWrapper& input, TensorWrapper& out, c
   // TODO: use TVM-FFI to call your python implementation
 }
 
-std::vector<size_t> HybridQuantizer::get_scale_shape(const std::vector<size_t>& shape, bool is_mxfp8, bool columnwise) const {
+std::vector<size_t> HybridQuantizer::get_scale_shape(const std::vector<size_t>& shape, DType dtype,
+                                                     bool columnwise) const {
   const auto [flat_first_dim, flat_last_dim] = get_2d_dims(shape);
-
-  return get_scale_shape(flat_first_dim, flat_last_dim, is_mxfp8, columnwise);
+  return get_scale_shape(flat_first_dim, flat_last_dim, dtype, columnwise);
 }
 
-std::vector<size_t> HybridQuantizer::get_scale_shape(size_t flat_first_dim, size_t flat_last_dim, bool is_mxfp8, bool columnwise) const {
-  if (is_mxfp8) {
+std::vector<size_t> HybridQuantizer::get_scale_shape(size_t flat_first_dim, size_t flat_last_dim,
+                                                     DType dtype, bool columnwise) const {
+  // Each direction uses its own format's scale-factor shape, mirroring the
+  // per-format MXFP8Quantizer / NVFP4Quantizer get_scale_shape implementations.
+  if (is_fp8_dtype(dtype)) {
     NVTE_CHECK(flat_first_dim % MXFP8_BLOCK_SIZE == 0 && flat_last_dim % MXFP8_BLOCK_SIZE == 0,
-            "MXFP8 requires tensor dims that are divisible by ", MXFP8_BLOCK_SIZE,
-            " (got shape=", shape, ")");
-  } else {
+               "MXFP8 requires tensor dims that are divisible by ", MXFP8_BLOCK_SIZE,
+               " (got dims=", flat_first_dim, "x", flat_last_dim, ")");
+    if (columnwise) {
+      return {roundup(flat_first_dim / MXFP8_BLOCK_SIZE, 4), roundup(flat_last_dim, 128)};
+    }
+    return {roundup(flat_first_dim, 128), roundup(flat_last_dim / MXFP8_BLOCK_SIZE, 4)};
+  }
+  if (is_fp4_dtype(dtype)) {
     NVTE_CHECK(flat_first_dim % NVFP4_BLOCK_SIZE == 0 && flat_last_dim % NVFP4_BLOCK_SIZE == 0,
-              "NVFP4 requires tensor dims that are divisible by ", NVFP4_BLOCK_SIZE,
-              " (got shape=", shape, ")");
+               "NVFP4 requires tensor dims that are divisible by ", NVFP4_BLOCK_SIZE,
+               " (got dims=", flat_first_dim, "x", flat_last_dim, ")");
+    if (columnwise) {
+      return {roundup(flat_last_dim, 128), roundup(flat_first_dim / NVFP4_BLOCK_SIZE, 4)};
+    }
+    return {roundup(flat_first_dim, 128), roundup(flat_last_dim / NVFP4_BLOCK_SIZE, 4)};
   }
-
-  std::vector<size_t> scale_shape;
-  size_t block_size = is_mxfp8 ? MXFP8_BLOCK_SIZE : NVFP4_BLOCK_SIZE;
-
-  if (columnwise) {
-    size_t sinv0 = roundup(flat_first_dim, 128);
-    size_t sinv1 = roundup(last_dim / block_size, 4);
-    scale_shape = {sinv0, sinv1};
-  } else {
-    // columnwise scaling factor shape
-    size_t sinv0 = roundup(last_dim, 128);
-    size_t sinv1 = roundup(flat_first_dim / block_size, 4);
-    scale_shape = {sinv0, sinv1};
-  }
-  return scale_shape;
+  NVTE_ERROR("Unsupported dtype for HybridQuantizer::get_scale_shape");
 }
 
 }  // namespace transformer_engine::pytorch

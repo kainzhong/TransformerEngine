@@ -107,6 +107,21 @@ void init_nvfp4_extensions() {
              "Internal error: could not initialize pyTorch NVFP4 extension.");
 }
 
+void init_hybrid_extensions() {
+  auto hybrid_module = py::module_::import("transformer_engine.pytorch.tensor.hybrid_tensor");
+  HybridQuantizerClass = reinterpret_cast<PyTypeObject *>(
+      PyObject_GetAttrString(hybrid_module.ptr(), "HybridQuantizer"));
+  HybridTensorPythonClass =
+      reinterpret_cast<PyTypeObject *>(PyObject_GetAttrString(hybrid_module.ptr(), "HybridTensor"));
+  auto hybrid_base_module =
+      py::module_::import("transformer_engine.pytorch.tensor.storage.hybrid_tensor_storage");
+  HybridTensorStoragePythonClass = reinterpret_cast<PyTypeObject *>(
+      PyObject_GetAttrString(hybrid_base_module.ptr(), "HybridTensorStorage"));
+  NVTE_CHECK(HybridQuantizerClass != nullptr && HybridTensorPythonClass != nullptr &&
+                 HybridTensorStoragePythonClass != nullptr,
+             "Internal error: could not initialize pyTorch Hybrid extension.");
+}
+
 void init_grouped_tensor_extension() {
   if (GroupedTensorPythonClass && GroupedTensorStoragePythonClass) return;
   auto grouped_tensor_module =
@@ -129,6 +144,7 @@ void init_extension() {
     init_mxfp8_extension();
     init_float8blockwise_extension();
     init_nvfp4_extensions();
+    init_hybrid_extensions();
     init_grouped_tensor_extension();
   });
 }

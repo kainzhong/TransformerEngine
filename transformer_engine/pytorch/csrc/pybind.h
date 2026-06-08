@@ -84,7 +84,7 @@ inline bool IsNVFP4Tensor(PyObject *obj) {
   return Py_TYPE(obj) == NVFP4TensorPythonClass || Py_TYPE(obj) == NVFP4TensorStoragePythonClass;
 }
 
-inline bool IsHybridQuantizers(PyObject *obj) { return Py_TYPE(obj) == NVFP4QuantizerClass; }
+inline bool IsHybridQuantizers(PyObject *obj) { return Py_TYPE(obj) == HybridQuantizerClass; }
 
 inline bool IsHybridTensor(PyObject *obj) {
   return Py_TYPE(obj) == HybridTensorPythonClass || Py_TYPE(obj) == HybridTensorStoragePythonClass;
