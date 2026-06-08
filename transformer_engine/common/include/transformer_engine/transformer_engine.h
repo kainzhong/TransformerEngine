@@ -108,6 +108,11 @@ enum NVTEScalingMode {
   /*! Single scale per block of 16 elements consecutive in either
    * rowwise or columnwise direction */
   NVTE_NVFP4_1D_SCALING = 4,
+  /*! Hybrid scaling. The tensor will first be quantized row-wise , and then column-wise.
+   * The direction of these two quantization steps may differ. For example,
+   * the tensor can be quantized row-wise in MXFP8 and column-wise in NVFP4.
+   */
+  NVTE_1D_SCALING_HYBRID = 5,
   NVTE_INVALID_SCALING = 100
 };
 

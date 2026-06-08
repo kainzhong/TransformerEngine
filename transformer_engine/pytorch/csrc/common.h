@@ -381,6 +381,37 @@ class NVFP4Quantizer : public Quantizer {
                                         cudaStream_t stream);
 };
 
+class HybridQuantizer : public Quantizer {
+  public:
+    explicit HybridQuantizer(const py::handle& quantizer);
+  
+    NVTEScalingMode get_scaling_mode() const override { return NVTE_1D_SCALING_HYBRID; }
+  
+    void set_quantization_params(TensorWrapper* tensor) const override;
+  
+    std::pair<TensorWrapper, py::object> create_tensor(
+        const std::vector<size_t>& shape, DType dtype,
+        std::optional<at::Device> device = std::nullopt, bool pin_memory = false) const override;
+  
+    std::pair<GroupedTensorWrapper, py::object> create_grouped_tensor(
+        size_t num_tensors, const std::vector<size_t>& logical_shape, DType dtype,
+        py::object quantizer, const std::optional<at::Tensor>& first_dims, size_t logical_first_dim,
+        size_t logical_last_dim) const override;
+  
+    std::pair<TensorWrapper, py::object> convert_and_update_tensor(py::object tensor) const override;
+  
+    void quantize(const TensorWrapper& input, TensorWrapper& out,
+                  const std::optional<TensorWrapper>& noop_flag = std::nullopt) override;
+
+    std::vector<size_t> get_scale_shape(const std::vector<size_t>& shape, bool is_mxfp8, bool columnwise) const;
+    std::vector<size_t> get_scale_shape(size_t flat_first_dim, size_t flat_last_dim, DType dtype, bool columnwise) const;
+
+ private:
+  // If nullopt, then skip quantizing that direction
+  std::optional<DType> dtype_row;
+  std::optional<DType> dtype_column;
+}
+
 std::unique_ptr<Quantizer> convert_quantizer(py::handle quantizer);
 
 std::vector<size_t> getTensorShape(const at::Tensor& t);

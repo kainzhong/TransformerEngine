@@ -18,6 +18,7 @@ from transformer_engine.common.recipe import NVFP4BlockScaling, Recipe
 from ..constants import NVFP4_BLOCK_SCALING_SIZE, dist_group_type
 from ..utils import (
     canonicalize_process_group,
+    canonicalize_shape,
     devices_match,
     round_up_to_nearest_multiple,
 )
@@ -894,18 +895,7 @@ class _ViewFunc(torch.autograd.Function):
         if shape is None:
             return tensor
 
-        # Canonicalize shape
-        if not isinstance(shape, Iterable):
-            shape = [shape]
-        elif len(shape) == 1 and isinstance(shape[0], Iterable):
-            shape = shape[0]
-        if -1 in shape:
-            shape = list(shape)
-            d_inferred = -math.prod(cur_shape) // math.prod(shape)
-            for i, d in enumerate(shape):
-                if d == -1:
-                    shape[i] = d_inferred
-                    break
+        shape = canonicalize_shape(shape, cur_shape)
         if shape[-1] != cur_shape[-1]:
             warnings.warn(
                 "NVFP4Tensor does not support reshaping inner dimension "
@@ -1020,18 +1010,7 @@ class _ReshapeFunc(torch.autograd.Function):
         if shape is None:
             return tensor
 
-        # Canonicalize shape
-        if not isinstance(shape, Iterable):
-            shape = [shape]
-        elif len(shape) == 1 and isinstance(shape[0], Iterable):
-            shape = shape[0]
-        if -1 in shape:
-            shape = list(shape)
-            d_inferred = -math.prod(cur_shape) // math.prod(shape)
-            for i, d in enumerate(shape):
-                if d == -1:
-                    shape[i] = d_inferred
-                    break
+        shape = canonicalize_shape(shape, cur_shape)
         if shape[-1] != cur_shape[-1]:
             warnings.warn(
                 "NVFP4Tensor does not support reshaping inner dimension "
