@@ -1008,6 +1008,90 @@ class TestHybridGemmBitwiseIdenticalMXFP8:
             )
 
 
+@pytest.mark.skipif(not mxfp8_available, reason=f"MXFP8: {reason_for_no_mxfp8}")
+class TestFlexGemmBitwiseIdenticalMXFP8:
+    """Same as TestHybridGemmBitwiseIdenticalMXFP8, but the fwd-role quantizer is a
+    FlexQuantizer (pure-Python CuTeDSL MXFP8 cast) instead of HybridQuantizer.
+
+    Validates that a HybridQuantizedTensor whose sub-storages were produced by
+    FlexQuantizer flows through te.Linear forward+backward GEMMs and matches the
+    vanilla MXFP8BlockScaling recipe bit-for-bit.
+
+    Requires CUTE_DSL_ARCH=sm_100a (FlexQuantizer compiles a CuTeDSL kernel).
+    """
+
+    def test_linear_fwd_bwd_matches_vanilla_mxfp8(self):
+        # Lazy import: pulls in cutlass/cute, which the rest of this file does
+        # not need -- keep collection cheap and arch-independent.
+        from transformer_engine.common.cutedsl.cast.mxfp8_quantization import (
+            get_mxfp8_quantizer,
+        )
+
+        torch.manual_seed(200)
+
+        in_features, out_features, batch = 128, 128, 32
+
+        model_ref = Linear(in_features, out_features, params_dtype=torch.bfloat16).cuda()
+        model_flex = Linear(in_features, out_features, params_dtype=torch.bfloat16).cuda()
+        model_flex.load_state_dict(model_ref.state_dict())
+
+        base_inp = torch.randn(batch, in_features, device="cuda", dtype=torch.bfloat16)
+        inp_ref = base_inp.clone().detach().requires_grad_(True)
+        inp_flex = base_inp.clone().detach().requires_grad_(True)
+
+        ref_recipe = recipe.MXFP8BlockScaling()
+        with autocast(enabled=True, recipe=ref_recipe):
+            out_ref = model_ref(inp_ref)
+        out_ref.float().sum().backward()
+
+        def flex_mxfp8_factory(role):
+            # grad GEMMs use the native MXFP8 quantizer (matches the hybrid test).
+            if (
+                role is not None
+                and role.module_type in ("linear", "grouped_linear")
+                and role.tensor_type in ("grad_output", "grad_input")
+            ):
+                return MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)
+            # Fwd roles (input/weight/output): FlexQuantizer, MXFP8 both
+            # directions. FlexQuantizer is shape-bound, so compile per role
+            # shape; GEMM needs swizzled MXFP8 scales.
+            if role is not None and role.tensor_type == "weight":
+                shape = (out_features, in_features)
+            else:
+                shape = (batch, in_features)
+            example = torch.empty(shape, device="cuda", dtype=torch.bfloat16)
+            q = get_mxfp8_quantizer(
+                example,
+                dtype_row="e4m3",
+                dtype_col="e4m3",
+                with_gemm_swizzled_scales=True,
+            )
+            # Full HybridQuantizedTensor (not storage) for the module path.
+            q.internal = False
+            return q
+
+        flex_recipe = recipe.CustomRecipe(qfactory=flex_mxfp8_factory)
+        with autocast(enabled=True, recipe=flex_recipe):
+            out_flex = model_flex(inp_flex)
+        out_flex.float().sum().backward()
+
+        assert torch.equal(
+            out_ref, out_flex
+        ), f"Forward mismatch: max diff = {(out_ref - out_flex).abs().max().item()}"
+        assert torch.equal(
+            inp_ref.grad, inp_flex.grad
+        ), f"Input grad mismatch: max diff = {(inp_ref.grad - inp_flex.grad).abs().max().item()}"
+        for name, p_ref in dict(model_ref.named_parameters()).items():
+            p_flex = dict(model_flex.named_parameters())[name]
+            assert (
+                p_ref.grad is not None and p_flex.grad is not None
+            ), f"Missing gradient for param '{name}'"
+            assert torch.equal(p_ref.grad, p_flex.grad), (
+                f"Param '{name}' grad mismatch: max diff = "
+                f"{(p_ref.grad - p_flex.grad).abs().max().item()}"
+            )
+
+
 @pytest.mark.skipif(not fp8_block_scaling_available, reason=reason_for_no_fp8_block_scaling)
 class TestHybridGemmBitwiseIdenticalBlockFP8:
     """Hybrid quantizer with Block FP8 in both directions must produce
