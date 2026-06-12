@@ -5,15 +5,286 @@
 """Tensor class with hybrid quantized data (different formats for rowwise vs columnwise)"""
 
 from __future__ import annotations
-from typing import Any, Dict, Iterable, Optional, Tuple
+from collections.abc import Iterable
+import math
+from typing import Any, Callable, Dict, Optional, Tuple
 
 import torch
+import transformer_engine_torch as tex
+from transformer_engine_torch import DType as TE_DType
 
+from ..constants import MXFP8_BLOCK_SCALING_SIZE
+from ..utils import devices_match, round_up_to_nearest_multiple
 from .storage.hybrid_tensor_storage import HybridQuantizedTensorStorage
 from ..quantized_tensor import QuantizedTensor, QuantizedTensorStorage, Quantizer
 
 aten = torch.ops.aten
 
+class FlexQuantizer(Quantizer):
+    """Quantizer that casts a tensor to (potentially) different per-direction
+    formats using an experimental CuTeDSL kernel instead of the CUDA C++ path.
+
+    High-precision tensors (e.g. FP32 or BF16) are quantized rowwise and/or
+    columnwise, with a potentially different format per direction (e.g. MXFP8
+    rowwise, NVFP4 columnwise, or only one direction at all).
+
+    ``quantize_func`` is a compiled ``cute.jit`` kernel bound to one
+    ``(config, shape)`` by a factory such as
+    :func:`transformer_engine.common.cutedsl.cast.mxfp8_quantization.get_mxfp8_quantizer`.
+    It is exported with tvm-ffi, so torch tensors can be passed straight to it
+    and the whole quantize path stays in Python -- no C++ ``Quantizer`` binding
+    is required.
+
+    ``quantize_impl`` allocates the per-direction output buffers, launches the
+    kernel directly on them, and wraps the results in a
+    :class:`HybridQuantizedTensor` whose rowwise / columnwise sub-storages are
+    single-direction :class:`MXFP8Tensor` objects.
+    """
+
+    dtype_row: Optional[TE_DType]
+    dtype_column: Optional[TE_DType]
+
+    def __init__(
+        self,
+        *,
+        dtype_row: Optional[TE_DType],
+        dtype_column: Optional[TE_DType],
+        quantize_func: Callable,  # compiled cute.jit kernel bound to (cfg, shape)
+        stochastic_rounding: bool = False,
+    ):
+        if dtype_row is None and dtype_column is None:
+            raise ValueError(
+                "FlexQuantizer requires at least one direction to be quantized, "
+                "but both dtype_row and dtype_column are None."
+            )
+        super().__init__(rowwise=dtype_row is not None, columnwise=dtype_column is not None)
+        self.dtype_row = dtype_row
+        self.dtype_column = dtype_column
+        self.quantize_func = quantize_func
+        # FIXME(flex): kernels are bound to one (cfg, shape). Take an is_valid(tensor)
+        # and a recompile(tensor) -> new func per direction; in quantize_impl,
+        # recompile when invalid instead of erroring on shape change.
+        if stochastic_rounding:
+            raise NotImplementedError("FlexQuantizer stochastic rounding is not implemented yet.")
+        self.stochastic_rounding = stochastic_rounding
+
+    def copy(self) -> FlexQuantizer:
+        """Create shallow copy"""
+
+        quantizer = FlexQuantizer(
+            dtype_row=self.dtype_row,
+            dtype_column=self.dtype_column,
+            quantize_func=self.quantize_func,
+            stochastic_rounding=self.stochastic_rounding,
+        )
+        quantizer.internal = self.internal
+        quantizer.optimize_for_gemm = self.optimize_for_gemm
+        return quantizer
+
+    @staticmethod
+    def _scale_shape(M: int, N: int, *, columnwise: bool) -> Tuple[int, int]:
+        """Padded MXFP8 scale-inverse shape (matches MXFP8Quantizer.get_scale_shape)."""
+        if columnwise:
+            return (
+                round_up_to_nearest_multiple(M // MXFP8_BLOCK_SCALING_SIZE, 4),
+                round_up_to_nearest_multiple(N, 128),
+            )
+        return (
+            round_up_to_nearest_multiple(M, 128),
+            round_up_to_nearest_multiple(N // MXFP8_BLOCK_SCALING_SIZE, 4),
+        )
+
+    def _make_quantized_tensor(
+        self,
+        *,
+        rowwise_data,
+        rowwise_scale_inv,
+        columnwise_data,
+        columnwise_scale_inv,
+        fp8_dtype,
+        rowwise: bool,
+        columnwise: bool,
+        shape,
+        fake_dtype,
+        device,
+        swizzle: bool,
+    ) -> QuantizedTensorStorage:
+        """Build one single-direction MXFP8 sub-storage.
+
+        When the quantizer is ``internal`` we emit the lighter storage-only
+        :class:`MXFP8TensorStorage`; otherwise the full wrapper-subclass
+        :class:`MXFP8Tensor`. Mirrors the storage/tensor split in
+        :meth:`HybridQuantizer.quantize_impl`.
+        """
+        # Local import: mxfp8_tensor -> quantized_tensor -> hybrid_tensor cycle.
+        from .mxfp8_tensor import MXFP8Tensor, MXFP8Quantizer  # noqa: PLC0415
+        from .storage.mxfp8_tensor_storage import MXFP8TensorStorage  # noqa: PLC0415
+
+        sub_quantizer = MXFP8Quantizer(
+            fp8_dtype=fp8_dtype, rowwise=rowwise, columnwise=columnwise
+        )
+        if self.internal:
+            # MXFP8TensorStorage positional args:
+            #   (rowwise_data, rowwise_scale_inv, columnwise_data,
+            #    columnwise_scale_inv, fp8_dtype, quantizer, with_gemm_swizzled_scales)
+            return MXFP8TensorStorage(
+                rowwise_data,
+                rowwise_scale_inv,
+                columnwise_data,
+                columnwise_scale_inv,
+                fp8_dtype,
+                sub_quantizer,
+                swizzle,
+                fake_dtype=fake_dtype,
+            )
+        return MXFP8Tensor(
+            shape=shape,
+            dtype=fake_dtype,
+            rowwise_data=rowwise_data,
+            rowwise_scale_inv=rowwise_scale_inv,
+            columnwise_data=columnwise_data,
+            columnwise_scale_inv=columnwise_scale_inv,
+            fp8_dtype=fp8_dtype,
+            quantizer=sub_quantizer,
+            with_gemm_swizzled_scales=swizzle,
+            device=device,
+        )
+
+    def quantize_impl(self, tensor: torch.Tensor) -> QuantizedTensor:
+        """Quantize ``tensor`` into a hybrid (per-direction) MXFP8 tensor."""
+        if tensor.dim() != 2:
+            raise NotImplementedError(
+                "FlexQuantizer currently supports only 2D inputs; got shape "
+                f"{tuple(tensor.shape)}."
+            )
+        x = tensor.contiguous()
+        M, N = x.shape
+        device = x.device
+        swizzle = self.optimize_for_gemm
+
+        # Allocate per-direction output buffers. Scale buffers are zeroed so the
+        # padding cuBLAS reads in the swizzled layout is well-defined; data
+        # buffers are fully written by the kernel.
+        row_data = row_scale = col_data = col_scale = None
+        if self.dtype_row is not None:
+            row_data = torch.empty((M, N), dtype=torch.uint8, device=device)
+            row_scale = torch.zeros(
+                self._scale_shape(M, N, columnwise=False), dtype=torch.uint8, device=device
+            )
+        if self.dtype_column is not None:
+            col_data = torch.empty((M, N), dtype=torch.uint8, device=device)
+            col_scale = torch.zeros(
+                self._scale_shape(M, N, columnwise=True), dtype=torch.uint8, device=device
+            )
+
+        # Launch the compiled CuTeDSL kernel directly on the torch buffers.
+        # Per-direction tvm-ffi contract (amax slots also express NVFP4; MXFP8
+        # leaves them None): (mX, row_data, row_scale, row_amax,
+        #                     col_data, col_scale, col_amax, stream, rng_state).
+        import cuda.bindings.driver as cuda  # local: only needed at launch
+
+        stream = cuda.CUstream(torch.cuda.current_stream().cuda_stream)
+        self.quantize_func(
+            x,
+            row_data, row_scale, None,  # row_data, row_scale, row_amax
+            col_data, col_scale, None,  # col_data, col_scale, col_amax
+            stream,
+            None,  # rng_state (stochastic rounding disabled)
+        )
+
+        # Wrap each direction as a single-direction MXFP8 sub-storage (storage
+        # class when internal, tensor class otherwise -- see _make_quantized_tensor).
+        rowwise_storage = None
+        if self.dtype_row is not None:
+            rowwise_storage = self._make_quantized_tensor(
+                rowwise_data=row_data,
+                rowwise_scale_inv=row_scale,
+                columnwise_data=None,
+                columnwise_scale_inv=None,
+                fp8_dtype=self.dtype_row,
+                rowwise=True,
+                columnwise=False,
+                shape=(M, N),
+                fake_dtype=tensor.dtype,
+                device=device,
+                swizzle=swizzle,
+            )
+        columnwise_storage = None
+        if self.dtype_column is not None:
+            columnwise_storage = self._make_quantized_tensor(
+                rowwise_data=None,
+                rowwise_scale_inv=None,
+                columnwise_data=col_data,
+                columnwise_scale_inv=col_scale,
+                fp8_dtype=self.dtype_column,
+                rowwise=False,
+                columnwise=True,
+                shape=(M, N),
+                fake_dtype=tensor.dtype,
+                device=device,
+                swizzle=swizzle,
+            )
+
+        # internal -> storage-only container; otherwise the full tensor.
+        if self.internal:
+            return HybridQuantizedTensorStorage(
+                rowwise_storage=rowwise_storage,
+                columnwise_storage=columnwise_storage,
+                quantizer=self,
+                fake_dtype=tensor.dtype,
+            )
+        return HybridQuantizedTensor(
+            shape=(M, N),
+            dtype=tensor.dtype,
+            rowwise_storage=rowwise_storage,
+            columnwise_storage=columnwise_storage,
+            quantizer=self,
+        )
+
+    def update_quantized(
+        self, src: torch.Tensor, dst: QuantizedTensor, *, noop_flag=None
+    ) -> QuantizedTensor:
+        assert isinstance(
+            dst, HybridQuantizedTensorStorage
+        ), f"Cannot store hybrid quantized data in {type(dst)} type."
+
+        # Make sure input is in expected format
+        if not devices_match(src.device, dst.device):
+            src = src.to(device=dst.device)
+        src = src.contiguous()
+
+        # Re-launch the kernel directly into dst's existing sub-storage buffers
+        # (same per-direction tvm-ffi contract as quantize_impl).
+        import cuda.bindings.driver as cuda  # local: only needed at launch
+
+        row_sub = dst._rowwise_storage
+        col_sub = dst._columnwise_storage
+        stream = cuda.CUstream(torch.cuda.current_stream().cuda_stream)
+        self.quantize_func(
+            src,
+            row_sub._rowwise_data if row_sub is not None else None,
+            row_sub._rowwise_scale_inv if row_sub is not None else None,
+            None,  # row_amax
+            col_sub._columnwise_data if col_sub is not None else None,
+            col_sub._columnwise_scale_inv if col_sub is not None else None,
+            None,  # col_amax
+            stream,
+            None,  # rng_state
+        )
+        return dst
+
+    def is_quantizable(self, inp: torch.Tensor) -> bool:
+        """Returns whether or not given inp can be quantized"""
+        if inp.ndim < 2:
+            return False
+        if inp.shape[-1] % MXFP8_BLOCK_SCALING_SIZE != 0:
+            return False
+        if math.prod(inp.shape[:-1]) % MXFP8_BLOCK_SCALING_SIZE != 0:
+            return False
+        return True
+
+    def calibrate(self, tensor: torch.Tensor) -> None:
+        pass  # No-op: blockwise quantization needs no calibration.
 
 class HybridQuantizer(Quantizer):
     """Quantizer that composes two existing quantizers for different directions.
@@ -146,8 +417,6 @@ class HybridQuantizer(Quantizer):
             return HybridQuantizedTensorStorage(
                 rowwise_storage=rowwise_result,
                 columnwise_storage=columnwise_result,
-                rowwise_quantizer=self.rowwise_quantizer,
-                columnwise_quantizer=self.columnwise_quantizer,
                 quantizer=self,
                 fake_dtype=tensor.dtype,
             )
@@ -157,8 +426,6 @@ class HybridQuantizer(Quantizer):
             dtype=tensor.dtype,
             rowwise_storage=rowwise_result,
             columnwise_storage=columnwise_result,
-            rowwise_quantizer=self.rowwise_quantizer,
-            columnwise_quantizer=self.columnwise_quantizer,
             quantizer=self,
         )
 
@@ -197,8 +464,6 @@ class HybridQuantizer(Quantizer):
             device=device,
             rowwise_storage=rowwise_empty,
             columnwise_storage=columnwise_empty,
-            rowwise_quantizer=self.rowwise_quantizer,
-            columnwise_quantizer=self.columnwise_quantizer,
             quantizer=self,
         )
 
@@ -350,10 +615,6 @@ class HybridQuantizedTensor(HybridQuantizedTensorStorage, QuantizedTensor):
         Sub-storage for rowwise quantized data.
     columnwise_storage : QuantizedTensorStorage
         Sub-storage for columnwise quantized data.
-    rowwise_quantizer : Quantizer, optional
-        Quantizer used for the rowwise sub-storage.
-    columnwise_quantizer : Quantizer, optional
-        Quantizer used for the columnwise sub-storage.
     quantizer : HybridQuantizer, optional
         Parent hybrid quantizer.
     requires_grad : bool, default = False
@@ -366,9 +627,7 @@ class HybridQuantizedTensor(HybridQuantizedTensorStorage, QuantizedTensor):
         *args,
         rowwise_storage: Optional[QuantizedTensorStorage],
         columnwise_storage: Optional[QuantizedTensorStorage],
-        rowwise_quantizer: Optional[Quantizer] = None,
-        columnwise_quantizer: Optional[Quantizer] = None,
-        quantizer: Optional[Quantizer] = None,
+        quantizer: Quantizer,
         **kwargs,
     ):
         instance = super().__new__(
@@ -376,8 +635,6 @@ class HybridQuantizedTensor(HybridQuantizedTensorStorage, QuantizedTensor):
             *args,
             rowwise_storage=rowwise_storage,
             columnwise_storage=columnwise_storage,
-            rowwise_quantizer=rowwise_quantizer,
-            columnwise_quantizer=columnwise_quantizer,
             quantizer=quantizer,
             **kwargs,
         )
@@ -443,8 +700,6 @@ class HybridQuantizedTensor(HybridQuantizedTensorStorage, QuantizedTensor):
             dtype=self.dtype,
             rowwise_storage=row,
             columnwise_storage=col,
-            rowwise_quantizer=self._rowwise_quantizer,
-            columnwise_quantizer=self._columnwise_quantizer,
             quantizer=self._quantizer,
         )
 
@@ -532,8 +787,6 @@ class HybridQuantizedTensor(HybridQuantizedTensorStorage, QuantizedTensor):
             dtype=self.dtype,
             rowwise_storage=row,
             columnwise_storage=col,
-            rowwise_quantizer=self._rowwise_quantizer,
-            columnwise_quantizer=self._columnwise_quantizer,
             quantizer=self._quantizer,
             requires_grad=self.requires_grad,
             device=self.device,
@@ -561,8 +814,6 @@ class HybridQuantizedTensor(HybridQuantizedTensorStorage, QuantizedTensor):
             (
                 self._rowwise_storage,
                 self._columnwise_storage,
-                self._rowwise_quantizer,
-                self._columnwise_quantizer,
                 self._quantizer,
                 self.dtype,
                 self.shape,
@@ -651,8 +902,6 @@ class HybridQuantizedTensor(HybridQuantizedTensorStorage, QuantizedTensor):
             col_meta,
             self._rowwise_storage,  # original sharded sub-storage (for make_like on iter-1)
             self._columnwise_storage,
-            self._rowwise_quantizer,
-            self._columnwise_quantizer,
             self._quantizer,
         )
         return sharded_tensors, metadata
@@ -680,8 +929,6 @@ class HybridQuantizedTensor(HybridQuantizedTensorStorage, QuantizedTensor):
             col_meta,
             orig_row_sub,
             orig_col_sub,
-            row_quantizer,
-            col_quantizer,
             hybrid_quantizer,
         ) = metadata
 
@@ -710,6 +957,8 @@ class HybridQuantizedTensor(HybridQuantizedTensorStorage, QuantizedTensor):
                 columnwise_usage=sub_quantizer.columnwise_usage,
             )
 
+        # FIXME: I really don't understand why _rowwise_quantizer & _columnwise_quantizer are needed here
+        # Isn't obvious that the rowwise storage's usage is rowwise and the columnwise storage's usage is columnwise?
         if out is not None:
             # Iteration 2+: in-place field update on existing sub-storages
             if out._rowwise_storage is not None and row_meta is not None:
@@ -748,8 +997,6 @@ class HybridQuantizedTensor(HybridQuantizedTensorStorage, QuantizedTensor):
                 dtype=param_dtype,
                 rowwise_storage=row_sub,
                 columnwise_storage=col_sub,
-                rowwise_quantizer=row_quantizer,
-                columnwise_quantizer=col_quantizer,
                 quantizer=hybrid_quantizer,
             )
 
@@ -790,8 +1037,6 @@ class HybridQuantizedTensor(HybridQuantizedTensorStorage, QuantizedTensor):
             dtype=tensor.dtype,
             rowwise_storage=row_out,
             columnwise_storage=col_out,
-            rowwise_quantizer=tensor._rowwise_quantizer,
-            columnwise_quantizer=tensor._columnwise_quantizer,
             quantizer=tensor._quantizer,
         )
 
@@ -828,8 +1073,6 @@ class HybridQuantizedTensor(HybridQuantizedTensorStorage, QuantizedTensor):
                     dtype=tensor.dtype,
                     rowwise_storage=row,
                     columnwise_storage=col,
-                    rowwise_quantizer=tensor._rowwise_quantizer,
-                    columnwise_quantizer=tensor._columnwise_quantizer,
                     quantizer=tensor._quantizer,
                     requires_grad=tensor.requires_grad,
                     device=target_device,
@@ -862,8 +1105,6 @@ class HybridQuantizedTensor(HybridQuantizedTensorStorage, QuantizedTensor):
                 dtype=tensor.dtype,
                 rowwise_storage=row_view,
                 columnwise_storage=col_view,
-                rowwise_quantizer=tensor._rowwise_quantizer,
-                columnwise_quantizer=tensor._columnwise_quantizer,
                 quantizer=tensor._quantizer,
             )
 
@@ -897,8 +1138,6 @@ class HybridQuantizedTensor(HybridQuantizedTensorStorage, QuantizedTensor):
                     dtype=tensor.dtype,
                     rowwise_storage=row_pieces[i] if row_pieces is not None else None,
                     columnwise_storage=col_pieces[i] if col_pieces is not None else None,
-                    rowwise_quantizer=tensor._rowwise_quantizer,
-                    columnwise_quantizer=tensor._columnwise_quantizer,
                     quantizer=tensor._quantizer,
                 )
                 for i in range(num_pieces)
@@ -984,8 +1223,6 @@ class HybridQuantizedTensor(HybridQuantizedTensorStorage, QuantizedTensor):
                 dtype=tensor.dtype,
                 rowwise_storage=row_clone,
                 columnwise_storage=col_clone,
-                rowwise_quantizer=tensor._rowwise_quantizer,
-                columnwise_quantizer=tensor._columnwise_quantizer,
                 quantizer=tensor._quantizer,
             )
 
@@ -995,8 +1232,6 @@ class HybridQuantizedTensor(HybridQuantizedTensorStorage, QuantizedTensor):
 def _make_hybrid_quantized_tensor_in_reduce_ex(
     rowwise_storage: Optional[QuantizedTensorStorage],
     columnwise_storage: Optional[QuantizedTensorStorage],
-    rowwise_quantizer: Optional[Quantizer],
-    columnwise_quantizer: Optional[Quantizer],
     quantizer: Optional[Quantizer],
     dtype: torch.dtype,
     shape: torch.Size,
@@ -1007,7 +1242,5 @@ def _make_hybrid_quantized_tensor_in_reduce_ex(
         dtype=dtype,
         rowwise_storage=rowwise_storage,
         columnwise_storage=columnwise_storage,
-        rowwise_quantizer=rowwise_quantizer,
-        columnwise_quantizer=columnwise_quantizer,
         quantizer=quantizer,
     )

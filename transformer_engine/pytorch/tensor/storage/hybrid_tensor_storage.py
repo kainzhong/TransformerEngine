@@ -24,8 +24,6 @@ class HybridQuantizedTensorStorage(QuantizedTensorStorage):
 
     _rowwise_storage: Optional[QuantizedTensorStorage]
     _columnwise_storage: Optional[QuantizedTensorStorage]
-    _rowwise_quantizer: Optional[Quantizer]
-    _columnwise_quantizer: Optional[Quantizer]
     _quantizer: Optional[Quantizer]
 
     def __new__(
@@ -33,8 +31,6 @@ class HybridQuantizedTensorStorage(QuantizedTensorStorage):
         *args,
         rowwise_storage: Optional[QuantizedTensorStorage],
         columnwise_storage: Optional[QuantizedTensorStorage],
-        rowwise_quantizer: Optional[Quantizer] = None,
-        columnwise_quantizer: Optional[Quantizer] = None,
         quantizer: Optional[Quantizer] = None,
         fake_dtype: Optional[torch.dtype] = None,
         **kwargs,
@@ -47,8 +43,6 @@ class HybridQuantizedTensorStorage(QuantizedTensorStorage):
 
         instance._rowwise_storage = rowwise_storage
         instance._columnwise_storage = columnwise_storage
-        instance._rowwise_quantizer = rowwise_quantizer
-        instance._columnwise_quantizer = columnwise_quantizer
         instance._quantizer = quantizer
         return instance
 
@@ -168,8 +162,6 @@ class HybridQuantizedTensorStorage(QuantizedTensorStorage):
             return HybridQuantizedTensorStorage(
                 rowwise_storage=self._rowwise_storage,
                 columnwise_storage=self._columnwise_storage,
-                rowwise_quantizer=self._rowwise_quantizer,
-                columnwise_quantizer=self._columnwise_quantizer,
                 quantizer=self._quantizer,
                 fake_dtype=self._dtype,
             )
@@ -180,8 +172,6 @@ class HybridQuantizedTensorStorage(QuantizedTensorStorage):
         return HybridQuantizedTensorStorage(
             rowwise_storage=row_view,
             columnwise_storage=col_view,
-            rowwise_quantizer=self._rowwise_quantizer,
-            columnwise_quantizer=self._columnwise_quantizer,
             quantizer=self._quantizer,
             fake_dtype=self._dtype,
         )
@@ -191,8 +181,6 @@ class HybridQuantizedTensorStorage(QuantizedTensorStorage):
         return {
             "rowwise_storage": self._rowwise_storage,
             "columnwise_storage": self._columnwise_storage,
-            "rowwise_quantizer": self._rowwise_quantizer,
-            "columnwise_quantizer": self._columnwise_quantizer,
             "quantizer": self._quantizer,
             "fake_dtype": self._dtype,
         }
