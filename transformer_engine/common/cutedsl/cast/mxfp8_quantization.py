@@ -697,27 +697,16 @@ def _get_compiled_kernel(cfg, M, N):
     return compiled, fn_name
 
 
-def get_mxfp8_quantizer(
+def get_mxfp8_quantizer_aot(
     x: torch.Tensor,
     dtype_row: Literal["e4m3", "e5m2", "none"] = "e4m3",
     dtype_col: Literal["e4m3", "e5m2", "none"] = "e4m3",
     with_gemm_swizzled_scales: bool = False,
 ) -> FlexQuantizer:
-    """Compile the MXFP8 CuTeDSL kernel and return a FlexQuantizer wired to it.
-
-    The kernel is compiled with ``--enable-tvm-ffi`` so the returned compiled
-    object can be invoked directly from Python with torch tensors (tvm-ffi
-    handles the DLPack hand-off). The whole quantize path then stays in Python
-    -- no global-registry registration and no C++ Quantizer binding. The
-    quantizer carries the compiled callable in ``quantize_func`` and
-    ``FlexQuantizer.quantize_impl`` launches it directly.
-
-    Note on ``with_gemm_swizzled_scales``: when True, the scale tensors are
-    emitted in the cuBLAS GEMM-swizzled layout, which pads them up to whole
-    128x4 tiles. Because the kernel only writes the valid blocks,
-    ``FlexQuantizer.quantize_impl`` allocates the scale buffers with
-    ``torch.zeros`` so the padded entries cuBLAS reads are 0. With swizzle=False
-    no swizzling is done and the scale padding is simply left zeroed.
+    """AOT path: precompile the kernel for a fixed (M, N). Both M and N are
+    fixed, so a different shape needs a new quantizer. Returns a FlexQuantizer
+    carrying the kernel's registry name (a str). Not implemented yet (the str
+    routes to FlexQuantizer.quantize_impl_aot, which raises NotImplementedError).
     """
     M, N = x.shape
     cutlass_dtype = torch_to_cutlass_dtype(x.dtype)
@@ -727,12 +716,43 @@ def get_mxfp8_quantizer(
         dtype_column=dtype_col,
         with_gemm_swizzled_scales=with_gemm_swizzled_scales,
     )
-    compiled, _fn_name = _get_compiled_kernel(cfg, M, N)
+    _compiled, fn_name = _get_compiled_kernel(cfg, M, N)
 
     quantizer = FlexQuantizer(
         dtype_row=str_to_te_dtype(dtype_row),
         dtype_column=str_to_te_dtype(dtype_col),
-        quantize_func=compiled,
+        quantize_func=fn_name,  # str -> FlexQuantizer.quantize_impl_aot
+        stochastic_rounding=False,
+    )
+    # Bypass the autograd wrapper in Quantizer.quantize for this milestone.
+    quantizer.internal = True
+    quantizer.optimize_for_gemm = with_gemm_swizzled_scales
+    return quantizer
+
+
+def get_mxfp8_quantizer_jit(
+    x: torch.Tensor,
+    dtype_row: Literal["e4m3", "e5m2", "none"] = "e4m3",
+    dtype_col: Literal["e4m3", "e5m2", "none"] = "e4m3",
+    with_gemm_swizzled_scales: bool = False,
+) -> FlexQuantizer:
+    """JIT path: wire a FlexQuantizer to the @cute.jit kernel object. If the
+    input tensor shape changes, CuTeDSL automatically recompiles (caching per
+    shape). ``x`` is used only for its dtype.
+    """
+    cutlass_dtype = torch_to_cutlass_dtype(x.dtype)
+    cfg = MXFP8QuantizeConfig(
+        cutlass_dtype,
+        dtype_row=dtype_row,
+        dtype_column=dtype_col,
+        with_gemm_swizzled_scales=with_gemm_swizzled_scales,
+    )
+    kernel = MXFP8QuantizeKernel(cfg)  # @cute.jit callable
+
+    quantizer = FlexQuantizer(
+        dtype_row=str_to_te_dtype(dtype_row),
+        dtype_column=str_to_te_dtype(dtype_col),
+        quantize_func=kernel,  # callable -> FlexQuantizer.quantize_impl_jit
         stochastic_rounding=False,
     )
     # Bypass the autograd wrapper in Quantizer.quantize for this milestone.

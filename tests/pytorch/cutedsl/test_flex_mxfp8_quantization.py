@@ -10,7 +10,7 @@ import transformer_engine.pytorch  # noqa: F401  (loads libtransformer_engine.so
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
 from transformer_engine.common.cutedsl.cast.mxfp8_quantization import (
-    get_mxfp8_quantizer,
+    get_mxfp8_quantizer_jit,
 )
 
 MXFP8_BLOCK = 32  # MXFP8 scale block size; valid shapes must be multiples of this.
@@ -43,10 +43,10 @@ def test_flex_mxfp8_bitexact(shape, dtype_pair, swizzle):
     # No direction is invalid -- the quantizer must reject it at construction.
     if dtype_row == "none" and dtype_column == "none":
         with pytest.raises(ValueError):
-            get_mxfp8_quantizer(x, dtype_row, dtype_column, with_gemm_swizzled_scales=swizzle)
+            get_mxfp8_quantizer_jit(x, dtype_row, dtype_column, with_gemm_swizzled_scales=swizzle)
         return
 
-    flex_q = get_mxfp8_quantizer(
+    flex_q = get_mxfp8_quantizer_jit(
         x, dtype_row=dtype_row, dtype_col=dtype_column, with_gemm_swizzled_scales=swizzle
     )
     # Pure-Python path: flex_q(x) -> quantize_impl -> compiled cute kernel.

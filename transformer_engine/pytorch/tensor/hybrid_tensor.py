@@ -28,17 +28,17 @@ class FlexQuantizer(Quantizer):
     columnwise, with a potentially different format per direction (e.g. MXFP8
     rowwise, NVFP4 columnwise, or only one direction at all).
 
-    ``quantize_func`` is a compiled ``cute.jit`` kernel bound to one
-    ``(config, shape)`` by a factory such as
-    :func:`transformer_engine.common.cutedsl.cast.mxfp8_quantization.get_mxfp8_quantizer`.
-    It is exported with tvm-ffi, so torch tensors can be passed straight to it
-    and the whole quantize path stays in Python -- no C++ ``Quantizer`` binding
-    is required.
+    ``quantize_func`` comes from a factory in
+    ``transformer_engine.common.cutedsl.cast.mxfp8_quantization`` and selects the
+    launch path: a callable (``@cute.jit`` kernel object, from
+    ``get_mxfp8_quantizer_jit``) -> JIT path; a ``str`` (registry name, from
+    ``get_mxfp8_quantizer_aot``) -> AOT path. The whole quantize path stays in
+    Python -- no C++ ``Quantizer`` binding is required.
 
     ``quantize_impl`` allocates the per-direction output buffers, launches the
-    kernel directly on them, and wraps the results in a
-    :class:`HybridQuantizedTensor` whose rowwise / columnwise sub-storages are
-    single-direction :class:`MXFP8Tensor` objects.
+    kernel, and wraps the results in a :class:`HybridQuantizedTensor` (or
+    :class:`HybridQuantizedTensorStorage` when ``internal``) whose rowwise /
+    columnwise sub-storages are single-direction :class:`MXFP8Tensor` objects.
     """
 
     dtype_row: Optional[TE_DType]
@@ -151,13 +151,47 @@ class FlexQuantizer(Quantizer):
         )
 
     def quantize_impl(self, tensor: torch.Tensor) -> QuantizedTensor:
-        """Quantize ``tensor`` into a hybrid (per-direction) MXFP8 tensor."""
+        """Quantize ``tensor`` into a hybrid (per-direction) MXFP8 tensor.
+
+        Dispatches on the kind of ``quantize_func``:
+          * callable -> JIT path (:meth:`quantize_impl_jit`): the ``@cute.jit``
+            kernel object; CuTeDSL specializes and caches per shape, so the
+            quantizer adapts to new shapes automatically.
+          * ``str``  -> AOT path (:meth:`quantize_impl_aot`): a precompiled /
+            registry-named kernel. Not implemented yet.
+        """
+        if isinstance(self.quantize_func, str):
+            return self.quantize_impl_aot(tensor)
+        return self.quantize_impl_jit(tensor)
+
+    def quantize_impl_aot(self, tensor: torch.Tensor) -> QuantizedTensor:
+        """AOT path for a string (precompiled / registry-named) kernel."""
+        raise NotImplementedError(
+            "FlexQuantizer AOT path (string quantize_func) is not implemented "
+            "yet; use get_mxfp8_quantizer_jit for the working JIT path."
+        )
+
+    def quantize_impl_jit(self, tensor: torch.Tensor) -> QuantizedTensor:
+        """JIT path: launch the ``@cute.jit`` kernel directly on the buffers.
+
+        The kernel's parameters are annotated ``cute.Tensor``, which suppresses
+        CuTeDSL's implicit torch->cute conversion, so we convert the torch
+        buffers explicitly with ``cute.runtime.from_dlpack``. The kernel object
+        is *not* precompiled: CuTeDSL JIT-compiles + caches per shape on call,
+        so a new ``(M, N)`` recompiles automatically.
+        """
+        from cutlass.cute.runtime import from_dlpack  # noqa: PLC0415  (cutlass: heavy, lazy)
+        import cuda.bindings.driver as cuda  # noqa: PLC0415  (only needed at launch)
+
         if tensor.dim() != 2:
             raise NotImplementedError(
                 "FlexQuantizer currently supports only 2D inputs; got shape "
                 f"{tuple(tensor.shape)}."
             )
-        x = tensor.contiguous()
+        # detach: from_dlpack refuses tensors that require grad (and the cast
+        # itself is not differentiable through the buffer); detach shares
+        # storage so this is a view, not a copy.
+        x = tensor.detach().contiguous()
         M, N = x.shape
         device = x.device
         swizzle = self.optimize_for_gemm
@@ -177,17 +211,17 @@ class FlexQuantizer(Quantizer):
                 self._scale_shape(M, N, columnwise=True), dtype=torch.uint8, device=device
             )
 
-        # Launch the compiled CuTeDSL kernel directly on the torch buffers.
         # Per-direction tvm-ffi contract (amax slots also express NVFP4; MXFP8
         # leaves them None): (mX, row_data, row_scale, row_amax,
         #                     col_data, col_scale, col_amax, stream, rng_state).
-        import cuda.bindings.driver as cuda  # local: only needed at launch
+        def _fd(t):
+            return None if t is None else from_dlpack(t, assumed_align=16)
 
         stream = cuda.CUstream(torch.cuda.current_stream().cuda_stream)
         self.quantize_func(
-            x,
-            row_data, row_scale, None,  # row_data, row_scale, row_amax
-            col_data, col_scale, None,  # col_data, col_scale, col_amax
+            _fd(x),
+            _fd(row_data), _fd(row_scale), None,  # row_data, row_scale, row_amax
+            _fd(col_data), _fd(col_scale), None,  # col_data, col_scale, col_amax
             stream,
             None,  # rng_state (stochastic rounding disabled)
         )
@@ -247,26 +281,36 @@ class FlexQuantizer(Quantizer):
         assert isinstance(
             dst, HybridQuantizedTensorStorage
         ), f"Cannot store hybrid quantized data in {type(dst)} type."
+        if isinstance(self.quantize_func, str):
+            raise NotImplementedError(
+                "FlexQuantizer AOT path (string quantize_func) is not implemented "
+                "yet; use get_mxfp8_quantizer_jit for the working JIT path."
+            )
 
-        # Make sure input is in expected format
+        # Make sure input is in expected format (detach: from_dlpack refuses
+        # tensors that require grad; detach shares storage).
         if not devices_match(src.device, dst.device):
             src = src.to(device=dst.device)
-        src = src.contiguous()
+        src = src.detach().contiguous()
 
-        # Re-launch the kernel directly into dst's existing sub-storage buffers
-        # (same per-direction tvm-ffi contract as quantize_impl).
-        import cuda.bindings.driver as cuda  # local: only needed at launch
+        # Re-launch the @cute.jit kernel directly into dst's existing sub-storage
+        # buffers (same from_dlpack + per-direction contract as quantize_impl_jit).
+        from cutlass.cute.runtime import from_dlpack  # noqa: PLC0415  (cutlass: heavy, lazy)
+        import cuda.bindings.driver as cuda  # noqa: PLC0415  (only needed at launch)
+
+        def _fd(t):
+            return None if t is None else from_dlpack(t, assumed_align=16)
 
         row_sub = dst._rowwise_storage
         col_sub = dst._columnwise_storage
         stream = cuda.CUstream(torch.cuda.current_stream().cuda_stream)
         self.quantize_func(
-            src,
-            row_sub._rowwise_data if row_sub is not None else None,
-            row_sub._rowwise_scale_inv if row_sub is not None else None,
+            _fd(src),
+            _fd(row_sub._rowwise_data) if row_sub is not None else None,
+            _fd(row_sub._rowwise_scale_inv) if row_sub is not None else None,
             None,  # row_amax
-            col_sub._columnwise_data if col_sub is not None else None,
-            col_sub._columnwise_scale_inv if col_sub is not None else None,
+            _fd(col_sub._columnwise_data) if col_sub is not None else None,
+            _fd(col_sub._columnwise_scale_inv) if col_sub is not None else None,
             None,  # col_amax
             stream,
             None,  # rng_state

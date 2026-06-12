@@ -1024,7 +1024,7 @@ class TestFlexGemmBitwiseIdenticalMXFP8:
         # Lazy import: pulls in cutlass/cute, which the rest of this file does
         # not need -- keep collection cheap and arch-independent.
         from transformer_engine.common.cutedsl.cast.mxfp8_quantization import (
-            get_mxfp8_quantizer,
+            get_mxfp8_quantizer_jit,
         )
 
         torch.manual_seed(200)
@@ -1052,15 +1052,19 @@ class TestFlexGemmBitwiseIdenticalMXFP8:
                 and role.tensor_type in ("grad_output", "grad_input")
             ):
                 return MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)
-            # Fwd roles (input/weight/output): FlexQuantizer, MXFP8 both
-            # directions. FlexQuantizer is shape-bound, so compile per role
-            # shape; GEMM needs swizzled MXFP8 scales.
+            # Fwd roles: FlexQuantizer, MXFP8 both directions. FlexQuantizer is
+            # shape-bound (the kernel is compiled for one literal (M, N) and
+            # raises ValueError on a shape mismatch -- no silent corruption), so
+            # compile per role shape. GEMM needs swizzled MXFP8 scales.
+            # NOTE: this square Linear only exercises shapes (batch, in_features)
+            # and (out_features, in_features); a non-square layer or a varying
+            # batch would need a per-shape recompile (see FIXME(flex)).
             if role is not None and role.tensor_type == "weight":
                 shape = (out_features, in_features)
             else:
                 shape = (batch, in_features)
             example = torch.empty(shape, device="cuda", dtype=torch.bfloat16)
-            q = get_mxfp8_quantizer(
+            q = get_mxfp8_quantizer_jit(
                 example,
                 dtype_row="e4m3",
                 dtype_col="e4m3",
