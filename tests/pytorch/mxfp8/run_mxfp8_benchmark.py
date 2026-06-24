@@ -15,10 +15,11 @@ and prints a single merged table, so one command gives you the full picture:
     mode:     GPU = kernel time, cold L2   (CUDA events, --evict-l2)
               CPU = host dispatch time     (tight launch loop, --no-evict-l2)
 
-Default (curated, small): combos {plain, dbias, gelu, dgelu} x directions
-{row, col} (no bidimensional — no specialized kernel for it yet) x swizzle
-{off, on} x bf16 x e4m3 x the 'small' shape preset, for both backends and both
-modes. Override any axis, or use --all for the full matrix.
+Default (curated): combos {plain, dbias, gelu, dgelu} x directions {row, col}
+(no bidimensional — no specialized kernel for it yet) x swizzle {off, on} x
+bf16 x e4m3 x an LLM-representative shape set (hidden 4096-14336, a few thousand
+tokens), for both backends and both modes. Override any axis (--preset/--shapes
+for sizes), or use --all for the full matrix.
 
 Usage:
     python run_mxfp8_benchmark.py                         # curated default
@@ -45,6 +46,12 @@ _ALL_COMBOS = (["plain", "dbias"] + _ACTS
                + ["d" + a for a in _ACTS] + ["dbias_d" + a for a in _ACTS])
 _ALL_DTYPES = ["bf16", "fp16", "fp32"]
 _ALL_FP8 = ["e4m3", "e5m2"]
+
+# Default shapes (tokens M x hidden N): LLM-representative — hidden dims 4096-
+# 14336 (7B/70B hidden + Llama-3 MLP intermediate), a few thousand tokens. All
+# multiples of 128 so the swizzled-scale layout applies. Override with --preset
+# / --shapes.
+_DEFAULT_SHAPES = "4096,4096;4096,8192;8192,8192;4096,14336"
 
 
 def _expand(val, full):
@@ -128,7 +135,8 @@ def main():
                     help="Comma-separated subset of row,col,both.")
     ap.add_argument("--swizzle", choices=["off", "on", "both"], default="both",
                     help="Swizzled scale layout: off / on / both. Default both.")
-    ap.add_argument("--preset", default="small")
+    # Shapes: default to an LLM-representative set; --preset / --shapes override.
+    ap.add_argument("--preset", default=None)
     # Forwarded to bench_mxfp8_cutedsl.py (see its --help for semantics).
     ap.add_argument("--shapes")
     ap.add_argument("--in-dtypes", dest="in_dtypes")
@@ -136,6 +144,10 @@ def main():
     ap.add_argument("--warmup", type=int)
     ap.add_argument("--iters", type=int)
     args = ap.parse_args()
+
+    # Default to the LLM-representative shape set unless the user picked shapes.
+    if args.preset is None and args.shapes is None:
+        args.shapes = _DEFAULT_SHAPES
 
     backends = [b.strip() for b in args.backends.split(",") if b.strip()]
     modes = [m.strip() for m in args.modes.split(",") if m.strip()]
