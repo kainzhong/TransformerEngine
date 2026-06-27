@@ -93,10 +93,16 @@ def _backend_env(backend):
     """Process env that latches the backend (and CuTeDSL arch) for a bench run."""
     env = dict(os.environ)
     env["NVTE_ENABLE_CUTEDSL_QUANT_BACKEND"] = "1" if backend == "dsl" else "0"
-    if backend == "dsl" and "CUTE_DSL_ARCH" not in env:
-        arch = _detect_cute_dsl_arch()
-        if arch:
-            env["CUTE_DSL_ARCH"] = arch
+    if backend == "dsl":
+        if "CUTE_DSL_ARCH" not in env:
+            arch = _detect_cute_dsl_arch()
+            if arch:
+                env["CUTE_DSL_ARCH"] = arch
+        # We EXPECT the CuTeDSL backend to handle every quantize in a `dsl` run.
+        # If the dispatcher falls back to CUDA (e.g. the wrong transformer_engine
+        # got imported, or the kernel didn't register/compile), this makes it warn
+        # loudly instead of silently producing CUDA numbers labelled "dsl".
+        env.setdefault("NVTE_WARN_IF_CUTEDSL_BACKEND_NOT_CHOSEN", "1")
     # Force the bench subprocess to import THIS checkout's transformer_engine (so
     # `dsl` runs the local CuTeDSL kernels), not the installed package. Without
     # this, `python bench.py` imports installed TE and `dsl` silently falls back.
