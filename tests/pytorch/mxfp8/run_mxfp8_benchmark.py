@@ -217,9 +217,12 @@ def _run_gpu_nsys_backend(nsys, env, backend, combos, in_dtypes, fp8s, shapes_st
                   file=sys.stderr)
             return {}
         bytes_map = _parse_nsys_bytes_all(proc.stdout)
+        # --force-export=true: always re-derive the SQLite from the freshly
+        # captured .nsys-rep. Otherwise `nsys stats` reuses a stale .sqlite left
+        # next to a reused output path (e.g. --nsys-out), silently reporting old data.
         stats = subprocess.run(
-            [nsys, "stats", "--report", "nvtx_kern_sum", "--format", "csv",
-             rep + ".nsys-rep"], capture_output=True, text=True)
+            [nsys, "stats", "--force-export=true", "--report", "nvtx_kern_sum",
+             "--format", "csv", rep + ".nsys-rep"], capture_output=True, text=True)
         if out_dir:
             with open(rep + ".nvtx_kern_sum.csv", "w") as fh:
                 fh.write(stats.stdout)
@@ -243,7 +246,14 @@ def _run_gpu_nsys_backend(nsys, env, backend, combos, in_dtypes, fp8s, shapes_st
         return rows
     finally:
         if tmp is not None:
+            # Temp path: the whole dir (report + SQLite) is removed.
             tmp.cleanup()
+        else:
+            # --nsys-out path: keep the raw .nsys-rep, but delete the generated
+            # SQLite so a later run can never read stale data from it.
+            sqlite = rep + ".sqlite"
+            if os.path.exists(sqlite):
+                os.remove(sqlite)
 
 
 def _parse_shapes(shapes_str):
