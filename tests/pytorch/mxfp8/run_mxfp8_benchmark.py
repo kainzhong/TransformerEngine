@@ -17,8 +17,8 @@ and prints a single merged table, so one command gives you the full picture:
                                             backend, per-shape via NVTX, needs nsys)
               CPU = host dispatch time     (in-process wall clock, --no-evict-l2)
 
-Default (curated): combos {plain, dbias, gelu, dgelu} x directions {row, col}
-(no bidimensional — no specialized kernel for it yet) x swizzle {off, on} x
+Default (curated): combos {plain, dbias, gelu, dgelu} x directions {row, col,
+both} (both = bidirectional, rowwise+colwise in one pass) x swizzle {off, on} x
 bf16 x e4m3 x an LLM-representative shape set (hidden 4096-14336, a few thousand
 tokens), for both backends and both modes. Override any axis (--preset/--shapes
 for sizes), or use --all for the full matrix.
@@ -41,6 +41,13 @@ import tempfile
 from pathlib import Path
 
 BENCH = Path(__file__).with_name("bench_mxfp8_cutedsl.py")
+# Repo root (…/tests/pytorch/mxfp8/run_mxfp8_benchmark.py -> 3 levels up). The bench
+# is launched as a script, so its own dir lands on sys.path and `import
+# transformer_engine` would resolve to the INSTALLED package — not this checkout —
+# meaning the CuTeDSL backend silently runs the installed (often stale / CUDA-
+# fallback) kernels. Putting the repo root on PYTHONPATH forces the local TE so the
+# `dsl` backend actually exercises the local CuTeDSL kernels.
+_REPO_ROOT = Path(__file__).resolve().parents[3]
 # CPU mode times host dispatch in-process; GPU mode reads kernel time from nsys.
 _CPU_FLAG = "--no-evict-l2"
 
@@ -90,6 +97,11 @@ def _backend_env(backend):
         arch = _detect_cute_dsl_arch()
         if arch:
             env["CUTE_DSL_ARCH"] = arch
+    # Force the bench subprocess to import THIS checkout's transformer_engine (so
+    # `dsl` runs the local CuTeDSL kernels), not the installed package. Without
+    # this, `python bench.py` imports installed TE and `dsl` silently falls back.
+    existing = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = str(_REPO_ROOT) + (os.pathsep + existing if existing else "")
     return env
 
 
@@ -309,12 +321,13 @@ def main():
                          "combos x row/col/both x all 3 input dtypes x both fp8 "
                          "formats x swizzle on+off. Very heavy — pair with a small "
                          "--preset and modest --iters.")
-    # Curated defaults: plain + one act + one dact (+ plain dbias), rowwise and
-    # columnwise (no bidimensional — no specialized kernel for it yet), swizzle
-    # on+off, small preset. Override any axis explicitly; 'all' expands an axis.
+    # Curated defaults: plain + one act + one dact (+ plain dbias), rowwise,
+    # columnwise, and bidirectional (both), swizzle on+off. Override any axis
+    # explicitly; 'all' expands an axis.
     ap.add_argument("--combos", default="plain,dbias,gelu,dgelu")
-    ap.add_argument("--directions", default="row,col",
-                    help="Comma-separated subset of row,col,both.")
+    ap.add_argument("--directions", default="row,col,both",
+                    help="Comma-separated subset of row,col,both "
+                         "(both = bidirectional, rowwise+colwise in one pass).")
     ap.add_argument("--swizzle", choices=["off", "on", "both"], default="both",
                     help="Swizzled scale layout: off / on / both. Default both.")
     # Shapes: default to an LLM-representative set; --preset / --shapes override.
