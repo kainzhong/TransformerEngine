@@ -15,11 +15,20 @@ the two runs are directly comparable — only the backend under the hood differs
 Use run_nsys_profile.sh to run this script twice (disabled vs enabled) and align
 the results.
 
-Two timing paths:
-  --evict-l2 (default)  GPU time, cold cache. Flushes L2 before each iter and
-                        times the kernel with CUDA events (sync per iter).
+Timing paths:
+  --gpu-nsys            GPU time from nsys. Warms up (incl. the CuTeDSL JIT
+                        compile), then runs `iters` cold-L2 iterations with each
+                        fn() call wrapped in a same-named QBENCH|tag|MxN|dir NVTX
+                        range, and prints the per-workload byte count. The kernel
+                        time is read from nsys's NVTX Range Kernel Summary
+                        (nvtx_kern_sum) by run_mxfp8_benchmark.py — NOT here. The
+                        whole matrix can run in ONE nsys process (ranges, not
+                        kernel names, separate the workloads).
   --no-evict-l2         CPU time, warm cache. Tight launch loop, NO sync and NO
                         L2 flush — host dispatch cost / warm-cache throughput.
+  --evict-l2 (default)  GPU time, cold cache, via CUDA events (sync per iter).
+                        Kept for standalone use; the driver uses --gpu-nsys for
+                        GPU timing since CUDA events add a small measurement skew.
   --single              One-shot cold-cache wall-clock. Overrides --iters.
 
 Produces NVTX-tagged iterations for Nsight Systems timeline profiling.
@@ -224,9 +233,26 @@ def bench_once(name, fn, warmup, iters, evict_l2=False, single=False):
     return (t1 - t0) / 1e6 / iters
 
 
+def _workload_bytes(M, N, in_bytes_per_elt, need_act_input, rowwise, colwise):
+    """Bytes the quantize moves through HBM: input read + FP8 out + e8m0 scales.
+
+    A lower bound on DRAM traffic (assumes each byte touched once; ignores the
+    dbias workspace round-trip). Used to turn a measured kernel time into GB/s.
+    """
+    bytes_in = M * N * in_bytes_per_elt * (2 if need_act_input else 1)
+    bytes_out = bytes_scale = 0
+    if rowwise:
+        bytes_out += M * N                    # rowwise FP8 data (uint8)
+        bytes_scale += M * (N // 32)          # rowwise e8m0 scales
+    if colwise:
+        bytes_out += M * N                    # colwise FP8 data
+        bytes_scale += (M // 32) * N          # colwise e8m0 scales
+    return bytes_in + bytes_out + bytes_scale
+
+
 def bench_shape(M, N, rowwise, colwise, warmup, iters, combo="plain",
                 in_dtype="bf16", fp8_dtype="e4m3", swizzle=False,
-                evict_l2=False, single=False):
+                evict_l2=False, single=False, gpu_nsys=False):
     torch.manual_seed(0)
     torch.cuda.manual_seed(0)
     in_dt = _TORCH_IN_DTYPES[in_dtype]
@@ -246,31 +272,48 @@ def bench_shape(M, N, rowwise, colwise, warmup, iters, combo="plain",
 
     fn = make_fn(combo, x, act_input, rowwise, colwise,
                  fp8_dtype=fp8_dtype, swizzle=swizzle)
-    # Warm caches / trigger the CuTeDSL JIT compile once (not counted).
-    nvtx.range_push("warm")
-    fn()
-    torch.cuda.synchronize()
-    nvtx.range_pop()
+    total_bytes = _workload_bytes(M, N, x.element_size(), need_act_input,
+                                  rowwise, colwise)
 
-    ms = bench_once(
-        f"{backend}_{M}x{N}_{dir_label}_{tag}",
-        fn, warmup, iters, evict_l2=evict_l2, single=single,
-    )
+    if gpu_nsys:
+        # The driver profiles the WHOLE matrix in one nsys run per backend and
+        # attributes per-workload kernel time via NVTX ranges (nsys nvtx_kern_sum):
+        # the kernel NAME encodes the config but not the shape, so we tag each
+        # workload with a same-named QBENCH range (which carries M/N) that wraps
+        # ONLY fn(). nvtx_kern_sum reports the real CUPTI kernel durations bucketed
+        # per range; warmup + the L2-evict sit OUTSIDE the range (blank range) and
+        # are ignored. Emit the byte count so the driver can compute GB/s.
+        print(f"NSYS_BYTES backend={backend} tag={tag} combo={combo} "
+              f"M={M} N={N} dir={dir_label} bytes={total_bytes} iters={iters}",
+              flush=True)
+        for _ in range(max(warmup, 1)):                  # warmup OUTSIDE any range
+            fn()
+        torch.cuda.synchronize()
+
+        evict = _l2_evict_buf()
+        rng = f"QBENCH|{tag}|{M}x{N}|{dir_label}"
+        for i in range(iters):
+            evict.zero_()                                # cold L2, OUTSIDE the range
+            torch.cuda.synchronize()
+            nvtx.range_push(rng)                         # same name every iter ->
+            fn()                                         # nvtx_kern_sum aggregates
+            torch.cuda.synchronize()
+            nvtx.range_pop()
+        ms = None
+    else:
+        # Warm caches / trigger the CuTeDSL JIT compile once (not counted).
+        nvtx.range_push("warm")
+        fn()
+        torch.cuda.synchronize()
+        nvtx.range_pop()
+        ms = bench_once(
+            f"{backend}_{M}x{N}_{dir_label}_{tag}",
+            fn, warmup, iters, evict_l2=evict_l2, single=single,
+        )
 
     nvtx.range_pop()  # close shape_ range
 
-    in_bytes_per_elt = x.element_size()
-    bytes_in = M * N * in_bytes_per_elt * (2 if need_act_input else 1)
-    bytes_out = 0
-    bytes_scale = 0
-    if rowwise:
-        bytes_out += M * N * 1                # rowwise FP8 data (uint8)
-        bytes_scale += M * (N // 32)          # rowwise e8m0 scales
-    if colwise:
-        bytes_out += M * N * 1                # colwise FP8 data
-        bytes_scale += (M // 32) * N          # colwise e8m0 scales
-    total_bytes = bytes_in + bytes_out + bytes_scale
-    gbps = total_bytes / (ms * 1e-3) / 1e9
+    gbps = (total_bytes / (ms * 1e-3) / 1e9) if ms is not None else None
 
     return {
         "backend": backend,
@@ -299,6 +342,9 @@ def main():
     parser.add_argument("--direction", choices=["row", "col", "both", "all"],
                         default="all",
                         help="Which direction(s) to benchmark")
+    parser.add_argument("--directions", type=str, default=None,
+                        help="Comma-separated subset of row,col,both "
+                             "(overrides --direction; lets one process cover all).")
     parser.add_argument("--combo", type=str, default="plain",
                         choices=sorted(COMBO_KIND),
                         help=f"Operation: one of {sorted(COMBO_KIND)}")
@@ -314,6 +360,9 @@ def main():
                         help="Comma-separated list of fp8 output dtypes")
     parser.add_argument("--swizzle", action="store_true",
                         help="Enable GEMM-swizzled scales (optimize_for_gemm)")
+    parser.add_argument("--swizzles", type=str, default=None,
+                        help="Comma-separated subset of off,on (overrides "
+                             "--swizzle; lets one process cover both).")
     parser.add_argument("--evict-l2", dest="evict_l2", action="store_true",
                         default=True,
                         help="GPU time, cold cache (default): flush L2 before "
@@ -324,6 +373,12 @@ def main():
     parser.add_argument("--single", action="store_true",
                         help="One-shot cold-cache wall-clock; overrides --iters "
                              "and takes precedence over --evict-l2.")
+    parser.add_argument("--gpu-nsys", dest="gpu_nsys", action="store_true",
+                        help="GPU time via nsys: run cold-L2 iters with each fn() "
+                             "wrapped in a same-named QBENCH NVTX range and print "
+                             "the byte count (no in-process timing). The driver "
+                             "reads per-range kernel time from nvtx_kern_sum. Used "
+                             "by run_mxfp8_benchmark.py.")
     parser.add_argument("--preset", type=str, default=None,
                         choices=sorted(SHAPE_PRESETS),
                         help=f"Shape preset: one of {sorted(SHAPE_PRESETS)}")
@@ -348,14 +403,26 @@ def main():
     else:
         shapes = SHAPE_PRESETS["default"]
 
-    if args.direction == "all":
-        dirs = [("row", True, False), ("col", False, True), ("both", True, True)]
-    elif args.direction == "row":
-        dirs = [("row", True, False)]
-    elif args.direction == "col":
-        dirs = [("col", False, True)]
+    _DIR_RCW = {"row": (True, False), "col": (False, True), "both": (True, True)}
+    if args.directions:
+        dir_names = [d.strip() for d in args.directions.split(",") if d.strip()]
+    elif args.direction == "all":
+        dir_names = ["row", "col", "both"]
     else:
-        dirs = [("both", True, True)]
+        dir_names = [args.direction]
+    for d in dir_names:
+        if d not in _DIR_RCW:
+            print(f"unknown direction: {d}", file=sys.stderr)
+            return 1
+    dirs = [(d, *_DIR_RCW[d]) for d in dir_names]
+
+    # Swizzle list: --swizzles 'off,on' overrides the single --swizzle flag so one
+    # process can cover both scale layouts.
+    if args.swizzles:
+        swizzles = [s.strip().lower() == "on"
+                    for s in args.swizzles.split(",") if s.strip()]
+    else:
+        swizzles = [args.swizzle]
 
     if args.combos:
         combos = [c.strip() for c in args.combos.split(",")]
@@ -372,24 +439,28 @@ def main():
             if args.fp8s else [args.fp8])
 
     backend = backend_label()
-    mode = ("single (one-shot cold wall-clock)" if args.single else
+    mode = ("gpu-nsys (kernel time from nsys summary)" if args.gpu_nsys else
+            "single (one-shot cold wall-clock)" if args.single else
             "evict-l2 (GPU time, cold cache)" if args.evict_l2 else
             "warm cache (CPU dispatch time, no sync)")
     print(f"Backend: {backend}  "
           f"(NVTE_ENABLE_CUTEDSL_QUANT_BACKEND="
           f"{os.environ.get('NVTE_ENABLE_CUTEDSL_QUANT_BACKEND', '<unset>')})")
     print(f"Benchmarking {len(shapes)} shape(s) × {len(dirs)} direction(s) × "
-          f"{len(combos)} combo(s) × {len(in_dtypes)} in-dtype × {len(fp8s)} fp8")
+          f"{len(combos)} combo(s) × {len(in_dtypes)} in-dtype × {len(fp8s)} fp8 "
+          f"× {len(swizzles)} swizzle")
     print(f"  mode: {mode}")
     print(f"  warmup={args.warmup} iters={args.iters}")
     print(f"  combos: {combos}  in_dtypes: {in_dtypes}  fp8: {fp8s}  "
-          f"swizzle={args.swizzle}")
+          f"dirs: {dir_names}  swizzles: {swizzles}")
     for m, n in shapes:
         print(f"  - {m}x{n}")
     print()
 
-    # Signal nsys to start capturing (used with --capture-range=cudaProfilerApi).
-    torch.cuda.profiler.start()
+    # --gpu-nsys uses NVTX ranges (no cudaProfiler); otherwise wrap the whole sweep
+    # so the nsys timeline is annotated when run under nsys manually.
+    if not args.gpu_nsys:
+        torch.cuda.profiler.start()  # used with --capture-range=cudaProfilerApi
 
     results = []
     for combo in combos:
@@ -397,14 +468,22 @@ def main():
             for fp8 in fp8s:
                 for M, N in shapes:
                     for _, rw, cw in dirs:
-                        r = bench_shape(M, N, rw, cw, args.warmup, args.iters,
-                                        combo, in_dtype=in_dtype, fp8_dtype=fp8,
-                                        swizzle=args.swizzle,
-                                        evict_l2=args.evict_l2,
-                                        single=args.single)
-                        results.append(r)
+                        for sw in swizzles:
+                            r = bench_shape(M, N, rw, cw, args.warmup, args.iters,
+                                            combo, in_dtype=in_dtype, fp8_dtype=fp8,
+                                            swizzle=sw, evict_l2=args.evict_l2,
+                                            single=args.single,
+                                            gpu_nsys=args.gpu_nsys)
+                            results.append(r)
 
-    torch.cuda.profiler.stop()
+    if not args.gpu_nsys:
+        torch.cuda.profiler.stop()
+
+    if args.gpu_nsys:
+        # Kernel time is measured by nsys (the driver parses its summary) and the
+        # NSYS_BYTES line is emitted by bench_shape up front (before the capture
+        # range, since stop-shutdown may end the process). Nothing to print here.
+        return 0
 
     # Summary. Columns are positional so run_nsys_profile.sh can parse them:
     #   backend  tag  shape  dir  us  GB/s
