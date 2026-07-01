@@ -191,17 +191,23 @@ inline bool mxfp8_quantize_cutedsl(const MXFP8QuantConfig &config,
   // Data tensors auto-flatten to 2D (DLTensorWrapper's default), matching the
   // kernel's flat (rows, cols) view; scale/amax/noop are rank <= 2 and pass through.
   tvm_ffi_bridge::DLTensorWrapper mX(input_tensor->data);
-  tvm_ffi_bridge::DLTensorWrapper mO_row(output_tensor->data);
-  tvm_ffi_bridge::DLTensorWrapper mS_row(output_tensor->scale_inv);
-  tvm_ffi_bridge::DLTensorWrapper mO_col(output_tensor->columnwise_data);
-  tvm_ffi_bridge::DLTensorWrapper mS_col(output_tensor->columnwise_scale_inv);
-  tvm_ffi_bridge::DLTensorWrapper mAmax(output_tensor->amax);
-  tvm_ffi_bridge::DLTensorWrapper mNoop(noop_tensor->data);
-  // Backward tensors: if the passed tensor pointer is nullptr, they will be empty DLTensorWrapper with null data pointer too
-  tvm_ffi_bridge::DLTensorWrapper mActInput, mWorkspace;
-  // If these tensors are not nullptr, wrap them as DLTensorWrappers with real data
-  if (act_input_tensor != nullptr) mActInput = tvm_ffi_bridge::DLTensorWrapper(act_input_tensor->data);
-  if (workspace_tensor != nullptr) mWorkspace = tvm_ffi_bridge::DLTensorWrapper(workspace_tensor->data);
+  tvm_ffi_bridge::DLTensorWrapper mO_row, mS_row, mO_col, mS_col, mAmax, mNoop, mActInput, mWorkspace;
+  if (output_tensor->has_data()) {
+    mO_row = tvm_ffi_bridge::DLTensorWrapper(output_tensor->data);
+    mS_row = tvm_ffi_bridge::DLTensorWrapper(output_tensor->scale_inv);
+  }
+  if (output_tensor->has_columnwise_data()) {
+    mO_col = tvm_ffi_bridge::DLTensorWrapper(output_tensor->columnwise_data);
+    mS_col = tvm_ffi_bridge::DLTensorWrapper(output_tensor->columnwise_scale_inv);
+  }
+  if (output_tensor->amax.dptr != nullptr)
+    mAmax = tvm_ffi_bridge::DLTensorWrapper(output_tensor->amax);
+  if (noop_tensor != nullptr && noop_tensor->data.dptr != nullptr)
+    mNoop = tvm_ffi_bridge::DLTensorWrapper(noop_tensor->data);
+  if (act_input_tensor != nullptr && act_input_tensor->data.dptr != nullptr)
+    mActInput = tvm_ffi_bridge::DLTensorWrapper(act_input_tensor->data);
+  if (workspace_tensor != nullptr && workspace_tensor->data.dptr != nullptr)
+    mWorkspace = tvm_ffi_bridge::DLTensorWrapper(workspace_tensor->data);
   // stream is a tvm-ffi opaque "handle"; pass the CUDA stream as void*.
   (*mxfp8_quant_func_opt)(&mX, &mO_row, &mS_row, &mO_col, &mS_col, &mAmax, &mNoop,
                           &mActInput, &mWorkspace, static_cast<void *>(stream));

@@ -195,17 +195,14 @@ struct is_lazyloadable_config<
 class TVMFFICentral {
  public:
   static TVMFFICentral &getInstance() {
-    static TVMFFICentral instance;
-    return instance;
+    // Deliberately leaked (never deleted) because cache_ holds Python-backed
+    // tvm::ffi::Function handles whose decref must NOT run at static-destruction
+    // time -- Python / the tvm-ffi registry may already be finalized by then,
+    // which would be a use-after-free crash at process exit.
+    static TVMFFICentral *instance = new TVMFFICentral();
+    return *instance;
   }
 
-  // Resolve the compiled kernel for `cfg`. The kernel itself lives in the tvm-ffi
-  // global registry (registered by the Python entrypoint under cfg.to_key()),
-  // which releases its Python-backed entries safely at interpreter shutdown; we
-  // fetch it per call with GetGlobal(key). C++ caches only a bool per config
-  // (supported or not), so Python is asked at most once per config and we never
-  // hold a Python-backed handle in a static-duration object (which would crash
-  // at exit, when the singleton is torn down after the interpreter is finalized).
   template <typename Config>
   std::optional<tvm::ffi::Function> lazyload_function(const Config &cfg) {
     static_assert(detail::is_lazyloadable_config<Config>::value,
@@ -222,26 +219,26 @@ class TVMFFICentral {
     const std::string key = cfg.to_key();
     {
       std::shared_lock<std::shared_mutex> read_lock(mutex_);
-      auto it = supported_.find(key);
-      if (it != supported_.end()) {
-        return it->second ? tvm::ffi::Function::GetGlobal(key) : std::nullopt;
+      auto it = cache_.find(key);
+      if (it != cache_.end()) {
+        // If the key is present, the value is either a valid tvm::ffi::Function or std::nullopt (indicating config not supported)
+        return it->second;
       }
     }
-    // Cold miss: ask Python to compile + globally register the kernel under
-    // `key`; cache only the support decision (avoids re-asking Python, and
-    // negative-caches unsupported configs).
-    const bool supported = cfg.retrieve_func_from_python(key);
+    // First time we see this config since the key isn't present in the cache: ask Python to compile + register the kernel
+    // under `key`, then resolve it once and cache the Function (or nullopt if unsupported)
+    std::optional<tvm::ffi::Function> fn =
+        cfg.retrieve_func_from_python(key) ? tvm::ffi::Function::GetGlobal(key) : std::nullopt;
     {
       std::unique_lock<std::shared_mutex> write_lock(mutex_);
-      supported_.emplace(key, supported);
+      // emplace is a no-op if another thread populated this key meanwhile; the
+      // resolved value is identical, so either copy is fine.
+      cache_.emplace(key, fn);
     }
-    if (supported) {
-      return tvm::ffi::Function::GetGlobal(key);
-    }
-    if (warn_cutedsl_backend_not_chosen_) {
+    if (!fn && warn_cutedsl_backend_not_chosen_) {
       NVTE_WARN("TVM-FFI kernel for config `", key, "` is not supported.");
     }
-    return std::nullopt;
+    return fn;
   }
 
  private:
@@ -267,10 +264,11 @@ class TVMFFICentral {
   const bool cutedsl_backend_enabled_;
   const bool warn_cutedsl_backend_not_chosen_;
   std::shared_mutex mutex_;
-  // Per-config support decision (cfg.to_key() -> supported). Holds NO Python-
-  // backed handles, so it is safe to destroy at static teardown — the kernels
-  // live in the tvm-ffi registry, owned and released by tvm-ffi itself.
-  std::unordered_map<std::string, bool> supported_;
+  // Per-config resolved kernel: cfg.to_key() -> GetGlobal result (std::nullopt ==
+  // unsupported). Holds Python-backed tvm::ffi::Function handles; safe ONLY because
+  // the singleton is deliberately leaked (see getInstance), so these are never
+  // decref'd at static teardown.
+  std::unordered_map<std::string, std::optional<tvm::ffi::Function>> cache_;
 };
 
 }  // namespace tvm_ffi_bridge
