@@ -50,12 +50,12 @@ from transformer_engine.common.CuTeDSL.utils import (
     fabs_f32,
     exp2f_rcp,
     pack_f32x2,
-    mul_cvt_f32x4_to_fp8x4,
 )
 from transformer_engine.common.CuTeDSL.utils_fp8 import (
-    get_cvt_f32_to_fp8_func, 
+    get_cvt_f32_to_fp8_func,
     get_cvt_f32x2_to_fp8x2_func,
-    cvt_f32_to_fp8e8m0
+    cvt_f32_to_fp8e8m0,
+    mul_cvt_f32x4_to_fp8x4,
 )
 
 CUTEDSL_DEBUG_LOGGING = os.environ.get("CUTEDSL_DEBUG_LOGGING", "0") == "1"
@@ -412,8 +412,90 @@ def quantize_colwise_mxfp8(
     return amax_c, dbias_partial
 
 @cute.jit
-def quantize_bidimensional_mxfp8():
-    pass
+def quantize_bidimensional_mxfp8(
+    sX_tile: cute.Tensor,       # 32x64 input tile (already sliced to this stage)
+    sO_row_tile: cute.Tensor,   # 32x64 rowwise-output tile
+    sO_col_tile: cute.Tensor,   # 32x64 colwise-output tile
+    mS_row_tile: cute.Tensor,   # (32, 2) rowwise-scale tile for this data tile
+    mS_col_tile: cute.Tensor,   # (1, 64) colwise-scale tile for this data tile
+    WARPS_PER_CTA: cutlass.Constexpr,
+    max_norm_rcp,
+    fp8_dtype: cutlass.Constexpr,
+):
+    """Quantize a pre-sliced 32x64 tile -> both rowwise and colwise MXFP8. Elements are
+    addressed through TV layouts: a warp = 32 lanes = 32 rows (lane == row), and each
+    thread owns one 32-col row segment (its 32-col block) and one output column.
+
+    No bounds check: the caller only loops over valid tiles (`num_tiles`). A partial
+    tile's out-of-bounds warp still runs, but harmlessly -- it reads TMA zero-filled
+    smem, its output columns are masked by the caller's TMA store, and its scale writes
+    land in the tile's padding columns (always in-bounds of the sliced scale tile).
+    """
+    mul_cvt4 = mul_cvt_f32x4_to_fp8x4(fp8_dtype)
+    rX = cute.make_rmem_tensor(cute.make_layout((MXFP8_BLOCK_SCALING_SIZE,), stride=(1,)), dtype=Float32)
+
+    tiler, tv_layout = cute.make_layout_tv(
+        thr_layout=cute.make_layout(((MXFP8_BLOCK_SCALING_SIZE, 1), WARPS_PER_CTA)), # ((32, 1) 2)
+        val_layout=cute.make_layout((1, MXFP8_BLOCK_SCALING_SIZE))
+    )
+    tiler_rowwise_scale, tv_layout_rowwise_scale = cute.make_layout_tv(
+        thr_layout=cute.make_layout(((MXFP8_BLOCK_SCALING_SIZE, 1), WARPS_PER_CTA)), # ((32, 1) 2)
+        val_layout=cute.make_layout((1, 1))
+    )
+    tiler_colwise_scale, tv_layout_colwise_scale = cute.make_layout_tv(
+        thr_layout=cute.make_layout((1, (MXFP8_BLOCK_SCALING_SIZE, WARPS_PER_CTA))),  # (1, (32, 2))
+        val_layout=cute.make_layout((1, 1)),
+    )
+
+    tidx, _, _ = cute.arch.thread_idx()
+    lane = tidx % MXFP8_BLOCK_SCALING_SIZE
+
+    # Each composed [tidx, None] slice is 1-D (the value mode is flattened): the data
+    # slices are size 32 (this thread's row segment), the scale slices size 1.
+    tXsX = cute.composition(sX_tile, tv_layout)[tidx, None]              # (32,) input row segment
+    tXsO_row = cute.composition(sO_row_tile, tv_layout)[tidx, None]      # (32,) rowwise out
+    tXsO_col = cute.composition(sO_col_tile, tv_layout)[tidx, None]      # (32,) colwise out
+    tSmS_row_tile = cute.composition(mS_row_tile, tv_layout_rowwise_scale)[tidx, None]  # (1,)
+    tSmS_col_tile = cute.composition(mS_col_tile, tv_layout_colwise_scale)[tidx, None]  # (1,)
+
+    for i in cutlass.range_constexpr(MXFP8_BLOCK_SCALING_SIZE):
+        rX[i] = Float32(tXsX[i])
+
+    # One pass: fabs(rX[c]) feeds BOTH reductions -- the rowwise amax (intra-lane) and
+    # the colwise amax (warp_redux over the warp's 32 rows). warp_redux_sync broadcasts
+    # to every lane, so each lane builds the full set of column inverse scales and
+    # captures its own column's e8m0 scale via the `c == lane` match (compile-time-
+    # indexed to avoid a register-array spill). Mirrors CUDA's fused abs_max + reduce.
+    col_inv = cute.make_rmem_tensor(cute.make_layout((MXFP8_BLOCK_SCALING_SIZE,), stride=(1,)), dtype=Float32)
+    row_amax = Float32(0.0)
+    col_exp_lane = Uint8(0)
+    for c in cutlass.range_constexpr(MXFP8_BLOCK_SCALING_SIZE):
+        a = fabs_f32(rX[c])
+        row_amax = cute.arch.fmax(row_amax, a)
+        col_amax = cute.arch.warp_redux_sync(a, kind="fmax")
+        col_exp_c = cvt_f32_to_fp8e8m0(col_amax * max_norm_rcp)
+        col_inv[c] = exp2f_rcp(col_exp_c)
+        if c == lane:
+            col_exp_lane = Uint8(col_exp_c)
+    row_exp = cvt_f32_to_fp8e8m0(row_amax * max_norm_rcp)
+    row_inv = exp2f_rcp(row_exp)
+    tSmS_row_tile[0] = Uint8(row_exp)     # rowwise scale (this row-block)
+    tSmS_col_tile[0] = col_exp_lane       # colwise scale (this thread's column)
+
+    # Vectorized cast: 4 elems per fused mul_cvt -> one uint32 (CUDA's _use_cvt_4x path).
+    # Rowwise multiplies by the broadcast row scale; colwise pre-scales per column in f32
+    # (mul_cvt only broadcasts a single scale over the 4), then converts with a unit scale.
+    row_scale_2x = pack_f32x2(row_inv, row_inv)
+    one_2x = pack_f32x2(Float32(1.0), Float32(1.0))
+    tXsO_row_u32 = cute.make_tensor(cute.recast_ptr(tXsO_row.iterator, dtype=Uint32),
+                                    cute.make_layout((MXFP8_BLOCK_SCALING_SIZE // 4,), stride=(1,)))
+    tXsO_col_u32 = cute.make_tensor(cute.recast_ptr(tXsO_col.iterator, dtype=Uint32),
+                                    cute.make_layout((MXFP8_BLOCK_SCALING_SIZE // 4,), stride=(1,)))
+    for j in cutlass.range_constexpr(MXFP8_BLOCK_SCALING_SIZE // 4):
+        o = 4 * j
+        tXsO_row_u32[j] = mul_cvt4(rX[o], rX[o + 1], rX[o + 2], rX[o + 3], row_scale_2x)
+        tXsO_col_u32[j] = mul_cvt4(rX[o] * col_inv[o], rX[o + 1] * col_inv[o + 1],
+                                   rX[o + 2] * col_inv[o + 2], rX[o + 3] * col_inv[o + 3], one_2x)
 
 class MXFP8QuantizeConfig:
     """Configs for the compiled CuTeDSL kernel. These will be fixed once the kernel is compiled and
@@ -1375,74 +1457,10 @@ class MXFP8QuantizeSpecializedRowwiseKernel:
                 )
 
 
-@cute.jit
-def quantize_bidimensional_mxfp8(
-    sX: cute.Tensor,
-    sO_row: cute.Tensor,
-    sO_col: cute.Tensor,
-    mS_row: cute.Tensor,
-    mS_col: cute.Tensor,
-    stage,
-    lane,
-    wcol,
-    row,
-    col0,
-    bidy,
-    N,
-    max_norm_rcp,
-    fp8_dtype: cutlass.Constexpr,
-):
-    """Quantize one warp's 32-row x 32-col block already staged in `sX[..., stage]`
-    into both rowwise and colwise MXFP8.
-
-    A warp = 32 lanes = 32 rows (lane == row); the warp owns a 32-col block at `col0`.
-    Rowwise amax is intra-lane; colwise amax is a per-column warp reduction over the
-    warp's 32 rows (`warp_redux_sync`, broadcast to every lane) — no transpose needed.
-    Writes e8m0 scales to `mS_row`/`mS_col` (gmem) and the FP8 outputs to
-    `sO_row`/`sO_col[..., stage]` (smem; the caller TMA-stores them).
-
-    No-op when the block is out of bounds: N % 32 == 0 => a 32-col block is fully in
-    or fully past N, so `col0 < N` gates the whole warp without divergence; the
-    caller's TMA store drops the untouched smem for OOB blocks.
-    """
-    cvt_fp8 = get_cvt_f32_to_fp8_func(fp8_dtype)
-    if col0 < N:
-        rX = cute.make_rmem_tensor(cute.make_layout((MXFP8_BLOCK_SCALING_SIZE,), stride=(1,)), dtype=Float32)
-        for i in cutlass.range_constexpr(MXFP8_BLOCK_SCALING_SIZE):
-            rX[i] = Float32(sX[((lane, wcol + i), stage)])
-
-        # Rowwise: each lane (row) reduces its own 32 columns -> one scale.
-        row_amax = Float32(0.0)
-        for i in cutlass.range_constexpr(MXFP8_BLOCK_SCALING_SIZE):
-            row_amax = cute.arch.fmax(row_amax, fabs_f32(rX[i]))
-        row_exp = cvt_f32_to_fp8e8m0(row_amax * max_norm_rcp)
-        row_inv = exp2f_rcp(row_exp)
-        mS_row[(row, col0 // MXFP8_BLOCK_SCALING_SIZE)] = Uint8(row_exp)
-
-        # Colwise: per-column amax via a warp reduction over the warp's 32 rows.
-        # warp_redux_sync broadcasts to every lane, so each lane builds the full set
-        # of column inverse scales and captures its own column's e8m0 scale via the
-        # `c == lane` match (compile-time-indexed to avoid a register-array spill).
-        col_inv = cute.make_rmem_tensor(cute.make_layout((MXFP8_BLOCK_SCALING_SIZE,), stride=(1,)), dtype=Float32)
-        col_exp_lane = Uint8(0)
-        for c in cutlass.range_constexpr(MXFP8_BLOCK_SCALING_SIZE):
-            col_amax = cute.arch.warp_redux_sync(fabs_f32(rX[c]), kind="fmax")
-            col_exp_c = cvt_f32_to_fp8e8m0(col_amax * max_norm_rcp)
-            col_inv[c] = exp2f_rcp(col_exp_c)
-            if c == lane:
-                col_exp_lane = Uint8(col_exp_c)
-        mS_col[(bidy, col0 + lane)] = col_exp_lane
-
-        # Outputs into smem: row scale (rowwise) and per-column scale (colwise).
-        for i in cutlass.range_constexpr(MXFP8_BLOCK_SCALING_SIZE):
-            sO_row[((lane, wcol + i), stage)] = Uint8(cvt_fp8(rX[i] * row_inv))
-            sO_col[((lane, wcol + i), stage)] = Uint8(cvt_fp8(rX[i] * col_inv[i]))
-
-
 class MXFP8QuantizeSpecializedBidimensionalKernel:
 
     _WARPS_PER_CTA = 2
-    _THERADS_PER_CTA = _WARPS_PER_CTA * THREADS_PER_WARP
+    _THREADS_PER_CTA = _WARPS_PER_CTA * THREADS_PER_WARP
     # A warp handles a 32x32 tile
     _WARP_ROWS = MXFP8_BLOCK_SCALING_SIZE
     _WARP_COLS = MXFP8_BLOCK_SCALING_SIZE
@@ -1491,7 +1509,8 @@ class MXFP8QuantizeSpecializedBidimensionalKernel:
         )
 
         grid = [
-            cute.ceil_div(Int32(N), self._TILE_COLS),
+            # Each CTA covers NUM_TILES consecutive 64-col tiles = TILE_COLS*NUM_TILES cols.
+            cute.ceil_div(Int32(N), self._TILE_COLS * self._NUM_TILES),
             cute.ceil_div(M, self._TILE_ROWS),
         ]
         block = [self._THREADS_PER_CTA]
@@ -1510,23 +1529,19 @@ class MXFP8QuantizeSpecializedBidimensionalKernel:
         tma_atom_out_row, tma_dst_out_row,
         tma_atom_out_col, tma_dst_out_col,
     ):
-        tidx, _, _ = cute.arch.thread_idx()
+        
         bidx, bidy, _ = cute.arch.block_idx()
 
         M = mX.shape[0]
         N = mX.shape[1]
 
-        warp_id = tidx // 32
-        lane = tidx % 32
-        # lane == row within this CTA's 32-row tile; each warp owns a 32-col block.
-        row = bidy * self._TILE_ROWS + lane
-        wcol = warp_id * self._WARP_COLS     # this warp's col offset within a 64-wide tile
         # The CTA owns NUM_TILES consecutive 64-col tiles along N, starting here.
         tile_n_base = bidx * self._NUM_TILES
 
         num_tiles = cutlass.min(
             self._NUM_TILES,
-            cute.ceil_div(Int32(N) - bidx * self._TILE_COLS, self._TILE_COLS)
+            # Valid 64-col tiles remaining from this CTA's start column (bidx * span).
+            cute.ceil_div(Int32(N) - bidx * self._TILE_COLS * self._NUM_TILES, self._TILE_COLS)
         )
 
         @cute.struct
@@ -1576,6 +1591,9 @@ class MXFP8QuantizeSpecializedBidimensionalKernel:
         gO_col_tiled = cute.zipped_divide(tma_dst_out_col, (self._TILE_ROWS, self._TILE_COLS))
         tXsO_col, tXgO_col = cute.nvgpu.cpasync.tma_partition(tma_atom_out_col, 0, cute.make_layout(1), sO_col, gO_col_tiled)
 
+        mS_row = cute.zipped_divide(mS_row, (self._TILE_ROWS, self._TILE_COLS // MXFP8_BLOCK_SCALING_SIZE))
+        mS_col = cute.zipped_divide(mS_col, (self._TILE_ROWS // MXFP8_BLOCK_SCALING_SIZE, self._TILE_COLS))
+
         cute.arch.sync_threads()
 
         # Prologue: warp 0 prefetches up to NUM_STAGES tiles to fully fill the pipeline
@@ -1593,7 +1611,7 @@ class MXFP8QuantizeSpecializedBidimensionalKernel:
                     prod_state.advance()
 
         # Consumer: all warps fetch from the pipeline, process its tile, and issue a new load to the tile buffer it just consumed
-        for tile_idx in cutlass.range_constexpr(num_tiles):
+        for tile_idx in cutlass.range(num_tiles, unroll=1):
             mainloop_pipeline.consumer_wait(cons_state)
             # Only allow at most _NUM_STAGES-1 stages to be in-flight, because this iteration will reuse the ring buffer
             # that is read _NUM_STAGES iterations ago so we must wait for whoever is reading that buffer to finish
@@ -1604,11 +1622,12 @@ class MXFP8QuantizeSpecializedBidimensionalKernel:
             # This is used to index into the shared memory ring buffers that are wrapped around the number of stages.
             stage_idx = cons_state.index
 
-            # Process the 32x32 SMEM tile
-            col0 = (tile_n_base + tile_idx) * self._TILE_COLS + wcol
+            # Process the 32x64 SMEM tile for this stage
             quantize_bidimensional_mxfp8(
-                sX, sO_row, sO_col, mS_row, mS_col,
-                stage_idx, lane, wcol, row, col0, bidy, N, max_norm_rcp, self.cfg.FP8_DTYPE,
+                sX[None, stage_idx],
+                sO_row[None, stage_idx], sO_col[None, stage_idx],
+                mS_row[(None, (bidy, tile_n_base + tile_idx))], mS_col[(None, (bidy, tile_n_base + tile_idx))],
+                self._WARPS_PER_CTA, max_norm_rcp, self.cfg.FP8_DTYPE,
             )
 
             # Make the smem output writes visible to the TMA async proxy, then store.
