@@ -2,5 +2,4 @@
 #
 # See LICENSE for license information.
 
-# Trigger the MXFP8 quantization CuTeDSL entrypoints registration via TVM-FFI.
-from . import quantize_mxfp8  # noqa: F401
+from . import quantize_mxfp8

@@ -1914,5 +1914,3 @@ def get_mxfp8_quantization_function(
 
     return True
 
-# Exposed so the C++ dispatcher can request on-demand compilation by name.
-tvm_ffi.register_global_func("get_mxfp8_quantization_function", get_mxfp8_quantization_function, override=True)
