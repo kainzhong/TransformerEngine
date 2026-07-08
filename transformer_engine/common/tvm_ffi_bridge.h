@@ -7,9 +7,11 @@
 #ifndef TRANSFORMER_ENGINE_COMMON_TVM_FFI_BRIDGE_H_
 #define TRANSFORMER_ENGINE_COMMON_TVM_FFI_BRIDGE_H_
 
+#include <atomic>
 #include <cstdint>
 #include <cstdlib>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <shared_mutex>
 #include <string>
@@ -208,7 +210,7 @@ class TVMFFICentral {
     static_assert(detail::is_lazyloadable_config<Config>::value,
                   "Config must define `std::string to_key() const` and "
                   "`bool retrieve_func_from_python(const std::string&) const`.");
-    if (!cutedsl_backend_enabled_) {
+    if (!cutedsl_backend_enabled_.load(std::memory_order_relaxed)) {
       if (warn_cutedsl_backend_not_chosen_) {
         NVTE_WARN("TVM-FFI kernel for config `", cfg.to_key(),
                   "` is not supported because the CuTeDSL backend is disabled. "
@@ -241,6 +243,13 @@ class TVMFFICentral {
     return fn;
   }
 
+  // Runtime override of NVTE_ENABLE_CUTEDSL_QUANT_BACKEND (exposed to Python as
+  // nvte_set_cutedsl_quant_backend; used by tests to compare both backends in
+  // one process). Safe to toggle at any time
+  void set_cutedsl_backend_enabled(bool enabled) {
+    cutedsl_backend_enabled_.store(enabled, std::memory_order_relaxed);
+  }
+
  private:
   ~TVMFFICentral() = default;
   TVMFFICentral() : cutedsl_backend_enabled_(is_cutedsl_backend_enabled()),
@@ -261,7 +270,7 @@ class TVMFFICentral {
     return flag != nullptr && flag[0] != '0';
   }
 
-  const bool cutedsl_backend_enabled_;
+  std::atomic<bool> cutedsl_backend_enabled_;
   const bool warn_cutedsl_backend_not_chosen_;
   std::shared_mutex mutex_;
   // Per-config resolved kernel: cfg.to_key() -> GetGlobal result (std::nullopt ==

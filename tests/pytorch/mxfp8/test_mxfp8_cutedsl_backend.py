@@ -2,401 +2,245 @@
 #
 # See LICENSE for license information.
 
-"""Recompile-robustness tests for the CuTeDSL MXFP8 quantize backend.
+"""Cross-backend bit-exactness tests for the CuTeDSL MXFP8 quantize kernels.
 
-The CuTeDSL backend JIT-compiles one kernel per distinct config (input dtype ×
-fp8 format × direction × activation × dbias × swizzle), registers it in the
-TVM-FFI global registry under a config key, and fetches it per call. These tests
-stress that compile/cache machinery rather than numerics:
+The case matrix mirrors tests/cpp/operator/test_cast_mxfp8.cu (same matrix
+sizes, block sizes, processing methods, activation types, dtypes and the three
+suite instantiations), but instead of a CPU reference each case quantizes the
+same input twice in this process -- once with the CUDA kernels and once with
+the CuTeDSL kernels -- by toggling the C++ dispatcher at runtime through
+``nvte_set_cutedsl_quant_backend`` (called via ctypes on the already-loaded
+libtransformer_engine.so). The results must match bit-for-bit: fp8 data bytes
+and e8m0 scale bytes (meaningful region only; the scale padding is
+uninitialized). dbias is compared in floating point instead: both backends
+reduce fp32 block partials with the same reduce_dbias kernel, but the partials
+are accumulated in different orders, so last-ulp differences are expected.
 
-  * many distinct configs each compile and produce finite, correct output;
-  * interleaving configs never clobbers a cached kernel (the right kernel is
-    served for each key, regardless of what else was compiled);
-  * a single symbolic-shape kernel handles many (M, N) shapes from one compile;
-  * repeated calls are bit-for-bit deterministic.
-
-This is backend-specific, so it only runs when the CuTeDSL MXFP8 backend is
-actually active in the process. Run it with::
-
-    NVTE_ENABLE_CUTEDSL_QUANT_BACKEND=1 CUTE_DSL_ARCH=sm_100a \\
-        python -m pytest tests/pytorch/mxfp8/test_mxfp8_cutedsl_recompile.py
-
-otherwise every test skips (the env var is read once, at the first quantize).
+Divergences from the C++ suite: only valid (ProcessingMethod, ActivationType)
+pairs are generated (the C++ test generates the full cross product and
+GTEST_SKIPs the mismatched half), non-32-divisible shapes are omitted (the
+dispatcher can never route them to CuTeDSL), and a missing kernel registration
+is a hard failure rather than a skip -- every generated config is one the
+backend must support. The toggle overrides NVTE_ENABLE_CUTEDSL_QUANT_BACKEND, so these tests
+behave the same regardless of the env var. CuTeDSL kernels JIT-compile on
+first use per config. The GEMM-swizzled scale layout is covered separately by
+test_mxfp8_quantize_swizzle_fusion.py.
 """
-# TODO: review this file
+
+import ctypes
+import os
+from typing import Callable, NamedTuple, Optional
 
 import pytest
 import torch
-import torch.nn.functional as F
 
 import transformer_engine.pytorch as te
 import transformer_engine_torch as tex
+import tvm_ffi
+from transformer_engine.common import _get_shared_object_file
 from transformer_engine.pytorch import MXFP8Quantizer
 
 recipe_available, reason_for_no_recipe = te.is_mxfp8_available(return_reason=True)
 
-_FP8 = {"e4m3": tex.DType.kFloat8E4M3, "e5m2": tex.DType.kFloat8E5M2}
-_DT = {"bf16": torch.bfloat16, "fp16": torch.float16}
-_FWD = {"plain", "gelu", "silu", "relu", "qgelu", "srelu"}
-_FWD_FN = {"gelu": tex.gelu, "silu": tex.silu, "relu": tex.relu,
-           "qgelu": tex.qgelu, "srelu": tex.srelu}
-_DACT_FN = {"dgelu": tex.dgelu, "dsilu": tex.dsilu, "drelu": tex.drelu,
-            "dqgelu": tex.dqgelu, "dsrelu": tex.dsrelu}
-_DBIAS_DACT_FN = {f"dbias_{k}": getattr(tex, f"dbias_{k}")
-                  for k in ("dgelu", "dsilu", "drelu", "dqgelu", "dsrelu")}
+# The already-loaded core lib (dlopen refcounts: this returns the same handle,
+# so the call mutates the same dispatcher singleton the quantize ops read).
+CORE_LIB = ctypes.CDLL(str(_get_shared_object_file("core")))
+if not hasattr(CORE_LIB, "nvte_set_cutedsl_quant_backend"):
+    raise RuntimeError(
+        "libtransformer_engine.so lacks nvte_set_cutedsl_quant_backend -- rebuild the "
+        "Transformer Engine core library."
+    )
 
-# A diverse set of configs to interleave/repeat: mixed dtypes, fp8 formats,
-# directions, and the plain / forward-act / dact / dbias / dbias+dact families.
-_CONFIGS = [
-    # (combo, rowwise, columnwise, in_dtype, fp8)
-    ("plain",        True,  True,  "bf16", "e4m3"),
-    ("plain",        True,  False, "bf16", "e4m3"),
-    ("plain",        False, True,  "bf16", "e4m3"),
-    ("plain",        True,  True,  "bf16", "e5m2"),
-    ("plain",        True,  True,  "fp16", "e4m3"),
-    ("gelu",         True,  True,  "bf16", "e4m3"),
-    ("relu",         True,  True,  "bf16", "e4m3"),
-    ("silu",         True,  True,  "bf16", "e4m3"),
-    ("dgelu",        True,  True,  "bf16", "e4m3"),
-    ("dbias",        True,  True,  "bf16", "e4m3"),
-    ("dbias_dsilu",  True,  True,  "bf16", "e4m3"),
-    ("dbias_dqgelu", True,  False, "bf16", "e4m3"),
+pytestmark = pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+
+
+class Fusion(NamedTuple):
+    """An ActivationType from the C++ test: its tex ops per ProcessingMethod and
+    the activation desc used in the CuTeDSL config key."""
+    name: str
+    act: Optional[Callable]         # CAST_ACT:        act(x, quantizer)
+    dact: Optional[Callable]        # CAST_DACT:       dact(grad, act_input, quantizer)
+    dbias_dact: Optional[Callable]  # CAST_DBIAS_DACT: dbias_dact(grad, act_input, quantizer)
+    desc: str
+
+
+# --- Case matrix, mirroring test_cast_mxfp8.cu ---
+# The C++ multi-dim sizes flattened to the 2D (rows, cols) the kernels see:
+# {8,32,1024} -> (256, 1024), {16,8,4,512} -> (512, 512). The C++ list also has
+# non-32-divisible shapes ({1,16}, {16,48}, {993,512}, {1024}) that exercise the
+# CUDA kernels' partial-block edges; the CuTeDSL backend's contract is
+# 32-divisible flat dims (the dispatcher falls back to CUDA otherwise), so those
+# cases are omitted here rather than vacuously comparing CUDA against CUDA.
+MATRIX_SIZES = [
+    (128, 128),
+    (256, 1024),
+    (512, 512),
+    (8192, 7168),
 ]
+# (block_rows, block_cols): (1,32)=rowwise, (32,1)=colwise, (32,32)=both.
+BLOCK_SIZES = [(1, 32), (32, 1), (32, 32)]
+# Only GeLU activation tests are used (SiLU/ReLU/QGeLU/SReLU commented out
+# in the C++ test as well).
+IDENTITY = Fusion("Identity", None, None, None, "none")
+GELU = Fusion("GeLU", tex.gelu, tex.dgelu, tex.dbias_dgelu, "gelu")
+# SILU = Fusion("SiLU", tex.silu, tex.dsilu, tex.dbias_dsilu, "silu")
+# RELU = Fusion("ReLU", tex.relu, tex.drelu, tex.dbias_drelu, "relu")
+# QGELU = Fusion("QGeLU", tex.qgelu, tex.dqgelu, tex.dbias_dqgelu, "qgelu")
+# SRELU = Fusion("SReLU", tex.srelu, tex.dsrelu, tex.dbias_dsrelu, "srelu")
+
+# Valid (ProcessingMethod, ActivationType) pairs. The C++ test crosses the two
+# axes and GTEST_SKIPs the mismatched half; only the meaningful pairs are
+# generated here. A newly enabled activation adds its ACT/DACT/DBIAS_DACT pairs.
+METHOD_FUSION_CASES = [
+    ("CAST_ONLY", IDENTITY),
+    ("CAST_DBIAS", IDENTITY),
+    ("CAST_ACT", GELU),
+    ("CAST_DACT", GELU),
+    ("CAST_DBIAS_DACT", GELU),
+]
+METHOD_FUSION_IDS = [f"{m}X{f.name}" for m, f in METHOD_FUSION_CASES]
+IN_DTYPES = [torch.float32, torch.bfloat16, torch.float16]
+FP8_DTYPES = [tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2]
+
+# Description strings for pytest case ids and the CuTeDSL config key.
+DTYPE_TO_STR = {torch.float32: "fp32", torch.bfloat16: "bf16", torch.float16: "fp16"}
+FP8_TO_STR = {tex.DType.kFloat8E4M3: "e4m3", tex.DType.kFloat8E5M2: "e5m2"}
+
+get_shape_id = lambda s: f"{s[0]}x{s[1]}"
+get_block_id = lambda b: f"{b[0]}x{b[1]}"
+get_dtype_id = DTYPE_TO_STR.get
+get_fp8_id = FP8_TO_STR.get
 
 
-def _inputs(M, N, in_dtype, seed=0):
-    g = torch.Generator(device="cuda").manual_seed(seed)
-    dt = _DT[in_dtype]
-    x = torch.empty(M, N, dtype=dt, device="cuda").uniform_(-4.0, 4.0, generator=g)
-    ain = torch.empty(M, N, dtype=dt, device="cuda").uniform_(-3.0, 3.0, generator=g)
-    return x, ain
-
-
-def _run(combo, x, ain, rowwise, columnwise, fp8, swizzle=False):
-    """Quantize via the public dispatch; returns (mxfp8_tensor, dbias_or_None).
-
-    swizzle=True requests cuBLAS-swizzled scale layout (optimize_for_gemm)."""
-    q = MXFP8Quantizer(fp8_dtype=_FP8[fp8], rowwise=rowwise, columnwise=columnwise)
-    if swizzle:
-        q.optimize_for_gemm = True
-    if combo == "plain":
-        return q(x), None
-    if combo in _FWD_FN:
-        return _FWD_FN[combo](x, q), None
-    if combo in _DACT_FN:
-        return _DACT_FN[combo](x, ain, q), None
-    if combo == "dbias":
-        db, out = tex.bgrad_quantize(x, q)
-        return out, db
-    if combo in _DBIAS_DACT_FN:
-        db, out = _DBIAS_DACT_FN[combo](x, ain, q)
-        return out, db
-    raise ValueError(f"unknown combo {combo!r}")
-
-
-def _signature(out, db, rowwise, columnwise):
-    """Bit-level fingerprint of a quantized result, for golden comparison.
-
-    The scale tensors are allocated at a 128-padded shape; only the meaningful
-    region is written by the kernel, so we slice to it (M, ceil(N/32)) rowwise /
-    (ceil(M/32), N) columnwise). Comparing the padding would spuriously fail —
-    it's uninitialized and reflects whatever was in the (dirty) allocator pool.
-    M, N are read from the data tensor, which is exactly (M, N), unpadded."""
-    parts = []
-    if rowwise:
-        data = out._rowwise_data.view(torch.uint8)
-        M, N = data.shape
-        parts += [data.clone(),
-                  out._rowwise_scale_inv[:M, :(N + 31) // 32].clone()]
-    if columnwise:
-        data = out._columnwise_data.view(torch.uint8)
-        M, N = data.shape
-        parts += [data.clone(),
-                  out._columnwise_scale_inv[:(M + 31) // 32, :N].clone()]
-    if db is not None:
-        parts.append(db.clone())
-    return parts
-
-
-def _sig_equal(a, b):
-    return len(a) == len(b) and all(torch.equal(p, q) for p, q in zip(a, b))
-
-
-def _ref_fwd(combo, xf):
-    if combo == "plain":
-        return xf
-    if combo == "gelu":
-        return F.gelu(xf, approximate="tanh")
-    if combo == "silu":
-        return F.silu(xf)
-    if combo == "relu":
-        return F.relu(xf)
-    if combo == "qgelu":
-        return xf * torch.sigmoid(1.702 * xf)
-    if combo == "srelu":
-        return F.relu(xf) ** 2
-    raise ValueError(combo)
+def set_cutedsl_backend(enabled):
+    CORE_LIB.nvte_set_cutedsl_quant_backend(1 if enabled else 0)
 
 
 @pytest.fixture(scope="module", autouse=True)
-def _require_active_cutedsl_backend():
-    """Skip unless the CuTeDSL backend is actually active (it registers its kernel
-    under a config key in the TVM-FFI registry on first use)."""
-    if not recipe_available:
-        pytest.skip(reason_for_no_recipe)
-    # Trigger one quantize, then confirm the CuTeDSL kernel registered itself.
-    x = torch.randn(64, 64, dtype=torch.bfloat16, device="cuda")
-    MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=True)(x)
-    active = False
-    try:
-        import tvm_ffi
-        active = tvm_ffi.get_global_func(
-            "cutedsl_mxfp8_bf16_e4m3_1_1_0_0_0_0_0_0_none", allow_missing=True
-        ) is not None
-    except Exception:
-        active = False
-    if not active:
-        pytest.skip(
-            "CuTeDSL MXFP8 backend not active in this process; run with "
-            "NVTE_ENABLE_CUTEDSL_QUANT_BACKEND=1 set before the first quantize."
-        )
+def _restore_backend_choice_from_env():
+    """Restore the flag that decides the CuTeDSL / CUDA backend choice when this pytest module is done."""
+    yield
+    flag = os.getenv("NVTE_ENABLE_CUTEDSL_QUANT_BACKEND")
+    set_cutedsl_backend(flag is not None and not flag.startswith("0"))
 
 
-@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
-def test_interleaved_configs_do_not_clobber_each_other():
-    """Compile + capture a golden output for every config, then re-run them all in
-    reverse order. Each must reproduce its golden bit-for-bit — compiling/running
-    other configs must never corrupt a cached kernel or serve the wrong one."""
-    M, N = 256, 512
-    golden = {}
-    for combo, rw, cw, dt, fp8 in _CONFIGS:
-        x, ain = _inputs(M, N, dt)
-        out, db = _run(combo, x, ain, rw, cw, fp8)
-        golden[(combo, rw, cw, dt, fp8)] = _signature(out, db, rw, cw)
-
-    for cfg in reversed(_CONFIGS):
-        combo, rw, cw, dt, fp8 = cfg
-        x, ain = _inputs(M, N, dt)
-        out, db = _run(combo, x, ain, rw, cw, fp8)
-        assert _sig_equal(_signature(out, db, rw, cw), golden[cfg]), (
-            f"config {cfg} produced different output after other configs were "
-            f"(re)compiled — cached kernel was clobbered or mis-keyed"
-        )
-
-
-@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
-def test_cached_kernel_stable_while_new_configs_compile():
-    """A fixed probe config run once for golden, then re-run after compiling each
-    other config. The probe output must never change — a newly compiled kernel
-    must not evict or overwrite the probe's cached kernel."""
-    M, N = 320, 640
-    p_combo, p_rw, p_cw, p_dt, p_fp8 = ("gelu", True, True, "bf16", "e4m3")
-    px, pain = _inputs(M, N, p_dt)
-    out, db = _run(p_combo, px, pain, p_rw, p_cw, p_fp8)
-    golden = _signature(out, db, p_rw, p_cw)
-
-    for combo, rw, cw, dt, fp8 in _CONFIGS:
-        x, ain = _inputs(M, N, dt)
-        _run(combo, x, ain, rw, cw, fp8)  # (re)compile / run another config
-        out, db = _run(p_combo, px, pain, p_rw, p_cw, p_fp8)
-        assert _sig_equal(_signature(out, db, p_rw, p_cw), golden), (
-            f"probe ({p_combo}) output changed after running config {combo!r}"
-        )
-
-
-@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
-@pytest.mark.parametrize("combo", ["plain", "gelu", "dbias_dsilu"])
-def test_one_symbolic_kernel_handles_many_shapes(combo):
-    """The kernel is compiled once with symbolic (M, N) (divisible by 32). Feeding
-    many shapes through that single compile must all give finite output (and, for
-    forward combos, output close to the reference)."""
-    rw = cw = True
-    fp8, dt = "e4m3", "bf16"
-    shapes = [(32, 32), (64, 64), (32, 2048), (2048, 32),
-              (256, 512), (1024, 1536), (2048, 2048)]
-    for M, N in shapes:
-        x, ain = _inputs(M, N, dt)
-        out, _ = _run(combo, x, ain, rw, cw, fp8)
-        deq = out.dequantize(dtype=torch.float32)
-        assert torch.isfinite(deq).all(), f"{combo} {M}x{N}: non-finite output"
-        if combo in _FWD:
-            ref = _ref_fwd(combo, x.float())
-            rel = (deq - ref).norm() / ref.norm().clamp_min(1e-6)
-            assert rel < 0.12, f"{combo} {M}x{N}: rel_err={rel:.4f}"
-
-
-@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
-def test_repeated_calls_are_deterministic():
-    """The same config + same input, called repeatedly, must be bit-for-bit
-    identical (the cached kernel is stable across reuse)."""
-    M, N = 256, 512
-    for combo, rw, cw, dt, fp8 in _CONFIGS:
-        x, ain = _inputs(M, N, dt)
-        sigs = [_signature(*_run(combo, x, ain, rw, cw, fp8), rw, cw)
-                for _ in range(4)]
-        for i in range(1, len(sigs)):
-            assert _sig_equal(sigs[i], sigs[0]), (
-                f"config ({combo},{dt},{fp8}) call {i} differs from call 0"
-            )
-
-
-@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
-@pytest.mark.parametrize("direction", ["both", "row"])
-@pytest.mark.parametrize("fp8", ["e4m3", "e5m2"])
-@pytest.mark.parametrize("combo", ["plain", "gelu", "relu"])
-def test_distinct_configs_compile_and_are_correct(combo, fp8, direction):
-    """Each distinct (combo, fp8, direction) is its own compile. Verify it produces
-    finite output close to the reference — i.e. a freshly compiled kernel is not
-    garbage (catches e.g. a write-index regression in a recompiled kernel)."""
-    rw = direction in ("both", "row")
-    cw = direction in ("both", "col")
-    M, N = 256, 512
-    x, _ = _inputs(M, N, "bf16")
-    out, _ = _run(combo, x, None, rw, cw, fp8)
-    deq = out.dequantize(dtype=torch.float32)
-    assert torch.isfinite(deq).all()
-    ref = _ref_fwd(combo, x.float())
-    rel = (deq - ref).norm() / ref.norm().clamp_min(1e-6)
-    tol = 0.12 if fp8 == "e4m3" else 0.30
-    assert rel < tol, f"{combo}/{fp8}/{direction}: rel_err={rel:.4f}"
-
-# ---------------------------------------------------------------------------
-# Numerical parity vs an fp32 reference, mirroring tests/cpp/operator/
-# test_cast_mxfp8.cu. The C++ gtests never exercise the CuTeDSL backend (it is
-# registered from Python), so this re-runs the C++ methodology with the backend
-# active. Same case selection as the C++ test:
-#   * ops: GeLU family only (the C++ test has SiLU/ReLU/QGeLU/SReLU commented
-#     out) -> CAST_ONLY=plain, CAST_DBIAS=dbias, CAST_ACT=gelu, CAST_DACT=dgelu,
-#     CAST_DBIAS_DACT=dbias_dgelu
-#   * direction = the C++ block_size: {1,32}=row, {32,1}=col, {32,32}=both
-#   * three orthogonal sweeps (the C++ INSTANTIATE_TEST_SUITE_P blocks) instead
-#     of one giant cross product
-#   * no swizzle (the C++ cast test doesn't cover it; see
-#     test_mxfp8_quantize_swizzle_fusion for the swizzled layout)
-# Comparison also mirrors the C++ test: e8m0 scales bit-exact (zero tolerance,
-# valid where the reference value matches the kernel input exactly, i.e. the
-# no-activation ops), FP8 data within fp8 atol/rtol, dbias relaxed. Activation
-# ops use a relative-error bound instead of bit-exact scales because the torch
-# reference activation isn't bit-identical to TE's device activation (the C++
-# test gets bit-exactness only by reusing TE's own host activation).
-_PT_DT = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}
-_FP8_MAX_RCP = {"e4m3": 1.0 / 448.0, "e5m2": 1.0 / 57344.0}
-_FP8_T = {"e4m3": torch.float8_e4m3fn, "e5m2": torch.float8_e5m2}
-
-# Shapes: %32 (so the CuTeDSL backend handles them; non-%32 falls back to CUDA),
-# mixing %128 and %32-not-%128 (the kernels' partial-tile / OOB edge).
-_PARITY_SHAPES = [(128, 128), (256, 1024), (512, 512), (160, 160), (128, 1056), (256, 384)]
-# (op for _run, is_activation): the GeLU-family ProcessingMethods.
-_CPP_OPS = [("plain", False), ("dbias", False),
-            ("gelu", True), ("dgelu", True), ("dbias_dgelu", True)]
-_CPP_DIRECTIONS = ["row", "col", "both"]
-
-
-def _parity_inputs(M, N, in_dtype, seed=0):
+def generate_inputs(M, N, in_dtype, seed=0):
     g = torch.Generator(device="cuda").manual_seed(seed)
-    dt = _PT_DT[in_dtype]
-    x = torch.empty(M, N, dtype=dt, device="cuda").uniform_(-4.0, 4.0, generator=g)
-    ain = torch.empty(M, N, dtype=dt, device="cuda").uniform_(-3.0, 3.0, generator=g)
+    x = torch.empty(M, N, dtype=in_dtype, device="cuda").uniform_(-2.0, 1.0, generator=g)
+    ain = torch.empty(M, N, dtype=in_dtype, device="cuda").uniform_(-2.0, 1.0, generator=g)
     return x, ain
 
 
-def _ref_value(op, x, ain):
-    """fp32 reference of the (pre-quantization) tensor the kernel quantizes."""
-    xf = x.float()
-    if op in ("plain", "dbias"):
-        return xf
-    if op == "gelu":
-        return _ref_fwd("gelu", xf)
-    # dgelu / dbias_dgelu: grad (x) * d(gelu)/d(input), via autograd of the
-    # matching forward so it tracks TE's exact tanh-gelu derivative.
-    av = ain.float().detach().requires_grad_(True)
-    _ref_fwd("gelu", av).backward(xf)
-    return av.grad
+def run_quantize(method, act, x, ain, rowwise, columnwise, fp8_dtype):
+    """Quantize via the public dispatch; returns (mxfp8_tensor, dbias_or_None)."""
+    q = MXFP8Quantizer(fp8_dtype=fp8_dtype, rowwise=rowwise, columnwise=columnwise)
+    if method == "CAST_ONLY":
+        return q(x), None
+    if method == "CAST_DBIAS":
+        db, out = tex.bgrad_quantize(x, q)
+        return out, db
+    if method == "CAST_ACT":
+        return act.act(x, q), None
+    if method == "CAST_DACT":
+        return act.dact(x, ain, q), None
+    if method == "CAST_DBIAS_DACT":
+        db, out = act.dbias_dact(x, ain, q)
+        return out, db
+    raise ValueError(f"unknown method {method!r}")
 
 
-def _ref_e8m0(amax_rcp):
-    """fp32 (amax * max_reciprocal) -> e8m0 scale byte. Round-up of the biased
-    exponent; bit-identical to the Blackwell cvt.rp.ue8m0x2 the kernel uses."""
-    bits = amax_rcp.contiguous().view(torch.int32)
-    exp = ((bits + 0x7FFFFF) >> 23) & 0xFF
-    return exp.clamp(max=254).to(torch.uint8)
+def get_cfg_key(method, act, in_dtype, fp8_dtype, rowwise, colwise):
+    """Mirror of MXFP8QuantConfig::to_key (quantize_mxfp8_cutedsl.cuh): the name the CuTeDSL backend registers its compiled kernel under for this config.
+    Used to check if the CuTeDSL implmentation is registered
+    """
+    with_dbias = method in ("CAST_DBIAS", "CAST_DBIAS_DACT")
+    with_dact = method in ("CAST_DACT", "CAST_DBIAS_DACT")
+    with_act = method == "CAST_ACT"
+    desc = "none"
+    if with_act:
+        desc = act.desc
+    elif with_dact:
+        desc = f"d{act.desc}"
+    flags = (rowwise, colwise, False, False, with_dbias, with_dact, with_act, False)
+    return ("cutedsl_mxfp8_" + DTYPE_TO_STR[in_dtype] + "_" + FP8_TO_STR[fp8_dtype] + "_"
+            + "_".join("1" if f else "0" for f in flags) + "_" + desc)
 
 
-def _kernel_scale_data(out, d, M, N, fp8):
-    """(e8m0 scales, dequantized output) for the meaningful region, direction d."""
-    if d == "row":
-        sc = out._rowwise_scale_inv[:M, : (N + 31) // 32]
-        data = out._rowwise_data.view(_FP8_T[fp8]).float()
-        deq = data * torch.exp2(sc.float() - 127.0).repeat_interleave(32, dim=1)[:, :N]
-    else:
-        sc = out._columnwise_scale_inv[: (M + 31) // 32, :N]
-        data = out._columnwise_data.view(_FP8_T[fp8]).float()
-        deq = data * torch.exp2(sc.float() - 127.0).repeat_interleave(32, dim=0)[:M, :]
-    return sc, deq
+def extract_quantized_output(out, rowwise, columnwise):
+    """Extract the meaningful bytes from the MXFP8Quantizer output for comparison between backends. The scale padding is uninitialized, so only the meaningful
+    region is compared.
+    """
+    parts = {}
+    if rowwise:
+        d = out._rowwise_data.view(torch.uint8)
+        M, N = d.shape
+        parts["rowwise data"] = d.clone()
+        parts["rowwise scales"] = out._rowwise_scale_inv[:M, : (N + 31) // 32].clone()
+    if columnwise:
+        d = out._columnwise_data.view(torch.uint8)
+        M, N = d.shape
+        parts["colwise data"] = d.clone()
+        parts["colwise scales"] = out._columnwise_scale_inv[: (M + 31) // 32, :N].clone()
+    return parts
 
 
-def _ref_scales(v, d, fp8):
-    """Reference e8m0 scales for value v (fp32), direction d."""
-    M, N = v.shape
-    if d == "row":
-        amax = v.reshape(M, N // 32, 32).abs().amax(-1)          # (M, N//32)
-    else:
-        amax = v.reshape(M // 32, 32, N).abs().amax(1)           # (M//32, N)
-    return _ref_e8m0(amax * _FP8_MAX_RCP[fp8])
+def run_test_case(method, act, shape, block_size, in_dtype, fp8_dtype):
+    """Assert the CuTeDSL and CUDA backends produce bit-identical outputs for the
+    same input and config.
+    """
+    M, N = shape
+    rowwise = block_size[1] != 1
+    columnwise = block_size[0] != 1
+    x, act_input = generate_inputs(M, N, in_dtype)
+
+    set_cutedsl_backend(False)
+    out_cuda, dbias_cuda = run_quantize(method, act, x, act_input, rowwise, columnwise, fp8_dtype)
+    cuda_output = extract_quantized_output(out_cuda, rowwise, columnwise)
+
+    set_cutedsl_backend(True)
+    try:
+        out_cutedsl, dbias_cutedsl = run_quantize(method, act, x, act_input, rowwise, columnwise, fp8_dtype)
+        cutedsl_output = extract_quantized_output(out_cutedsl, rowwise, columnwise)
+    finally:
+        set_cutedsl_backend(False)
+
+    # Guard against a silent CUDA fallback: every config in the matrix is one the
+    # CuTeDSL backend supports, so its kernel must have been registered under the
+    # config key. If not, the backend rejected or missed the config and the
+    # comparison above was CUDA vs CUDA.
+    key = get_cfg_key(method, act, in_dtype, fp8_dtype, rowwise, columnwise)
+    assert tvm_ffi.get_global_func(key, allow_missing=True) is not None, (
+        f"CuTeDSL kernel not registered for {key}; the CuTeDSL backend fell back "
+        "to CUDA and this case compared CUDA against itself"
+    )
+
+    tag = f"{method}/{act.name}/{M}x{N}/{DTYPE_TO_STR[in_dtype]}/{FP8_TO_STR[fp8_dtype]}"
+    for name, cuda_bytes in cuda_output.items():
+        assert torch.equal(cutedsl_output[name], cuda_bytes), f"{tag}: {name} differ between backends"
+    if dbias_cuda is not None:
+        torch.testing.assert_close(dbias_cutedsl, dbias_cuda)
+
+# Test cases with only cast kernels (mirrors C++ test's OperatorTest_FusedCastMXFP8_CastOnly).
+@pytest.mark.parametrize("shape", MATRIX_SIZES, ids=get_shape_id)
+@pytest.mark.parametrize("block_size", BLOCK_SIZES, ids=get_block_id)
+@pytest.mark.parametrize("in_dtype", IN_DTYPES, ids=get_dtype_id)
+@pytest.mark.parametrize("fp8_dtype", FP8_DTYPES, ids=get_fp8_id)
+def test_cast_only(fp8_dtype, in_dtype, block_size, shape):
+    run_test_case("CAST_ONLY", IDENTITY, shape, block_size, in_dtype, fp8_dtype)
 
 
-def _check_parity(op, is_act, direction, M, N, in_dtype, fp8):
-    rw = direction in ("row", "both")
-    cw = direction in ("col", "both")
-    x, ain = _parity_inputs(M, N, in_dtype)
-    v = _ref_value(op, x, ain)
-    out, db = _run(op, x, ain, rw, cw, fp8)
-
-    tol = 0.12 if fp8 == "e4m3" else 0.30
-    for d in (["row"] if rw else []) + (["col"] if cw else []):
-        sc, deq = _kernel_scale_data(out, d, M, N, fp8)
-        assert torch.isfinite(deq).all(), f"{op}/{d}/{fp8}/{in_dtype} {M}x{N}: non-finite"
-        # Data: dequant within MXFP8 granularity (the C++ fp8 atol/rtol bar).
-        rel = (deq - v).norm() / v.norm().clamp_min(1e-6)
-        assert rel < tol, f"{op}/{d}/{fp8}/{in_dtype} {M}x{N}: rel_err={rel:.4f}"
-        # Scales: bit-exact vs the fp32 reference (C++ zero-tolerance) — only for
-        # no-activation ops, where the reference value equals the kernel input.
-        if not is_act:
-            assert torch.equal(sc, _ref_scales(v, d, fp8)), \
-                f"{op}/{d}/{fp8}/{in_dtype} {M}x{N}: e8m0 scales differ from reference"
-
-    if db is not None:
-        dref = v.sum(dim=0)
-        drel = (db.float() - dref).norm() / dref.norm().clamp_min(1e-6)
-        assert drel < 0.1, f"{op}/{in_dtype} {M}x{N}: dbias rel_err={drel:.4f}"
+# Test cases with varying matrix shapes and block shapes
+# (OperatorTest_FusedCastMXFP8_Sizes).
+@pytest.mark.parametrize("shape", MATRIX_SIZES, ids=get_shape_id)
+@pytest.mark.parametrize("block_size", BLOCK_SIZES, ids=get_block_id)
+@pytest.mark.parametrize("method,act", METHOD_FUSION_CASES, ids=METHOD_FUSION_IDS)
+def test_sizes(method, act, block_size, shape):
+    run_test_case(method, act, shape, block_size, torch.bfloat16, tex.DType.kFloat8E4M3)
 
 
-# Sweep 1 — CAST_ONLY across all shapes/directions/dtypes/formats
-# (C++ OperatorTest_FusedCastMXFP8_CastOnly).
-@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
-@pytest.mark.parametrize("shape", _PARITY_SHAPES, ids=lambda s: f"{s[0]}x{s[1]}")
-@pytest.mark.parametrize("in_dtype", ["bf16", "fp16", "fp32"])
-@pytest.mark.parametrize("fp8", ["e4m3", "e5m2"])
-@pytest.mark.parametrize("direction", _CPP_DIRECTIONS)
-def test_parity_cast_only(direction, fp8, in_dtype, shape):
-    _check_parity("plain", False, direction, *shape, in_dtype, fp8)
-
-
-# Sweep 2 — all ops/directions/shapes at bf16/e4m3
-# (C++ OperatorTest_FusedCastMXFP8_Sizes).
-@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
-@pytest.mark.parametrize("shape", _PARITY_SHAPES, ids=lambda s: f"{s[0]}x{s[1]}")
-@pytest.mark.parametrize("direction", _CPP_DIRECTIONS)
-@pytest.mark.parametrize("op,is_act", _CPP_OPS, ids=[o for o, _ in _CPP_OPS])
-def test_parity_ops_and_sizes(op, is_act, direction, shape):
-    _check_parity(op, is_act, direction, *shape, "bf16", "e4m3")
-
-
-# Sweep 3 — all ops/dtypes/formats at a fixed both-direction shape
-# (C++ OperatorTest_FusedCastMXFP8_Dtypes, {256,384}, block {32,32}).
-@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
-@pytest.mark.parametrize("in_dtype", ["bf16", "fp16", "fp32"])
-@pytest.mark.parametrize("fp8", ["e4m3", "e5m2"])
-@pytest.mark.parametrize("op,is_act", _CPP_OPS, ids=[o for o, _ in _CPP_OPS])
-def test_parity_dtypes(op, is_act, fp8, in_dtype):
-    _check_parity(op, is_act, "both", 256, 384, in_dtype, fp8)
+# Test cases with varying dtypes (OperatorTest_FusedCastMXFP8_Dtypes).
+@pytest.mark.parametrize("in_dtype", IN_DTYPES, ids=get_dtype_id)
+@pytest.mark.parametrize("fp8_dtype", FP8_DTYPES, ids=get_fp8_id)
+@pytest.mark.parametrize("method,act", METHOD_FUSION_CASES, ids=METHOD_FUSION_IDS)
+def test_dtypes(method, act, fp8_dtype, in_dtype):
+    run_test_case(method, act, (256, 384), (32, 32), in_dtype, fp8_dtype)
