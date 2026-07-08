@@ -50,13 +50,14 @@ from transformer_engine.common.CuTeDSL.utils import (
     fabs_f32,
     exp2f_rcp,
     pack_f32x2,
+    unpack_i64_to_i32x2,
 )
 from transformer_engine.common.CuTeDSL.utils_fp8 import (
     get_cvt_f32_to_fp8_func,
-    get_cvt_f32x2_to_fp8x2_func,
     cvt_f32_to_fp8e8m0,
     mul_i64_cvt_f32x4_to_fp8x4,
     mul_f32x4_cvt_f32x4_to_fp8x4,
+    mul_i64_cvt_packed16x4_to_fp8x4,
 )
 
 CUTEDSL_DEBUG_LOGGING = os.environ.get("CUTEDSL_DEBUG_LOGGING", "0") == "1"
@@ -161,17 +162,15 @@ def quantize_rowwise_mxfp8(
         # If no activation, f16 / bf16 and rowwise quantization, we can read 2 f16 / bf16 at once in a pack
         # and use max.xorsign.abs.f16x2 / max.xorsign.abs.bf16x2 to compute
         kit = packed16_kit(DTYPE)
-        sX_thread_rw_i32 = cute.make_tensor(
-            cute.recast_ptr(sX_thread.iterator, dtype=Int32),
-            cute.make_layout((1, MXFP8_BLOCK_SCALING_SIZE // 2), stride=(0, 1)), # 1 int32 is 2 fp16/bf16 elements
+        sX_thread_rw_i64 = cute.make_tensor(
+            cute.recast_ptr(sX_thread.iterator, dtype=Int64),
+            cute.make_layout((1, MXFP8_BLOCK_SCALING_SIZE // 4), stride=(0, 1)), # 1 int64 is 4 fp16/bf16 elements
         )
-        # Each wave we read 2 packed i32, which is 4 fp16/bf16 elements (PACK_SIZE)
-        # In total we have 8 waves where each wave reads 4 elements, so we read 32 elements in total.
+        # Each wave reads its 4 elements (PACK_SIZE) as one 8-byte vectorized load
         in_r = [[None, None] for _ in range(WAVES)]
         for w in cutlass.range_constexpr(WAVES):
-            idx = (w * 2 + offset // 2) % (MXFP8_BLOCK_SCALING_SIZE // 2)
-            in_r[w][0] = sX_thread_rw_i32[0, idx]
-            in_r[w][1] = sX_thread_rw_i32[0, idx + 1]
+            idx = (w + offset // 4) % (MXFP8_BLOCK_SCALING_SIZE // 4)
+            in_r[w][0], in_r[w][1] = unpack_i64_to_i32x2(sX_thread_rw_i64[0, idx])
 
         amax_2x = Int32(0)
         # Each wave will use max.xorsign.abs.f16x2 or max.xorsign.abs.bf16x2 to compare 2 packed elements in parallel
@@ -263,35 +262,21 @@ def quantize_rowwise_mxfp8(
         mS_row_stage[(tidx // CTA_THREADS_X, tidx % CTA_THREADS_X)] = Uint8(biased_exp_r)
 
     inv_scale_r = exp2f_rcp(biased_exp_r) # f32 reciprocal of the scale
-    # Fetch the conversion function based on the FP8 format
-    cvt_f32x2 = get_cvt_f32x2_to_fp8x2_func(FP8_DTYPE)
+    scale_2x = pack_f32x2(inv_scale_r, inv_scale_r)
     if cutlass.const_expr(_row_fast):
-        kit_cast = packed16_kit(DTYPE)
-        mul_cvt_x2 = kit_cast.mul_cvt_to_fp8x2(FP8_DTYPE, FUSE_RELU)
-        # Pack `(inv_scale_r, inv_scale_r)` as a single 64-bit f32x2 once;
-        # the per-wave mul_cvt consumes this directly.
-        scale_2x = pack_f32x2(inv_scale_r, inv_scale_r)
+        mul_cvt_x4_func = mul_i64_cvt_packed16x4_to_fp8x4(DTYPE, FP8_DTYPE, FUSE_RELU)
+    else:
+        mul_cvt_x4_func = mul_i64_cvt_f32x4_to_fp8x4(FP8_DTYPE, FUSE_RELU)
 
     for w in cutlass.range_constexpr(WAVES):
         idx = (w * 4 + offset) % MXFP8_BLOCK_SCALING_SIZE
         idx = idx // 4
         if cutlass.const_expr(_row_fast):
-            # One fused PTX per <fmt>x2 pair: <fmt>x2 × f32x2 → fp8x2.
-            # Byte layout: byte[0]=fp8(lo * s), byte[1]=fp8(hi * s).
-            p01 = mul_cvt_x2(in_r[w][0], scale_2x)
-            p23 = mul_cvt_x2(in_r[w][1], scale_2x)
+            # Convert 2 packed f16/bf16 pairs to 4 fp8 in one fused op
+            sO_thread_u32[idx] = mul_cvt_x4_func(in_r[w][0], in_r[w][1], scale_2x)
         else:
-            # cvt PTX semantics: `cvt.rn.satfinite.<fmt>.f32 d, a, b` gives
-            # d[15:8]=fp8(a), d[7:0]=fp8(b). Pass (v1, v0) so the u16 low
-            # byte ends up as fp8(v0) and the high byte as fp8(v1).
-            v0 = in_r[w][0] * inv_scale_r
-            v1 = in_r[w][1] * inv_scale_r
-            v2 = in_r[w][2] * inv_scale_r
-            v3 = in_r[w][3] * inv_scale_r
-            p01 = cvt_f32x2(v1, v0, FUSE_RELU)  # u16 little-endian: v0,v1
-            p23 = cvt_f32x2(v3, v2, FUSE_RELU)  # u16 little-endian: v2,v3
-        quad = (p23 << Int32(16)) | p01
-        sO_thread_u32[idx] = Uint32(quad)
+            # Convert 4 f32 to 4 fp8 in one fused op
+            sO_thread_u32[idx] = mul_cvt_x4_func(in_r[w][0], in_r[w][1], in_r[w][2], in_r[w][3], scale_2x)
 
     return amax_r
 
@@ -345,9 +330,13 @@ def quantize_colwise_mxfp8(
             cute.recast_ptr(sX_thread.iterator, dtype=Int16),
             cute.make_layout((MXFP8_BLOCK_SCALING_SIZE,), stride=(TILE_X,)),
         )
+        # Stash the strided column reads in registers (CUDA's in_colwise_IType):
+        # the cvt loop below reuses them instead of re-reading smem.
+        in_c = [None] * MXFP8_BLOCK_SCALING_SIZE
         amax_bits = Int16(0)
         for i in cutlass.range_constexpr(MXFP8_BLOCK_SCALING_SIZE):
-            amax_bits = kit.abs_max_scalar(amax_bits, sX_thread_i16[i])
+            in_c[i] = sX_thread_i16[i]
+            amax_bits = kit.abs_max_scalar(amax_bits, in_c[i])
         amax_c = fabs_f32(kit.bits_to_f32(amax_bits))
     else:
         # Otherwise we need to case input values to fp32. Allocate the register tensor and load from SMEM input tiles.
@@ -397,7 +386,7 @@ def quantize_colwise_mxfp8(
     if cutlass.const_expr(USE_HALF_PRECISION):
         kit_cast = packed16_kit(DTYPE)
         for i in cutlass.range_constexpr(MXFP8_BLOCK_SCALING_SIZE):
-            v_f32 = kit_cast.bits_to_f32(sX_thread_i16[i])
+            v_f32 = kit_cast.bits_to_f32(in_c[i])
             if cutlass.const_expr(WITH_DBIAS):
                 dbias_partial += v_f32
             sO_thread[i] = Uint8(cvt_to_fp8_func(v_f32 * inv_scale_c))

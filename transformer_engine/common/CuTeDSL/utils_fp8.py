@@ -75,13 +75,14 @@ def cvt_f32_to_fp8e8m0_blackwell(val: Float32, *, loc=None, ip=None) -> Int32:
         T.i32(), result_i16.ir_value(loc=loc, ip=ip), loc=loc, ip=ip))
     return result_i32 & Int32(0xFF)
 
+
 def _build_mul_i64_cvt_f32x4_to_fp8x4(out_fmt: str, relu: bool = False):
     """Build a fused 4-wide `f32x4 * f32x2 -> fp8x4` PTX wrapper.
 
     Multiplies four f32 inputs by a broadcast inverse scale (passed as an
     f32x2 pack of (s, s)) and converts to FP8, packing the four bytes into one
     uint32: byte i = fp8(v_i * s). Two `mul.f32x2` + two `cvt...x2.f32` — the
-    4-wide analogue of the kit's `mul_cvt_to_fp8x2` (CUDA ptx::mul_cvt_4x).
+    f32-input form of this op family (CUDA ptx::mul_cvt_4x).
     """
     out_op = "e4m3x2" if out_fmt == "e4m3" else "e5m2x2"
     asm = (
@@ -178,6 +179,63 @@ def mul_f32x4_cvt_f32x4_to_fp8x4(fp8_dtype: str, relu: bool = False):
     The op takes (a0..a3, b0..b3) and returns a uint32 of four packed fp8
     bytes, byte i = fp8(a_i * b_i)."""
     return _build_mul_f32x4_cvt_f32x4_to_fp8x4("e5m2" if fp8_dtype == "e5m2" else "e4m3", relu)
+
+
+def _build_mul_i64_cvt_packed16x4_to_fp8x4(in_fmt: str, out_fmt: str, relu: bool = False):
+    """Build a fused `2x <in_fmt>x2 * f32x2 -> fp8x4` PTX wrapper.
+
+    16-bit-input form of _build_mul_i64_cvt_f32x4_to_fp8x4: widens four packed
+    bf16/f16 elements to f32 inside the asm, multiplies by the broadcast
+    (s, s) pair, and converts: byte i = fp8(elt_i * s). The two u16 cvt
+    results combine into the u32 via a register-pair mov (free)."""
+    out_op = "e4m3x2" if out_fmt == "e4m3" else "e5m2x2"
+    asm = (
+        "{\n"
+        ".reg.b64 vp0; .reg.b64 vp1; .reg.b64 vq0; .reg.b64 vq1;\n\t"
+        ".reg.b32 v1; .reg.b32 v2; .reg.b32 v3; .reg.b32 v4;\n\t"
+        ".reg.b16 vb1; .reg.b16 vb2; .reg.b16 vb3; .reg.b16 vb4;\n\t"
+        ".reg.b16 vo0; .reg.b16 vo1;\n\t"
+        "mov.b32 {vb1, vb2}, $1;\n\t"
+        "mov.b32 {vb3, vb4}, $2;\n\t"
+        f"cvt.f32.{in_fmt} v1, vb1;\n\t"
+        f"cvt.f32.{in_fmt} v2, vb2;\n\t"
+        f"cvt.f32.{in_fmt} v3, vb3;\n\t"
+        f"cvt.f32.{in_fmt} v4, vb4;\n\t"
+        "mov.b64 vp0, {v1, v2};\n\t"
+        "mov.b64 vq0, {v3, v4};\n\t"
+        "mul.f32x2 vp1, vp0, $3;\n\t"
+        "mul.f32x2 vq1, vq0, $3;\n\t"
+        "mov.b64 {v2, v1}, vp1;\n\t"
+        "mov.b64 {v4, v3}, vq1;\n\t"
+        # cvt d, a, b => d[15:8]=fp8(a), d[7:0]=fp8(b); feed (hi, lo) so the
+        # low byte holds the earlier element.
+        f"cvt.rn.satfinite{".relu" if relu else ""}.{out_op}.f32 vo0, v1, v2;\n\t"
+        f"cvt.rn.satfinite{".relu" if relu else ""}.{out_op}.f32 vo1, v3, v4;\n\t"
+        "mov.b32 $0, {vo0, vo1};\n\t"
+        "}"
+    )
+
+    @dsl_user_op
+    def fn(lo_2x: Int32, hi_2x: Int32, scale_2x: Int64, *, loc=None, ip=None) -> Uint32:
+        return Uint32(llvm.inline_asm(
+            T.i32(),
+            [lo_2x.ir_value(loc=loc, ip=ip), hi_2x.ir_value(loc=loc, ip=ip),
+             scale_2x.ir_value(loc=loc, ip=ip)],
+            asm,
+            "=r,r,r,l", has_side_effects=False, is_align_stack=False,
+            asm_dialect=llvm.AsmDialect.AD_ATT))
+    return fn
+
+
+def mul_i64_cvt_packed16x4_to_fp8x4(dtype, fp8_dtype: str, relu: bool = False):
+    """Return the fused packed16x4 * broadcast-scale -> FP8x4 op.
+
+    The op takes (lo_2x, hi_2x, scale_2x): two i32s of packed bf16/f16 pairs
+    (elements 0-1, 2-3) and a pack_f32x2(s, s) pair; returns a uint32 of four
+    packed fp8 bytes, byte i = fp8(elt_i * s)."""
+    in_fmt = "f16" if dtype is cutlass.Float16 else "bf16"
+    return _build_mul_i64_cvt_packed16x4_to_fp8x4(
+        in_fmt, "e5m2" if fp8_dtype == "e5m2" else "e4m3", relu)
 
 
 def _target_arch_is_blackwell() -> bool:

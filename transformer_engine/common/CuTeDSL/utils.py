@@ -87,6 +87,20 @@ def pack_f32x2(lo: Float32, hi: Float32, *, loc=None, ip=None) -> Int64:
         asm_dialect=llvm.AsmDialect.AD_ATT))
 
 
+@dsl_user_op
+def unpack_i64_to_i32x2(v: Int64, *, loc=None, ip=None):
+    """Split a 64-bit value into (lo, hi) 32-bit halves.
+
+    Inverse of pack_f32x2's register-pair layout. Lowers to register-pair
+    aliasing in SASS (no real instructions), so an 8-byte smem load + this
+    split costs one LDS.64 total."""
+    lo = Int32(mlir_arith.trunci(T.i32(), v.ir_value(loc=loc, ip=ip), loc=loc, ip=ip))
+    hi_64 = mlir_arith.shrui(v.ir_value(loc=loc, ip=ip),
+                             Int64(32).ir_value(loc=loc, ip=ip), loc=loc, ip=ip)
+    hi = Int32(mlir_arith.trunci(T.i32(), hi_64, loc=loc, ip=ip))
+    return lo, hi
+
+
 def _build_packed16_kit(in_fmt: str):
     """Build a kit of PTX wrappers for a 16-bit input format so we don't have to repeat
     the same inline asm boilerplate code for FP16 and BF16 dtypes.
@@ -99,8 +113,6 @@ def _build_packed16_kit(in_fmt: str):
       bits_to_f32(Int16) -> Float32          # widen one 16-bit element
       x2_lo_to_f32(Int32) -> Float32         # extract+widen low half
       x2_hi_to_f32(Int32) -> Float32         # extract+widen high half
-      mul_cvt_to_fp8x2(fp8_dtype) -> callable(Int32, Int64)->Int32
-                                            # fused <fmt>x2 * f32x2 -> fp8x2
     """
 
     @dsl_user_op
@@ -200,47 +212,6 @@ def _build_packed16_kit(in_fmt: str):
                 "=f,h", has_side_effects=False, is_align_stack=False,
                 asm_dialect=llvm.AsmDialect.AD_ATT))
 
-    def _build_mul_cvt(out_fmt: str, relu: bool = False):
-        """Build a fused `<in_fmt>x2 * f32x2 → fp8<out_fmt>x2` PTX wrapper.
-
-        The shape is identical across (in_fmt, out_fmt) combos — only the
-        widening opcode (`cvt.f32.<in_fmt>`) and the final saturating cvt
-        (`cvt.rn.satfinite.<out_fmt>x2.f32`) differ.
-        """
-        out_op = "e4m3x2" if out_fmt == "e4m3" else "e5m2x2"
-        asm = (
-            "{\n"
-            ".reg.b64 vp0; .reg.b64 vp1;\n\t"
-            ".reg.b32 v1;  .reg.b32 v2;\n\t"
-            ".reg.b16 vb1; .reg.b16 vb2;\n\t"
-            "mov.b32 {vb1, vb2}, $1;\n\t"
-            f"cvt.f32.{in_fmt} v1, vb1;\n\t"
-            f"cvt.f32.{in_fmt} v2, vb2;\n\t"
-            "mov.b64 vp0, {v1, v2};\n\t"
-            "mul.f32x2 vp1, vp0, $2;\n\t"
-            "mov.b64 {v2, v1}, vp1;\n\t"
-            f"cvt.rn.satfinite{".relu" if relu else ""}.{out_op}.f32 $0, v1, v2;\n\t"
-            "}"
-        )
-
-        @dsl_user_op
-        def fn(val_2x: Int32, scale_2x: Int64, *, loc=None, ip=None) -> Int32:
-            result_i16 = Int16(llvm.inline_asm(
-                T.i16(),
-                [val_2x.ir_value(loc=loc, ip=ip),
-                 scale_2x.ir_value(loc=loc, ip=ip)],
-                asm,
-                "=h,r,l", has_side_effects=False, is_align_stack=False,
-                asm_dialect=llvm.AsmDialect.AD_ATT))
-            return Int32(mlir_arith.extui(
-                T.i32(), result_i16.ir_value(loc=loc, ip=ip), loc=loc, ip=ip))
-        return fn
-
-    def mul_cvt_to_fp8x2(fp8_dtype: str, relu: bool = False):
-        if fp8_dtype == "e5m2":
-            return _build_mul_cvt("e5m2", relu)
-        return _build_mul_cvt("e4m3", relu)
-
     return SimpleNamespace(
         max_x2=max_x2,
         abs_max_x2=abs_max_x2,
@@ -249,7 +220,6 @@ def _build_packed16_kit(in_fmt: str):
         x2_lo_to_f32=x2_lo_to_f32,
         x2_hi_to_f32=x2_hi_to_f32,
         truncate_f32=truncate_f32,
-        mul_cvt_to_fp8x2=mul_cvt_to_fp8x2,
     )
 
 
