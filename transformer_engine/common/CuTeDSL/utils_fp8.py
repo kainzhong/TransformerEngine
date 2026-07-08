@@ -75,7 +75,7 @@ def cvt_f32_to_fp8e8m0_blackwell(val: Float32, *, loc=None, ip=None) -> Int32:
         T.i32(), result_i16.ir_value(loc=loc, ip=ip), loc=loc, ip=ip))
     return result_i32 & Int32(0xFF)
 
-def _build_mul_cvt_f32x4_to_fp8x4(out_fmt: str, relu: bool = False):
+def _build_mul_i64_cvt_f32x4_to_fp8x4(out_fmt: str, relu: bool = False):
     """Build a fused 4-wide `f32x4 * f32x2 -> fp8x4` PTX wrapper.
 
     Multiplies four f32 inputs by a broadcast inverse scale (passed as an
@@ -117,12 +117,68 @@ def _build_mul_cvt_f32x4_to_fp8x4(out_fmt: str, relu: bool = False):
     return fn
 
 
-def mul_cvt_f32x4_to_fp8x4(fp8_dtype: str, relu: bool = False):
+def mul_i64_cvt_f32x4_to_fp8x4(fp8_dtype: str, relu: bool = False):
     """Return the fused 4-wide f32->FP8 multiply+cast op for the given FP8 format.
 
     The op takes (v0, v1, v2, v3, scale_2x) and returns a uint32 of four packed
     fp8 bytes, byte i = fp8(v_i * scale). `scale_2x` is pack_f32x2(s, s)."""
-    return _build_mul_cvt_f32x4_to_fp8x4("e5m2" if fp8_dtype == "e5m2" else "e4m3", relu)
+    return _build_mul_i64_cvt_f32x4_to_fp8x4("e5m2" if fp8_dtype == "e5m2" else "e4m3", relu)
+
+
+def _build_mul_f32x4_cvt_f32x4_to_fp8x4(out_fmt: str, relu: bool = False):
+    """Build a fused elementwise `f32x4 * f32x4 -> fp8x4` PTX wrapper.
+
+    General elementwise multiply-and-convert: byte i = fp8(a_i * b_i). Two
+    fma.rn.f32x2 against packed zeros + two cvt...x2.f32 (same sequence as
+    CUDA's mul_cvt_4x(out, floatx4, floatx4) in ptx.cuh). fma (not mul) so a
+    -0 product flushes to +0."""
+    out_op = "e4m3x2" if out_fmt == "e4m3" else "e5m2x2"
+    asm = (
+        "{\n"
+        ".reg.b64 va0; .reg.b64 va1; .reg.b64 vb0; .reg.b64 vb1;\n\t"
+        ".reg.b64 vr0; .reg.b64 vr1; .reg.b64 zeros;\n\t"
+        ".reg.b32 vs0; .reg.b32 vs1; .reg.b32 vs2; .reg.b32 vs3;\n\t"
+        ".reg.b16 vo0; .reg.b16 vo1;\n\t"
+        "mov.b64 zeros, {0x0, 0x0};\n\t"
+        "mov.b64 va0, {$1, $2};\n\t"
+        "mov.b64 va1, {$3, $4};\n\t"
+        "mov.b64 vb0, {$5, $6};\n\t"
+        "mov.b64 vb1, {$7, $8};\n\t"
+        "fma.rn.f32x2 vr0, va0, vb0, zeros;\n\t"
+        "fma.rn.f32x2 vr1, va1, vb1, zeros;\n\t"
+        "mov.b64 {vs0, vs1}, vr0;\n\t"
+        "mov.b64 {vs2, vs3}, vr1;\n\t"
+        # cvt d, a, b => d[15:8]=fp8(a), d[7:0]=fp8(b); feed (hi, lo) so the low
+        # byte holds the earlier element.
+        f"cvt.rn.satfinite{".relu" if relu else ""}.{out_op}.f32 vo0, vs1, vs0;\n\t"
+        f"cvt.rn.satfinite{".relu" if relu else ""}.{out_op}.f32 vo1, vs3, vs2;\n\t"
+        "mov.b32 $0, {vo0, vo1};\n\t"
+        "}"
+    )
+
+    @dsl_user_op
+    def fn(a0: Float32, a1: Float32, a2: Float32, a3: Float32,
+           b0: Float32, b1: Float32, b2: Float32, b3: Float32,
+           *, loc=None, ip=None) -> Uint32:
+        return Uint32(llvm.inline_asm(
+            T.i32(),
+            [a0.ir_value(loc=loc, ip=ip), a1.ir_value(loc=loc, ip=ip),
+             a2.ir_value(loc=loc, ip=ip), a3.ir_value(loc=loc, ip=ip),
+             b0.ir_value(loc=loc, ip=ip), b1.ir_value(loc=loc, ip=ip),
+             b2.ir_value(loc=loc, ip=ip), b3.ir_value(loc=loc, ip=ip)],
+            asm,
+            "=r,f,f,f,f,f,f,f,f", has_side_effects=False, is_align_stack=False,
+            asm_dialect=llvm.AsmDialect.AD_ATT))
+    return fn
+
+
+def mul_f32x4_cvt_f32x4_to_fp8x4(fp8_dtype: str, relu: bool = False):
+    """Return the fused elementwise f32x4*f32x4 -> FP8x4 op for the given FP8 format.
+
+    The op takes (a0..a3, b0..b3) and returns a uint32 of four packed fp8
+    bytes, byte i = fp8(a_i * b_i)."""
+    return _build_mul_f32x4_cvt_f32x4_to_fp8x4("e5m2" if fp8_dtype == "e5m2" else "e4m3", relu)
+
 
 def _target_arch_is_blackwell() -> bool:
     """Return True for the Blackwell family (SM 10.0 / 11.0 / 12.0), which has the
