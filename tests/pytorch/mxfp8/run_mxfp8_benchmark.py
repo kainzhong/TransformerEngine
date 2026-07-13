@@ -220,7 +220,12 @@ def _run_gpu_nsys_backend(nsys, env, backend, combos, in_dtypes, fp8s, shapes_st
                      "--directions", ",".join(directions), "--swizzles", sw_arg,
                      "--shapes", shapes_str, "--warmup", str(warmup),
                      "--iters", str(iters)]
-        cmd = [nsys, "profile", "-o", rep, "-f", "true"] + bench_cmd
+        # Only GPU kernel/NVTX timing is used below, so skip CPU sampling and
+        # backtrace capture. That avoids the (very slow, on machines with a
+        # prebuilt binary) symbol-resolution pass at profile finalization.
+        cmd = [nsys, "profile", "-o", rep, "-f", "true",
+               "--sample=none", "--cpuctxsw=none", "--backtrace=none",
+               "--resolve-symbols=false"] + bench_cmd
         print(f"[run] backend={backend} nsys (full matrix in 1 process): "
               f"combos={combos} dirs={','.join(directions)} sw={sw_arg} "
               f"shapes={shapes_str}", file=sys.stderr)
