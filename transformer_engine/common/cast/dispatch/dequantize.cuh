@@ -17,7 +17,9 @@
 #include "../fp8/dequantize_fp8.cuh"
 #include "../fp8_blockwise/group_dequantize_fp8_blockwise.cuh"
 #include "../mxfp8/dequantize_mxfp8.cuh"
+#include "../mxfp8/dequantize_mxfp8_cutedsl.cuh"
 #include "../mxfp8/group_dequantize_mxfp8.cuh"
+#include "../mxfp8/group_dequantize_mxfp8_cutedsl.cuh"
 #include "../nvfp4/dequantize_nvfp4.cuh"
 
 namespace transformer_engine {
@@ -41,7 +43,9 @@ inline void dequantize_helper(const Tensor &input, Tensor *output, cudaStream_t 
     }
     case NVTE_MXFP8_1D_SCALING: {
       if (is_supported_by_CC_100()) {
-        mxfp8::dequantize(input, output, stream);
+        if (!cutedsl_backend::mxfp8_dequantize_cutedsl(input, output, stream)) {
+          mxfp8::dequantize(input, output, stream);
+        }
       } else {
         NVTE_ERROR("MXFP8 Dequantization is NOT supported by architectures < 10.0");
       }
@@ -64,7 +68,9 @@ inline void group_dequantize_helper(const GroupedTensor &input, GroupedTensor *o
   switch (input.scaling_mode) {
     case NVTE_MXFP8_1D_SCALING: {
       if (is_supported_by_CC_100()) {
-        mxfp8::group_dequantize(&input, output, stream);
+        if (!cutedsl_backend::mxfp8_group_dequantize_cutedsl(&input, output, stream)) {
+          mxfp8::group_dequantize(&input, output, stream);
+        }
       } else {
         NVTE_ERROR("MXFP8 Grouped Dequantization is NOT supported by architectures < 10.0");
       }

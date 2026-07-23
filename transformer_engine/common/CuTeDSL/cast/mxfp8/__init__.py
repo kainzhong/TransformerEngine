@@ -5,3 +5,4 @@
 """CuTeDSL MXFP8 quantization kernels."""
 
 from . import quantize_mxfp8
+from . import dequantize_mxfp8

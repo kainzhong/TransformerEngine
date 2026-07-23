@@ -115,6 +115,16 @@ def exp2f_rcp(biased_exp: Int32, *, loc=None, ip=None) -> Float32:
 
 
 @dsl_user_op
+def exp2f(biased_exp: Int32, *, loc=None, ip=None) -> Float32:
+    """2^(biased_exp - 127): the (non-reciprocal) block scale for dequantization.
+
+    Mirrors ptx::exp2f: bitcast `biased_exp << 23` as a float, i.e. build an fp32
+    with exponent field `biased_exp` and zero mantissa. biased_exp == 0 -> 0.0.
+    """
+    return _bitcast_i32_to_f32((biased_exp << Int32(FP32_MANTISSA_BITS)), loc=loc, ip=ip)
+
+
+@dsl_user_op
 def pack_f32x2(lo: Float32, hi: Float32, *, loc=None, ip=None) -> Int64:
     """Pack two f32 scalars into a single 64-bit register (`floatx2` layout).
 

@@ -263,3 +263,200 @@ def test_sizes(swizzled, method, act, block_size, shape):
 @pytest.mark.parametrize("swizzled", SWIZZLE_MODES, ids=get_swizzle_id)
 def test_dtypes(swizzled, method, act, fp8_dtype, in_dtype):
     run_test_case(method, act, (256, 384), (32, 32), in_dtype, fp8_dtype, swizzled)
+
+
+# --- Dequantize ---------------------------------------------------------------
+def get_dequant_cfg_key(out_dtype, fp8_dtype, rowwise, colwise, swizzled=False):
+    """Mirror of MXFP8DequantConfig::to_key (dequantize_mxfp8_cutedsl.cuh)."""
+    flags = (rowwise, colwise, swizzled)
+    return (
+        "cutedsl_mxfp8_dequantize_"
+        + DTYPE_TO_STR[out_dtype]
+        + "_"
+        + FP8_TO_STR[fp8_dtype]
+        + "_"
+        + "_".join("1" if f else "0" for f in flags)
+    )
+
+
+def get_group_cfg_key(in_dtype, fp8_dtype, rowwise, colwise, shape_rep):
+    """Mirror of MXFP8GroupQuantConfig::to_key (group_quantize_mxfp8_cutedsl.cuh)."""
+    return (
+        "cutedsl_mxfp8_group_"
+        + DTYPE_TO_STR[in_dtype]
+        + "_"
+        + FP8_TO_STR[fp8_dtype]
+        + "_"
+        + ("1" if rowwise else "0")
+        + "_"
+        + ("1" if colwise else "0")
+        + "_"
+        + shape_rep
+    )
+
+
+def assert_cutedsl_registered(key, what):
+    assert tvm_ffi.get_global_func(key, allow_missing=True) is not None, (
+        f"CuTeDSL kernel not registered for {key}; the CuTeDSL backend fell back to CUDA "
+        f"and this {what} case compared CUDA against itself"
+    )
+
+
+@pytest.mark.parametrize("shape", MATRIX_SIZES, ids=get_shape_id)
+@pytest.mark.parametrize("block_size", BLOCK_SIZES, ids=get_block_id)
+@pytest.mark.parametrize("out_dtype", IN_DTYPES, ids=get_dtype_id)
+@pytest.mark.parametrize("fp8_dtype", FP8_DTYPES, ids=get_fp8_id)
+def test_dequantize(fp8_dtype, out_dtype, block_size, shape):
+    """CuTeDSL vs CUDA bit-exactness for the single-tensor MXFP8 dequantize kernel."""
+    M, N = shape
+    rowwise = block_size[1] != 1
+    columnwise = block_size[0] != 1
+    x, _ = generate_inputs(M, N, out_dtype)
+
+    # Quantize once (CUDA) so both dequantize runs see byte-identical input.
+    set_cutedsl_backend(False)
+    q = MXFP8Quantizer(fp8_dtype=fp8_dtype, rowwise=rowwise, columnwise=columnwise)
+    qx = q(x)
+    deq_cuda = qx.dequantize(dtype=out_dtype)
+
+    set_cutedsl_backend(True)
+    try:
+        deq_cutedsl = qx.dequantize(dtype=out_dtype)
+    finally:
+        set_cutedsl_backend(False)
+
+    assert_cutedsl_registered(
+        get_dequant_cfg_key(out_dtype, fp8_dtype, rowwise, columnwise), "dequantize"
+    )
+    tag = f"{M}x{N}/{DTYPE_TO_STR[out_dtype]}/{FP8_TO_STR[fp8_dtype]}/{get_block_id(block_size)}"
+    assert torch.equal(deq_cutedsl, deq_cuda), f"{tag}: dequantized values differ between backends"
+
+
+# --- Grouped quantize / dequantize --------------------------------------------
+# Which ShapeRepresentation `tex.group_quantize` produces is decided by which of
+# first_dims / last_dims is supplied:
+#   neither      -> SAME_BOTH_DIMS     (the group splits evenly along M)
+#   first_dims   -> VARYING_FIRST_DIM  (common last dim)
+#   last_dims    -> VARYING_LAST_DIM   (common first dim; each last dim % 128 == 0)
+# (name, shape_rep, num_tensors, (M, N), first_dims, last_dims)
+GroupCase = NamedTuple(
+    "GroupCase",
+    [
+        ("name", str),
+        ("shape_rep", str),
+        ("num_tensors", int),
+        ("shape", tuple),
+        ("first_dims", Optional[list]),
+        ("last_dims", Optional[list]),
+    ],
+)
+GROUP_CASES = [
+    GroupCase("same", "same_both_dims", 2, (512, 256), None, None),
+    GroupCase("vfirst", "varying_first_dim", 3, (512, 256), [128, 256, 128], None),
+    GroupCase("vlast", "varying_last_dim", 2, (256, 512), None, [128, 384]),
+]
+get_group_case_id = lambda c: c.name
+
+
+def run_group_quantize(x, case, fp8_dtype, rowwise, columnwise):
+    """Grouped quantize via the public dispatch."""
+    q = MXFP8Quantizer(fp8_dtype=fp8_dtype, rowwise=rowwise, columnwise=columnwise)
+
+    def as_dev(v):
+        return None if v is None else torch.tensor(v, dtype=torch.int64, device="cuda")
+
+    return tex.group_quantize(
+        x, q, case.num_tensors, as_dev(case.first_dims), as_dev(case.last_dims)
+    )
+
+
+def extract_grouped_output(grouped, rowwise, columnwise):
+    """Per-member quantized bytes, skipping the uninitialized scale padding."""
+    parts = {}
+    for i, member in enumerate(grouped.split_into_quantized_tensors()):
+        for name, value in extract_quantized_output(member, rowwise, columnwise).items():
+            parts[f"tensor{i} {name}"] = value
+    return parts
+
+
+@pytest.mark.parametrize("case", GROUP_CASES, ids=get_group_case_id)
+@pytest.mark.parametrize("block_size", BLOCK_SIZES, ids=get_block_id)
+@pytest.mark.parametrize("in_dtype", IN_DTYPES, ids=get_dtype_id)
+@pytest.mark.parametrize("fp8_dtype", FP8_DTYPES, ids=get_fp8_id)
+def test_group_quantize(fp8_dtype, in_dtype, block_size, case):
+    """CuTeDSL vs CUDA bit-exactness for grouped MXFP8 quantize, per shape representation."""
+    M, N = case.shape
+    rowwise = block_size[1] != 1
+    columnwise = block_size[0] != 1
+    x, _ = generate_inputs(M, N, in_dtype)
+
+    set_cutedsl_backend(False)
+    cuda_output = extract_grouped_output(
+        run_group_quantize(x, case, fp8_dtype, rowwise, columnwise), rowwise, columnwise
+    )
+
+    set_cutedsl_backend(True)
+    try:
+        cutedsl_output = extract_grouped_output(
+            run_group_quantize(x, case, fp8_dtype, rowwise, columnwise), rowwise, columnwise
+        )
+    finally:
+        set_cutedsl_backend(False)
+
+    assert_cutedsl_registered(
+        get_group_cfg_key(in_dtype, fp8_dtype, rowwise, columnwise, case.shape_rep),
+        "grouped quantize",
+    )
+    tag = f"{case.name}/{M}x{N}/{DTYPE_TO_STR[in_dtype]}/{FP8_TO_STR[fp8_dtype]}"
+    for name, cuda_bytes in cuda_output.items():
+        assert torch.equal(
+            cutedsl_output[name], cuda_bytes
+        ), f"{tag}: {name} differ between backends"
+
+
+# The grouped dequantize bridge only covers the is_single_tensor reps (it reuses the
+# single-tensor kernel); VARYING_LAST_DIM falls back to CUDA.
+GROUP_DEQUANT_CASES = [c for c in GROUP_CASES if c.shape_rep != "varying_last_dim"]
+
+
+@pytest.mark.parametrize("case", GROUP_DEQUANT_CASES, ids=get_group_case_id)
+@pytest.mark.parametrize("out_dtype", IN_DTYPES, ids=get_dtype_id)
+@pytest.mark.parametrize("fp8_dtype", FP8_DTYPES, ids=get_fp8_id)
+def test_group_dequantize(fp8_dtype, out_dtype, case):
+    """CuTeDSL vs CUDA bit-exactness for grouped MXFP8 dequantize."""
+    M, N = case.shape
+    x, _ = generate_inputs(M, N, out_dtype)
+    te_out_dtype = {
+        torch.float32: te.DType.kFloat32,
+        torch.bfloat16: te.DType.kBFloat16,
+        torch.float16: te.DType.kFloat16,
+    }[out_dtype]
+
+    # Quantize once (CUDA) so both dequantize runs see byte-identical input.
+    set_cutedsl_backend(False)
+    quantized = run_group_quantize(x, case, fp8_dtype, rowwise=True, columnwise=False)
+    cuda_out = [
+        t.clone()
+        for t in tex.group_dequantize(quantized, te_out_dtype).split_into_quantized_tensors()
+    ]
+
+    set_cutedsl_backend(True)
+    try:
+        cutedsl_out = [
+            t.clone()
+            for t in tex.group_dequantize(quantized, te_out_dtype).split_into_quantized_tensors()
+        ]
+    finally:
+        set_cutedsl_backend(False)
+
+    assert_cutedsl_registered(
+        get_dequant_cfg_key(out_dtype, fp8_dtype, rowwise=True, colwise=False), "grouped dequantize"
+    )
+    tag = f"{case.name}/{M}x{N}/{DTYPE_TO_STR[out_dtype]}/{FP8_TO_STR[fp8_dtype]}"
+    for i, (got, want) in enumerate(zip(cutedsl_out, cuda_out)):
+        assert torch.equal(
+            got, want
+        ), f"{tag}: tensor{i} dequantized values differ between backends"
+@pytest.mark.parametrize("swizzled", SWIZZLE_MODES, ids=get_swizzle_id)
+def test_dtypes(swizzled, method, act, fp8_dtype, in_dtype):
+    run_test_case(method, act, (256, 384), (32, 32), in_dtype, fp8_dtype, swizzled)
