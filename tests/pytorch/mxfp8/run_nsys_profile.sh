@@ -114,7 +114,9 @@ PY
 # Run the bench once under nsys for a given backend. Echoes "avg_ns inst us".
 run_backend() {  # $1=enable(0/1) $2=combo $3=M $4=N $5=dir $6=label $7=out
     local ENABLE="$1" COMBO="$2" M="$3" N="$4" DIR="$5" OUT="$7"
-    if ! NVTE_ENABLE_CUTEDSL_QUANT_BACKEND="$ENABLE" nsys profile \
+    if ! NVTE_ENABLE_CUTEDSL_QUANT_BACKEND="$ENABLE" \
+        NVTE_WARN_IF_CUTEDSL_BACKEND_NOT_CHOSEN="$ENABLE" \
+        nsys profile \
         --trace=cuda,nvtx \
         --capture-range=cudaProfilerApi \
         --capture-range-end=stop \
