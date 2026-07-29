@@ -220,7 +220,15 @@ def _run_gpu_nsys_backend(nsys, env, backend, combos, in_dtypes, fp8s, shapes_st
                      "--directions", ",".join(directions), "--swizzles", sw_arg,
                      "--shapes", shapes_str, "--warmup", str(warmup),
                      "--iters", str(iters)]
-        cmd = [nsys, "profile", "-o", rep, "-f", "true"] + bench_cmd
+        cmd = [
+            nsys,
+            "profile",
+            "-o",
+            rep,
+            "-f",
+            "true",
+            "--resolve-symbols=false",
+        ] + bench_cmd
         print(f"[run] backend={backend} nsys (full matrix in 1 process): "
               f"combos={combos} dirs={','.join(directions)} sw={sw_arg} "
               f"shapes={shapes_str}", file=sys.stderr)
