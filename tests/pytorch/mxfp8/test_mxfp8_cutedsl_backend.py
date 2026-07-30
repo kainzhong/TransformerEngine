@@ -306,7 +306,8 @@ def assert_cutedsl_registered(key, what):
 @pytest.mark.parametrize("block_size", BLOCK_SIZES, ids=get_block_id)
 @pytest.mark.parametrize("out_dtype", IN_DTYPES, ids=get_dtype_id)
 @pytest.mark.parametrize("fp8_dtype", FP8_DTYPES, ids=get_fp8_id)
-def test_dequantize(fp8_dtype, out_dtype, block_size, shape):
+@pytest.mark.parametrize("swizzled", SWIZZLE_MODES, ids=get_swizzle_id)
+def test_dequantize(fp8_dtype, out_dtype, block_size, shape, swizzled):
     """CuTeDSL vs CUDA bit-exactness for the single-tensor MXFP8 dequantize kernel."""
     M, N = shape
     rowwise = block_size[1] != 1
@@ -316,6 +317,7 @@ def test_dequantize(fp8_dtype, out_dtype, block_size, shape):
     # Quantize once (CUDA) so both dequantize runs see byte-identical input.
     set_cutedsl_backend(False)
     q = MXFP8Quantizer(fp8_dtype=fp8_dtype, rowwise=rowwise, columnwise=columnwise)
+    q.optimize_for_gemm = swizzled
     qx = q(x)
     deq_cuda = qx.dequantize(dtype=out_dtype)
 
@@ -326,9 +328,12 @@ def test_dequantize(fp8_dtype, out_dtype, block_size, shape):
         set_cutedsl_backend(False)
 
     assert_cutedsl_registered(
-        get_dequant_cfg_key(out_dtype, fp8_dtype, rowwise, columnwise), "dequantize"
+        get_dequant_cfg_key(out_dtype, fp8_dtype, rowwise, columnwise, swizzled), "dequantize"
     )
-    tag = f"{M}x{N}/{DTYPE_TO_STR[out_dtype]}/{FP8_TO_STR[fp8_dtype]}/{get_block_id(block_size)}"
+    tag = (
+        f"{M}x{N}/{DTYPE_TO_STR[out_dtype]}/{FP8_TO_STR[fp8_dtype]}/"
+        f"{get_block_id(block_size)}/{get_swizzle_id(swizzled)}"
+    )
     assert torch.equal(deq_cutedsl, deq_cuda), f"{tag}: dequantized values differ between backends"
 
 
@@ -370,11 +375,15 @@ def run_group_quantize(x, case, fp8_dtype, rowwise, columnwise):
     )
 
 
-def extract_grouped_output(grouped, rowwise, columnwise):
-    """Per-member quantized bytes, skipping the uninitialized scale padding."""
+def extract_grouped_output(grouped, rowwise, columnwise, swizzled=False):
+    """Per-member quantized bytes, skipping the uninitialized scale padding.
+
+    Grouped is linear-only here: the CuTeDSL grouped bridge falls back to CUDA for
+    GEMM-swizzled scales, so a swizzled grouped case would compare CUDA to itself.
+    """
     parts = {}
     for i, member in enumerate(grouped.split_into_quantized_tensors()):
-        for name, value in extract_quantized_output(member, rowwise, columnwise).items():
+        for name, value in extract_quantized_output(member, rowwise, columnwise, swizzled).items():
             parts[f"tensor{i} {name}"] = value
     return parts
 
@@ -457,6 +466,3 @@ def test_group_dequantize(fp8_dtype, out_dtype, case):
         assert torch.equal(
             got, want
         ), f"{tag}: tensor{i} dequantized values differ between backends"
-@pytest.mark.parametrize("swizzled", SWIZZLE_MODES, ids=get_swizzle_id)
-def test_dtypes(swizzled, method, act, fp8_dtype, in_dtype):
-    run_test_case(method, act, (256, 384), (32, 32), in_dtype, fp8_dtype, swizzled)
