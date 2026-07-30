@@ -132,8 +132,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   extern __shared__ char dynamic_shmem[];
   // Manually align dynamic SHMEM per TMA requirements using padding
   // __align__(128) Does not guarantee the pointer to be aligned!
-  char *dshmem = dynamic_shmem + ((-reinterpret_cast<uintptr_t>(dynamic_shmem)) &
-                                  (TMA_SHMEM_ALIGNMENT - 1));
+  char *dshmem =
+      dynamic_shmem + ((-reinterpret_cast<uintptr_t>(dynamic_shmem)) & (TMA_SHMEM_ALIGNMENT - 1));
 
   // The destination shared memory buffer of a bulk tensor operation should be 16-byte aligned
   IType *in_sh = reinterpret_cast<IType *>(dshmem);
