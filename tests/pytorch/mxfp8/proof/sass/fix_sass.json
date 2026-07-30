@@ -1,0 +1,3683 @@
+{
+ "agg": {
+  "shared": 103752,
+  "generic": 0,
+  "global": 2016,
+  "insns": 1400720
+ },
+ "per": {
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4geluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 2,
+   "insns": 2296
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4geluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 34,
+   "generic": 0,
+   "global": 2,
+   "insns": 2232
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4geluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 2,
+   "insns": 2320
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4geluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 34,
+   "generic": 0,
+   "global": 2,
+   "insns": 2248
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb0ENS_5EmptyELPFffRKS4_E0E13__nv_bfloat1613__nv_fp8_e4m3Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 162,
+   "generic": 0,
+   "global": 5,
+   "insns": 1016
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb0ENS_5EmptyELPFffRKS4_E0E13__nv_bfloat1613__nv_fp8_e4m3Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 3,
+   "insns": 664
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb0ENS_5EmptyELPFffRKS4_E0E13__nv_bfloat1613__nv_fp8_e4m3Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 34,
+   "generic": 0,
+   "global": 3,
+   "insns": 520
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb0ENS_5EmptyELPFffRKS4_E0E13__nv_bfloat1613__nv_fp8_e4m3Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 162,
+   "generic": 0,
+   "global": 5,
+   "insns": 1064
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb0ENS_5EmptyELPFffRKS4_E0E13__nv_bfloat1613__nv_fp8_e4m3Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 3,
+   "insns": 688
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb0ENS_5EmptyELPFffRKS4_E0E13__nv_bfloat1613__nv_fp8_e4m3Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 34,
+   "generic": 0,
+   "global": 3,
+   "insns": 552
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb0ENS_5EmptyELPFffRKS4_E0E13__nv_bfloat1613__nv_fp8_e5m2Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 162,
+   "generic": 0,
+   "global": 5,
+   "insns": 1016
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb0ENS_5EmptyELPFffRKS4_E0E13__nv_bfloat1613__nv_fp8_e5m2Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 3,
+   "insns": 664
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb0ENS_5EmptyELPFffRKS4_E0E13__nv_bfloat1613__nv_fp8_e5m2Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 34,
+   "generic": 0,
+   "global": 3,
+   "insns": 520
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb0ENS_5EmptyELPFffRKS4_E0E13__nv_bfloat1613__nv_fp8_e5m2Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 162,
+   "generic": 0,
+   "global": 5,
+   "insns": 1064
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb0ENS_5EmptyELPFffRKS4_E0E13__nv_bfloat1613__nv_fp8_e5m2Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 3,
+   "insns": 688
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb0ENS_5EmptyELPFffRKS4_E0E13__nv_bfloat1613__nv_fp8_e5m2Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 34,
+   "generic": 0,
+   "global": 3,
+   "insns": 552
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb0ENS_5EmptyELPFffRKS4_E0E6__half13__nv_fp8_e4m3Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 162,
+   "generic": 0,
+   "global": 5,
+   "insns": 960
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb0ENS_5EmptyELPFffRKS4_E0E6__half13__nv_fp8_e4m3Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 3,
+   "insns": 600
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb0ENS_5EmptyELPFffRKS4_E0E6__half13__nv_fp8_e4m3Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 34,
+   "generic": 0,
+   "global": 3,
+   "insns": 520
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb0ENS_5EmptyELPFffRKS4_E0E6__half13__nv_fp8_e4m3Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 162,
+   "generic": 0,
+   "global": 5,
+   "insns": 1000
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb0ENS_5EmptyELPFffRKS4_E0E6__half13__nv_fp8_e4m3Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 3,
+   "insns": 624
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb0ENS_5EmptyELPFffRKS4_E0E6__half13__nv_fp8_e4m3Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 34,
+   "generic": 0,
+   "global": 3,
+   "insns": 552
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb0ENS_5EmptyELPFffRKS4_E0E6__half13__nv_fp8_e5m2Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 162,
+   "generic": 0,
+   "global": 5,
+   "insns": 960
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb0ENS_5EmptyELPFffRKS4_E0E6__half13__nv_fp8_e5m2Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 3,
+   "insns": 600
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb0ENS_5EmptyELPFffRKS4_E0E6__half13__nv_fp8_e5m2Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 34,
+   "generic": 0,
+   "global": 3,
+   "insns": 520
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb0ENS_5EmptyELPFffRKS4_E0E6__half13__nv_fp8_e5m2Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 162,
+   "generic": 0,
+   "global": 5,
+   "insns": 1000
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb0ENS_5EmptyELPFffRKS4_E0E6__half13__nv_fp8_e5m2Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 3,
+   "insns": 624
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb0ENS_5EmptyELPFffRKS4_E0E6__half13__nv_fp8_e5m2Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 34,
+   "generic": 0,
+   "global": 3,
+   "insns": 552
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb0ENS_5EmptyELPFffRKS4_E0Ef13__nv_fp8_e4m3Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSA_SA_SA_PhSB_PKfPfSE_mmmm": {
+   "shared": 162,
+   "generic": 0,
+   "global": 5,
+   "insns": 784
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb0ENS_5EmptyELPFffRKS4_E0Ef13__nv_fp8_e4m3Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSA_SA_SA_PhSB_PKfPfSE_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 3,
+   "insns": 536
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb0ENS_5EmptyELPFffRKS4_E0Ef13__nv_fp8_e4m3Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSA_SA_SA_PhSB_PKfPfSE_mmmm": {
+   "shared": 34,
+   "generic": 0,
+   "global": 3,
+   "insns": 416
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb0ENS_5EmptyELPFffRKS4_E0Ef13__nv_fp8_e4m3Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSA_SA_SA_PhSB_PKfPfSE_mmmm": {
+   "shared": 162,
+   "generic": 0,
+   "global": 5,
+   "insns": 840
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb0ENS_5EmptyELPFffRKS4_E0Ef13__nv_fp8_e4m3Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSA_SA_SA_PhSB_PKfPfSE_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 3,
+   "insns": 560
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb0ENS_5EmptyELPFffRKS4_E0Ef13__nv_fp8_e4m3Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSA_SA_SA_PhSB_PKfPfSE_mmmm": {
+   "shared": 34,
+   "generic": 0,
+   "global": 3,
+   "insns": 448
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb0ENS_5EmptyELPFffRKS4_E0Ef13__nv_fp8_e5m2Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSA_SA_SA_PhSB_PKfPfSE_mmmm": {
+   "shared": 162,
+   "generic": 0,
+   "global": 5,
+   "insns": 784
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb0ENS_5EmptyELPFffRKS4_E0Ef13__nv_fp8_e5m2Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSA_SA_SA_PhSB_PKfPfSE_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 3,
+   "insns": 536
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb0ENS_5EmptyELPFffRKS4_E0Ef13__nv_fp8_e5m2Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSA_SA_SA_PhSB_PKfPfSE_mmmm": {
+   "shared": 34,
+   "generic": 0,
+   "global": 3,
+   "insns": 416
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb0ENS_5EmptyELPFffRKS4_E0Ef13__nv_fp8_e5m2Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSA_SA_SA_PhSB_PKfPfSE_mmmm": {
+   "shared": 162,
+   "generic": 0,
+   "global": 5,
+   "insns": 840
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb0ENS_5EmptyELPFffRKS4_E0Ef13__nv_fp8_e5m2Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSA_SA_SA_PhSB_PKfPfSE_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 3,
+   "insns": 560
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb0ENS_5EmptyELPFffRKS4_E0Ef13__nv_fp8_e5m2Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSA_SA_SA_PhSB_PKfPfSE_mmmm": {
+   "shared": 34,
+   "generic": 0,
+   "global": 3,
+   "insns": 448
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4geluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 226,
+   "generic": 0,
+   "global": 4,
+   "insns": 3112
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4geluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 226,
+   "generic": 0,
+   "global": 4,
+   "insns": 3160
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4geluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 226,
+   "generic": 0,
+   "global": 4,
+   "insns": 3112
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4geluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 2,
+   "insns": 2296
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4geluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 34,
+   "generic": 0,
+   "global": 2,
+   "insns": 2232
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4geluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 226,
+   "generic": 0,
+   "global": 4,
+   "insns": 3160
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4geluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 2,
+   "insns": 2320
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4geluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 34,
+   "generic": 0,
+   "global": 2,
+   "insns": 2248
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4geluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 226,
+   "generic": 0,
+   "global": 4,
+   "insns": 3104
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4geluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 2,
+   "insns": 2296
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4geluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 34,
+   "generic": 0,
+   "global": 2,
+   "insns": 2200
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4geluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 226,
+   "generic": 0,
+   "global": 4,
+   "insns": 3168
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4geluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 2,
+   "insns": 2320
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4geluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 34,
+   "generic": 0,
+   "global": 2,
+   "insns": 2224
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4geluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 226,
+   "generic": 0,
+   "global": 4,
+   "insns": 3104
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4geluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 2,
+   "insns": 2296
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4geluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 34,
+   "generic": 0,
+   "global": 2,
+   "insns": 2200
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4geluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 226,
+   "generic": 0,
+   "global": 4,
+   "insns": 3168
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4geluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 2,
+   "insns": 2320
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4geluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 34,
+   "generic": 0,
+   "global": 2,
+   "insns": 2224
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4geluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 226,
+   "generic": 0,
+   "global": 4,
+   "insns": 2632
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4geluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 2,
+   "insns": 2104
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4geluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 34,
+   "generic": 0,
+   "global": 2,
+   "insns": 1856
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4geluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 226,
+   "generic": 0,
+   "global": 4,
+   "insns": 2688
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4geluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 2,
+   "insns": 2128
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4geluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 34,
+   "generic": 0,
+   "global": 2,
+   "insns": 1896
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4geluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 226,
+   "generic": 0,
+   "global": 4,
+   "insns": 2632
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4geluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 2,
+   "insns": 2104
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4geluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 34,
+   "generic": 0,
+   "global": 2,
+   "insns": 1856
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4geluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 226,
+   "generic": 0,
+   "global": 4,
+   "insns": 2688
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4geluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 2,
+   "insns": 2128
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4geluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 34,
+   "generic": 0,
+   "global": 2,
+   "insns": 1896
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4reluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 226,
+   "generic": 0,
+   "global": 4,
+   "insns": 1904
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4reluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 2,
+   "insns": 1080
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4reluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 34,
+   "generic": 0,
+   "global": 2,
+   "insns": 1008
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4reluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 226,
+   "generic": 0,
+   "global": 4,
+   "insns": 1960
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4reluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 2,
+   "insns": 1104
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4reluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 34,
+   "generic": 0,
+   "global": 2,
+   "insns": 1040
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4reluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 2,
+   "insns": 1080
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4reluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 2,
+   "insns": 1104
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4reluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 226,
+   "generic": 0,
+   "global": 4,
+   "insns": 1904
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4reluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 34,
+   "generic": 0,
+   "global": 2,
+   "insns": 1008
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4reluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 226,
+   "generic": 0,
+   "global": 4,
+   "insns": 1960
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4reluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 34,
+   "generic": 0,
+   "global": 2,
+   "insns": 1040
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4reluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 226,
+   "generic": 0,
+   "global": 4,
+   "insns": 1912
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4reluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 2,
+   "insns": 1080
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4reluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 34,
+   "generic": 0,
+   "global": 2,
+   "insns": 960
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4reluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 226,
+   "generic": 0,
+   "global": 4,
+   "insns": 1960
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4reluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 2,
+   "insns": 1104
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4reluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 34,
+   "generic": 0,
+   "global": 2,
+   "insns": 984
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4reluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 226,
+   "generic": 0,
+   "global": 4,
+   "insns": 1912
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4reluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 2,
+   "insns": 1080
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4reluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 34,
+   "generic": 0,
+   "global": 2,
+   "insns": 960
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4reluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 226,
+   "generic": 0,
+   "global": 4,
+   "insns": 1960
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4reluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 2,
+   "insns": 1104
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4reluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 34,
+   "generic": 0,
+   "global": 2,
+   "insns": 984
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4reluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 226,
+   "generic": 0,
+   "global": 4,
+   "insns": 1432
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4reluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 2,
+   "insns": 888
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4reluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 34,
+   "generic": 0,
+   "global": 2,
+   "insns": 632
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4reluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 226,
+   "generic": 0,
+   "global": 4,
+   "insns": 1480
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4reluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 2,
+   "insns": 912
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4reluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 34,
+   "generic": 0,
+   "global": 2,
+   "insns": 664
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4reluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 226,
+   "generic": 0,
+   "global": 4,
+   "insns": 1432
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4reluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 2,
+   "insns": 888
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4reluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 34,
+   "generic": 0,
+   "global": 2,
+   "insns": 632
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4reluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 226,
+   "generic": 0,
+   "global": 4,
+   "insns": 1480
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4reluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 2,
+   "insns": 912
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4reluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 34,
+   "generic": 0,
+   "global": 2,
+   "insns": 664
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4siluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 226,
+   "generic": 0,
+   "global": 4,
+   "insns": 3600
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4siluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 2,
+   "insns": 2736
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4siluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 34,
+   "generic": 0,
+   "global": 2,
+   "insns": 2720
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4siluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 226,
+   "generic": 0,
+   "global": 4,
+   "insns": 3616
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4siluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 2,
+   "insns": 2768
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4siluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 34,
+   "generic": 0,
+   "global": 2,
+   "insns": 2744
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4siluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 226,
+   "generic": 0,
+   "global": 4,
+   "insns": 3600
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4siluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 2,
+   "insns": 2736
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4siluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 34,
+   "generic": 0,
+   "global": 2,
+   "insns": 2720
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4siluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 226,
+   "generic": 0,
+   "global": 4,
+   "insns": 3616
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4siluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 2,
+   "insns": 2768
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4siluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 34,
+   "generic": 0,
+   "global": 2,
+   "insns": 2744
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_5qgeluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 226,
+   "generic": 0,
+   "global": 4,
+   "insns": 3664
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_5qgeluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 2,
+   "insns": 2800
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_5qgeluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 34,
+   "generic": 0,
+   "global": 2,
+   "insns": 2784
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_5qgeluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 226,
+   "generic": 0,
+   "global": 4,
+   "insns": 3680
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_5qgeluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 2,
+   "insns": 2832
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_5qgeluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 34,
+   "generic": 0,
+   "global": 2,
+   "insns": 2808
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_5qgeluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 226,
+   "generic": 0,
+   "global": 4,
+   "insns": 3664
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_5qgeluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 2,
+   "insns": 2800
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_5qgeluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 34,
+   "generic": 0,
+   "global": 2,
+   "insns": 2784
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_5qgeluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 226,
+   "generic": 0,
+   "global": 4,
+   "insns": 3680
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_5qgeluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 2,
+   "insns": 2832
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_5qgeluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 34,
+   "generic": 0,
+   "global": 2,
+   "insns": 2808
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_5qgeluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 2,
+   "insns": 2800
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_5qgeluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 34,
+   "generic": 0,
+   "global": 2,
+   "insns": 2728
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_5qgeluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 2,
+   "insns": 2832
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_5qgeluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 34,
+   "generic": 0,
+   "global": 2,
+   "insns": 2672
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4siluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 226,
+   "generic": 0,
+   "global": 4,
+   "insns": 3600
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4siluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 2,
+   "insns": 2736
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4siluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 34,
+   "generic": 0,
+   "global": 2,
+   "insns": 2664
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4siluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 226,
+   "generic": 0,
+   "global": 4,
+   "insns": 3616
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4siluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 2,
+   "insns": 2768
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4siluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 34,
+   "generic": 0,
+   "global": 2,
+   "insns": 2608
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4siluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 226,
+   "generic": 0,
+   "global": 4,
+   "insns": 3600
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4siluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 2,
+   "insns": 2736
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4siluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 34,
+   "generic": 0,
+   "global": 2,
+   "insns": 2664
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4siluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 226,
+   "generic": 0,
+   "global": 4,
+   "insns": 3616
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4siluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 2,
+   "insns": 2768
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4siluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 34,
+   "generic": 0,
+   "global": 2,
+   "insns": 2608
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4siluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 226,
+   "generic": 0,
+   "global": 4,
+   "insns": 3080
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4siluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 2,
+   "insns": 2544
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4siluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 34,
+   "generic": 0,
+   "global": 2,
+   "insns": 2312
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4siluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 226,
+   "generic": 0,
+   "global": 4,
+   "insns": 3152
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4siluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 2,
+   "insns": 2576
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4siluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 34,
+   "generic": 0,
+   "global": 2,
+   "insns": 2344
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4siluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 226,
+   "generic": 0,
+   "global": 4,
+   "insns": 3080
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4siluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 2,
+   "insns": 2544
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4siluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 34,
+   "generic": 0,
+   "global": 2,
+   "insns": 2312
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4siluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 226,
+   "generic": 0,
+   "global": 4,
+   "insns": 3152
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4siluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 2,
+   "insns": 2576
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_4siluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 34,
+   "generic": 0,
+   "global": 2,
+   "insns": 2344
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_5qgeluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 226,
+   "generic": 0,
+   "global": 4,
+   "insns": 3664
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_5qgeluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 226,
+   "generic": 0,
+   "global": 4,
+   "insns": 3680
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_5qgeluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 226,
+   "generic": 0,
+   "global": 4,
+   "insns": 3664
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_5qgeluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 2,
+   "insns": 2800
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_5qgeluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 34,
+   "generic": 0,
+   "global": 2,
+   "insns": 2728
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_5qgeluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 226,
+   "generic": 0,
+   "global": 4,
+   "insns": 3680
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_5qgeluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 2,
+   "insns": 2832
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_5qgeluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 34,
+   "generic": 0,
+   "global": 2,
+   "insns": 2672
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_5qgeluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 226,
+   "generic": 0,
+   "global": 4,
+   "insns": 3152
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_5qgeluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 2,
+   "insns": 2608
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_5qgeluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 34,
+   "generic": 0,
+   "global": 2,
+   "insns": 2376
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_5qgeluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 226,
+   "generic": 0,
+   "global": 4,
+   "insns": 3216
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_5qgeluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 2,
+   "insns": 2640
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_5qgeluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 34,
+   "generic": 0,
+   "global": 2,
+   "insns": 2408
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_5qgeluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 226,
+   "generic": 0,
+   "global": 4,
+   "insns": 3152
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_5qgeluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 2,
+   "insns": 2608
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_5qgeluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 34,
+   "generic": 0,
+   "global": 2,
+   "insns": 2376
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_5qgeluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 226,
+   "generic": 0,
+   "global": 4,
+   "insns": 3216
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_5qgeluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 2,
+   "insns": 2640
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_5qgeluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 34,
+   "generic": 0,
+   "global": 2,
+   "insns": 2408
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_5sreluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 226,
+   "generic": 0,
+   "global": 4,
+   "insns": 2048
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_5sreluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 2,
+   "insns": 1208
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_5sreluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 34,
+   "generic": 0,
+   "global": 2,
+   "insns": 1136
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_5sreluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 226,
+   "generic": 0,
+   "global": 4,
+   "insns": 2088
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_5sreluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 2,
+   "insns": 1232
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_5sreluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 34,
+   "generic": 0,
+   "global": 2,
+   "insns": 1192
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_5sreluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 226,
+   "generic": 0,
+   "global": 4,
+   "insns": 2048
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_5sreluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 2,
+   "insns": 1208
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_5sreluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 34,
+   "generic": 0,
+   "global": 2,
+   "insns": 1136
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_5sreluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 226,
+   "generic": 0,
+   "global": 4,
+   "insns": 2088
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_5sreluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 2,
+   "insns": 1232
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_5sreluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 34,
+   "generic": 0,
+   "global": 2,
+   "insns": 1192
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_5sreluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 226,
+   "generic": 0,
+   "global": 4,
+   "insns": 2048
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_5sreluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 2,
+   "insns": 1208
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_5sreluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 34,
+   "generic": 0,
+   "global": 2,
+   "insns": 1088
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_5sreluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 226,
+   "generic": 0,
+   "global": 4,
+   "insns": 2080
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_5sreluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 2,
+   "insns": 1232
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_5sreluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 34,
+   "generic": 0,
+   "global": 2,
+   "insns": 1112
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_5sreluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 2,
+   "insns": 1208
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_5sreluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 2,
+   "insns": 1232
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dgeluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 4,
+   "insns": 3784
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dgeluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 2,
+   "insns": 2968
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dgeluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 50,
+   "generic": 0,
+   "global": 2,
+   "insns": 2896
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dgeluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 4,
+   "insns": 3840
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dgeluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 2,
+   "insns": 2992
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dgeluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 50,
+   "generic": 0,
+   "global": 2,
+   "insns": 2904
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dgeluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 4,
+   "insns": 3784
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dgeluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 2,
+   "insns": 2968
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dgeluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 50,
+   "generic": 0,
+   "global": 2,
+   "insns": 2896
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dgeluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 4,
+   "insns": 3840
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dgeluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 2,
+   "insns": 2992
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dgeluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 50,
+   "generic": 0,
+   "global": 2,
+   "insns": 2904
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dgeluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 4,
+   "insns": 3784
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dgeluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 2,
+   "insns": 2968
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dgeluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 50,
+   "generic": 0,
+   "global": 2,
+   "insns": 2840
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dgeluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 4,
+   "insns": 3840
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dgeluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 2,
+   "insns": 2992
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dgeluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 50,
+   "generic": 0,
+   "global": 2,
+   "insns": 2856
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dgeluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 4,
+   "insns": 3784
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dgeluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 2,
+   "insns": 2968
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dgeluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 50,
+   "generic": 0,
+   "global": 2,
+   "insns": 2840
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dgeluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 4,
+   "insns": 3840
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dgeluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 2,
+   "insns": 2992
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dgeluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 50,
+   "generic": 0,
+   "global": 2,
+   "insns": 2856
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_5sreluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 226,
+   "generic": 0,
+   "global": 4,
+   "insns": 2048
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_5sreluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 34,
+   "generic": 0,
+   "global": 2,
+   "insns": 1088
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_5sreluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 226,
+   "generic": 0,
+   "global": 4,
+   "insns": 2080
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_5sreluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 34,
+   "generic": 0,
+   "global": 2,
+   "insns": 1112
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_5sreluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 226,
+   "generic": 0,
+   "global": 4,
+   "insns": 1560
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_5sreluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 2,
+   "insns": 1016
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_5sreluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 34,
+   "generic": 0,
+   "global": 2,
+   "insns": 760
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_5sreluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 226,
+   "generic": 0,
+   "global": 4,
+   "insns": 1608
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_5sreluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 2,
+   "insns": 1040
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_5sreluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 34,
+   "generic": 0,
+   "global": 2,
+   "insns": 792
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_5sreluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 226,
+   "generic": 0,
+   "global": 4,
+   "insns": 1560
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_5sreluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 2,
+   "insns": 1016
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_5sreluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 34,
+   "generic": 0,
+   "global": 2,
+   "insns": 760
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_5sreluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 226,
+   "generic": 0,
+   "global": 4,
+   "insns": 1608
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_5sreluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 2,
+   "insns": 1040
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb0ELb1ENS_5EmptyEXadL_ZNS_5sreluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 34,
+   "generic": 0,
+   "global": 2,
+   "insns": 792
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dgeluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 4,
+   "insns": 3248
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dgeluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 2,
+   "insns": 2712
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dgeluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 50,
+   "generic": 0,
+   "global": 2,
+   "insns": 2416
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dgeluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 4,
+   "insns": 3304
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dgeluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 2,
+   "insns": 2736
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dgeluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 50,
+   "generic": 0,
+   "global": 2,
+   "insns": 2440
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dgeluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 4,
+   "insns": 3248
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dgeluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 2,
+   "insns": 2712
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dgeluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 50,
+   "generic": 0,
+   "global": 2,
+   "insns": 2416
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dgeluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 4,
+   "insns": 3304
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dgeluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 2,
+   "insns": 2736
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dgeluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 50,
+   "generic": 0,
+   "global": 2,
+   "insns": 2440
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dreluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 4,
+   "insns": 2152
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dreluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 2,
+   "insns": 1304
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dreluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 50,
+   "generic": 0,
+   "global": 2,
+   "insns": 1216
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dreluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 4,
+   "insns": 2152
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dreluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 2,
+   "insns": 1320
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dreluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 50,
+   "generic": 0,
+   "global": 2,
+   "insns": 1248
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dreluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 4,
+   "insns": 2152
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dreluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 2,
+   "insns": 1304
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dreluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 50,
+   "generic": 0,
+   "global": 2,
+   "insns": 1216
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dreluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 4,
+   "insns": 2152
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dreluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 2,
+   "insns": 1320
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dreluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 50,
+   "generic": 0,
+   "global": 2,
+   "insns": 1248
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dreluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 4,
+   "insns": 2144
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dreluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 2,
+   "insns": 1304
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dreluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 50,
+   "generic": 0,
+   "global": 2,
+   "insns": 1168
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dreluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 4,
+   "insns": 2152
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dreluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 2,
+   "insns": 1320
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dreluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 50,
+   "generic": 0,
+   "global": 2,
+   "insns": 1192
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dreluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 4,
+   "insns": 2144
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dreluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 2,
+   "insns": 1304
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dreluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 50,
+   "generic": 0,
+   "global": 2,
+   "insns": 1168
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dreluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 4,
+   "insns": 2152
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dreluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 2,
+   "insns": 1320
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dreluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 50,
+   "generic": 0,
+   "global": 2,
+   "insns": 1192
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dreluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 2,
+   "insns": 1048
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dreluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 50,
+   "generic": 0,
+   "global": 2,
+   "insns": 752
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dreluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 2,
+   "insns": 1064
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dreluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 50,
+   "generic": 0,
+   "global": 2,
+   "insns": 784
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dreluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 4,
+   "insns": 1584
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dreluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 4,
+   "insns": 1648
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dreluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 4,
+   "insns": 1584
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dreluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 2,
+   "insns": 1048
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dreluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 50,
+   "generic": 0,
+   "global": 2,
+   "insns": 752
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dreluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 4,
+   "insns": 1648
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dreluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 2,
+   "insns": 1064
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dreluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 50,
+   "generic": 0,
+   "global": 2,
+   "insns": 784
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dsiluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 4,
+   "insns": 3968
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dsiluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 2,
+   "insns": 3144
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dsiluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 50,
+   "generic": 0,
+   "global": 2,
+   "insns": 3024
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dsiluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 4,
+   "insns": 3984
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dsiluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 2,
+   "insns": 3120
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dsiluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 50,
+   "generic": 0,
+   "global": 2,
+   "insns": 3064
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dsiluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 4,
+   "insns": 3968
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dsiluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 2,
+   "insns": 3144
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dsiluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 50,
+   "generic": 0,
+   "global": 2,
+   "insns": 3024
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dsiluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 4,
+   "insns": 3984
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dsiluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 2,
+   "insns": 3120
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dsiluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 50,
+   "generic": 0,
+   "global": 2,
+   "insns": 3064
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dsiluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 4,
+   "insns": 3960
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dsiluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 2,
+   "insns": 3136
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dsiluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 50,
+   "generic": 0,
+   "global": 2,
+   "insns": 2952
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dsiluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 4,
+   "insns": 3968
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dsiluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 2,
+   "insns": 3120
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dsiluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 50,
+   "generic": 0,
+   "global": 2,
+   "insns": 2976
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dsiluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 4,
+   "insns": 3960
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dsiluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 2,
+   "insns": 3136
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dsiluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 50,
+   "generic": 0,
+   "global": 2,
+   "insns": 2952
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dsiluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 4,
+   "insns": 3968
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dsiluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 2,
+   "insns": 3120
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dsiluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 50,
+   "generic": 0,
+   "global": 2,
+   "insns": 2976
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dsiluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 4,
+   "insns": 3344
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dsiluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 2,
+   "insns": 2848
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dsiluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 50,
+   "generic": 0,
+   "global": 2,
+   "insns": 2584
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dsiluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 4,
+   "insns": 3448
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dsiluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 2,
+   "insns": 2872
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dsiluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 50,
+   "generic": 0,
+   "global": 2,
+   "insns": 2600
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dsiluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 2,
+   "insns": 2848
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dsiluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 2,
+   "insns": 2872
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_6dqgeluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 4,
+   "insns": 4032
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_6dqgeluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 2,
+   "insns": 3200
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_6dqgeluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 50,
+   "generic": 0,
+   "global": 2,
+   "insns": 3096
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_6dqgeluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 4,
+   "insns": 4048
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_6dqgeluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 2,
+   "insns": 3184
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_6dqgeluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 50,
+   "generic": 0,
+   "global": 2,
+   "insns": 3136
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_6dqgeluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 4,
+   "insns": 4032
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_6dqgeluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 2,
+   "insns": 3200
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_6dqgeluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 50,
+   "generic": 0,
+   "global": 2,
+   "insns": 3096
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_6dqgeluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 4,
+   "insns": 4048
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_6dqgeluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 2,
+   "insns": 3184
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_6dqgeluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 50,
+   "generic": 0,
+   "global": 2,
+   "insns": 3136
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_6dqgeluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 4,
+   "insns": 4016
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_6dqgeluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 2,
+   "insns": 3200
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_6dqgeluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 50,
+   "generic": 0,
+   "global": 2,
+   "insns": 3016
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_6dqgeluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 4,
+   "insns": 4040
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_6dqgeluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 2,
+   "insns": 3184
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_6dqgeluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 50,
+   "generic": 0,
+   "global": 2,
+   "insns": 3040
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_6dqgeluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 4,
+   "insns": 4016
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_6dqgeluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 2,
+   "insns": 3200
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_6dqgeluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 50,
+   "generic": 0,
+   "global": 2,
+   "insns": 3016
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_6dqgeluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 4,
+   "insns": 4040
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_6dqgeluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 2,
+   "insns": 3184
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_6dqgeluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 50,
+   "generic": 0,
+   "global": 2,
+   "insns": 3040
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_6dqgeluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 4,
+   "insns": 3408
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_6dqgeluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 2,
+   "insns": 2912
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_6dqgeluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 50,
+   "generic": 0,
+   "global": 2,
+   "insns": 2624
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_6dqgeluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 4,
+   "insns": 3512
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_6dqgeluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 2,
+   "insns": 2936
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_6dqgeluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 50,
+   "generic": 0,
+   "global": 2,
+   "insns": 2664
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_6dqgeluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 4,
+   "insns": 3408
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_6dqgeluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 2,
+   "insns": 2912
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_6dqgeluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 50,
+   "generic": 0,
+   "global": 2,
+   "insns": 2624
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_6dqgeluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 4,
+   "insns": 3512
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_6dqgeluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 2,
+   "insns": 2936
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_6dqgeluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 50,
+   "generic": 0,
+   "global": 2,
+   "insns": 2664
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dsiluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 4,
+   "insns": 3344
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dsiluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 50,
+   "generic": 0,
+   "global": 2,
+   "insns": 2584
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dsiluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 4,
+   "insns": 3448
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_5dsiluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 50,
+   "generic": 0,
+   "global": 2,
+   "insns": 2600
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_6dsreluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 4,
+   "insns": 2208
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_6dsreluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 2,
+   "insns": 1368
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_6dsreluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 50,
+   "generic": 0,
+   "global": 2,
+   "insns": 1280
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_6dsreluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 4,
+   "insns": 2216
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_6dsreluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 2,
+   "insns": 1384
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_6dsreluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 50,
+   "generic": 0,
+   "global": 2,
+   "insns": 1304
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_6dsreluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 4,
+   "insns": 2208
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_6dsreluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 2,
+   "insns": 1368
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_6dsreluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 50,
+   "generic": 0,
+   "global": 2,
+   "insns": 1280
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_6dsreluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 4,
+   "insns": 2216
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_6dsreluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 2,
+   "insns": 1384
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_6dsreluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 50,
+   "generic": 0,
+   "global": 2,
+   "insns": 1304
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_6dsreluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 4,
+   "insns": 2200
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_6dsreluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 2,
+   "insns": 1368
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_6dsreluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 50,
+   "generic": 0,
+   "global": 2,
+   "insns": 1232
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_6dsreluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 4,
+   "insns": 2208
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_6dsreluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 2,
+   "insns": 1384
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_6dsreluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 50,
+   "generic": 0,
+   "global": 2,
+   "insns": 1256
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_6dsreluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 4,
+   "insns": 2200
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_6dsreluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 2,
+   "insns": 1368
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_6dsreluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 50,
+   "generic": 0,
+   "global": 2,
+   "insns": 1232
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_6dsreluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 4,
+   "insns": 2208
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_6dsreluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 2,
+   "insns": 1384
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_6dsreluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 50,
+   "generic": 0,
+   "global": 2,
+   "insns": 1256
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_6dsreluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 4,
+   "insns": 1648
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_6dsreluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 2,
+   "insns": 1112
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_6dsreluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 50,
+   "generic": 0,
+   "global": 2,
+   "insns": 816
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_6dsreluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 4,
+   "insns": 1712
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_6dsreluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 2,
+   "insns": 1128
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_6dsreluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 50,
+   "generic": 0,
+   "global": 2,
+   "insns": 840
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_6dsreluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 4,
+   "insns": 1648
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_6dsreluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 2,
+   "insns": 1112
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_6dsreluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 50,
+   "generic": 0,
+   "global": 2,
+   "insns": 816
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_6dsreluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 4,
+   "insns": 1712
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_6dsreluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 2,
+   "insns": 1128
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb0ELb1ELb0ENS_5EmptyEXadL_ZNS_6dsreluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 50,
+   "generic": 0,
+   "global": 2,
+   "insns": 840
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb0ELb0ENS_5EmptyELPFffRKS4_E0E13__nv_bfloat1613__nv_fp8_e4m3Lb0ELb1ELb0ELm128ELm128ELm128EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 258,
+   "generic": 0,
+   "global": 6,
+   "insns": 1504
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb0ELb0ENS_5EmptyELPFffRKS4_E0E13__nv_bfloat1613__nv_fp8_e4m3Lb1ELb0ELb0ELm128ELm128ELm128EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 6,
+   "insns": 1744
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb0ELb0ENS_5EmptyELPFffRKS4_E0E13__nv_bfloat1613__nv_fp8_e4m3Lb0ELb1ELb1ELm128ELm128ELm128EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 258,
+   "generic": 0,
+   "global": 6,
+   "insns": 1496
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb0ELb0ENS_5EmptyELPFffRKS4_E0E13__nv_bfloat1613__nv_fp8_e4m3Lb1ELb0ELb1ELm128ELm128ELm128EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 6,
+   "insns": 1800
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dgeluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 5,
+   "insns": 3864
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dgeluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 3,
+   "insns": 3048
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dgeluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 114,
+   "generic": 0,
+   "global": 3,
+   "insns": 3080
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dgeluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 5,
+   "insns": 3920
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dgeluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 3,
+   "insns": 3064
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dgeluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 114,
+   "generic": 0,
+   "global": 3,
+   "insns": 3112
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dgeluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 3,
+   "insns": 3048
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dgeluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 3,
+   "insns": 3064
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb0ELb0ENS_5EmptyELPFffRKS4_E0E13__nv_bfloat1613__nv_fp8_e4m3Lb1ELb1ELb0ELm128ELm128ELm128EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 322,
+   "generic": 0,
+   "global": 10,
+   "insns": 2688
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb0ELb0ENS_5EmptyELPFffRKS4_E0E13__nv_bfloat1613__nv_fp8_e4m3Lb1ELb1ELb1ELm128ELm128ELm128EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 322,
+   "generic": 0,
+   "global": 10,
+   "insns": 2736
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb0ELb0ENS_5EmptyELPFffRKS4_E0E13__nv_bfloat1613__nv_fp8_e5m2Lb1ELb1ELb0ELm128ELm128ELm128EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 322,
+   "generic": 0,
+   "global": 10,
+   "insns": 2688
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb0ELb0ENS_5EmptyELPFffRKS4_E0E13__nv_bfloat1613__nv_fp8_e5m2Lb0ELb1ELb0ELm128ELm128ELm128EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 258,
+   "generic": 0,
+   "global": 6,
+   "insns": 1504
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb0ELb0ENS_5EmptyELPFffRKS4_E0E13__nv_bfloat1613__nv_fp8_e5m2Lb1ELb0ELb0ELm128ELm128ELm128EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 6,
+   "insns": 1744
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb0ELb0ENS_5EmptyELPFffRKS4_E0E13__nv_bfloat1613__nv_fp8_e5m2Lb1ELb1ELb1ELm128ELm128ELm128EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 322,
+   "generic": 0,
+   "global": 10,
+   "insns": 2736
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb0ELb0ENS_5EmptyELPFffRKS4_E0E13__nv_bfloat1613__nv_fp8_e5m2Lb0ELb1ELb1ELm128ELm128ELm128EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 258,
+   "generic": 0,
+   "global": 6,
+   "insns": 1496
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb0ELb0ENS_5EmptyELPFffRKS4_E0E13__nv_bfloat1613__nv_fp8_e5m2Lb1ELb0ELb1ELm128ELm128ELm128EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 6,
+   "insns": 1800
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb0ELb0ENS_5EmptyELPFffRKS4_E0E6__half13__nv_fp8_e4m3Lb1ELb1ELb0ELm128ELm128ELm128EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 322,
+   "generic": 0,
+   "global": 10,
+   "insns": 2584
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb0ELb0ENS_5EmptyELPFffRKS4_E0E6__half13__nv_fp8_e4m3Lb0ELb1ELb0ELm128ELm128ELm128EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 258,
+   "generic": 0,
+   "global": 6,
+   "insns": 1504
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb0ELb0ENS_5EmptyELPFffRKS4_E0E6__half13__nv_fp8_e4m3Lb1ELb0ELb0ELm128ELm128ELm128EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 6,
+   "insns": 1648
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb0ELb0ENS_5EmptyELPFffRKS4_E0E6__half13__nv_fp8_e4m3Lb1ELb1ELb1ELm128ELm128ELm128EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 322,
+   "generic": 0,
+   "global": 10,
+   "insns": 2632
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb0ELb0ENS_5EmptyELPFffRKS4_E0E6__half13__nv_fp8_e4m3Lb0ELb1ELb1ELm128ELm128ELm128EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 258,
+   "generic": 0,
+   "global": 6,
+   "insns": 1496
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb0ELb0ENS_5EmptyELPFffRKS4_E0E6__half13__nv_fp8_e4m3Lb1ELb0ELb1ELm128ELm128ELm128EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 6,
+   "insns": 1720
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb0ELb0ENS_5EmptyELPFffRKS4_E0E6__half13__nv_fp8_e5m2Lb1ELb1ELb0ELm128ELm128ELm128EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 322,
+   "generic": 0,
+   "global": 10,
+   "insns": 2584
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb0ELb0ENS_5EmptyELPFffRKS4_E0E6__half13__nv_fp8_e5m2Lb0ELb1ELb0ELm128ELm128ELm128EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 258,
+   "generic": 0,
+   "global": 6,
+   "insns": 1504
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb0ELb0ENS_5EmptyELPFffRKS4_E0E6__half13__nv_fp8_e5m2Lb1ELb0ELb0ELm128ELm128ELm128EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 6,
+   "insns": 1648
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb0ELb0ENS_5EmptyELPFffRKS4_E0E6__half13__nv_fp8_e5m2Lb1ELb1ELb1ELm128ELm128ELm128EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 322,
+   "generic": 0,
+   "global": 10,
+   "insns": 2632
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb0ELb0ENS_5EmptyELPFffRKS4_E0E6__half13__nv_fp8_e5m2Lb0ELb1ELb1ELm128ELm128ELm128EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 258,
+   "generic": 0,
+   "global": 6,
+   "insns": 1496
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb0ELb0ENS_5EmptyELPFffRKS4_E0E6__half13__nv_fp8_e5m2Lb1ELb0ELb1ELm128ELm128ELm128EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 6,
+   "insns": 1720
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb0ELb0ENS_5EmptyELPFffRKS4_E0Ef13__nv_fp8_e4m3Lb1ELb1ELb0ELm128ELm128ELm128EEEv14CUtensorMap_stSA_SA_SA_PhSB_PKfPfSE_mmmm": {
+   "shared": 322,
+   "generic": 0,
+   "global": 10,
+   "insns": 1536
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb0ELb0ENS_5EmptyELPFffRKS4_E0Ef13__nv_fp8_e4m3Lb0ELb1ELb0ELm128ELm128ELm128EEEv14CUtensorMap_stSA_SA_SA_PhSB_PKfPfSE_mmmm": {
+   "shared": 258,
+   "generic": 0,
+   "global": 6,
+   "insns": 1120
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb0ELb0ENS_5EmptyELPFffRKS4_E0Ef13__nv_fp8_e4m3Lb1ELb0ELb0ELm128ELm128ELm128EEEv14CUtensorMap_stSA_SA_SA_PhSB_PKfPfSE_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 6,
+   "insns": 1000
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb0ELb0ENS_5EmptyELPFffRKS4_E0Ef13__nv_fp8_e4m3Lb1ELb1ELb1ELm128ELm128ELm128EEEv14CUtensorMap_stSA_SA_SA_PhSB_PKfPfSE_mmmm": {
+   "shared": 322,
+   "generic": 0,
+   "global": 10,
+   "insns": 1592
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb0ELb0ENS_5EmptyELPFffRKS4_E0Ef13__nv_fp8_e4m3Lb0ELb1ELb1ELm128ELm128ELm128EEEv14CUtensorMap_stSA_SA_SA_PhSB_PKfPfSE_mmmm": {
+   "shared": 258,
+   "generic": 0,
+   "global": 6,
+   "insns": 1104
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb0ELb0ENS_5EmptyELPFffRKS4_E0Ef13__nv_fp8_e4m3Lb1ELb0ELb1ELm128ELm128ELm128EEEv14CUtensorMap_stSA_SA_SA_PhSB_PKfPfSE_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 6,
+   "insns": 1056
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb0ELb0ENS_5EmptyELPFffRKS4_E0Ef13__nv_fp8_e5m2Lb1ELb1ELb0ELm128ELm128ELm128EEEv14CUtensorMap_stSA_SA_SA_PhSB_PKfPfSE_mmmm": {
+   "shared": 322,
+   "generic": 0,
+   "global": 10,
+   "insns": 1536
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb0ELb0ENS_5EmptyELPFffRKS4_E0Ef13__nv_fp8_e5m2Lb0ELb1ELb0ELm128ELm128ELm128EEEv14CUtensorMap_stSA_SA_SA_PhSB_PKfPfSE_mmmm": {
+   "shared": 258,
+   "generic": 0,
+   "global": 6,
+   "insns": 1120
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb0ELb0ENS_5EmptyELPFffRKS4_E0Ef13__nv_fp8_e5m2Lb1ELb0ELb0ELm128ELm128ELm128EEEv14CUtensorMap_stSA_SA_SA_PhSB_PKfPfSE_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 6,
+   "insns": 1000
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb0ELb0ENS_5EmptyELPFffRKS4_E0Ef13__nv_fp8_e5m2Lb1ELb1ELb1ELm128ELm128ELm128EEEv14CUtensorMap_stSA_SA_SA_PhSB_PKfPfSE_mmmm": {
+   "shared": 322,
+   "generic": 0,
+   "global": 10,
+   "insns": 1592
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb0ELb0ENS_5EmptyELPFffRKS4_E0Ef13__nv_fp8_e5m2Lb0ELb1ELb1ELm128ELm128ELm128EEEv14CUtensorMap_stSA_SA_SA_PhSB_PKfPfSE_mmmm": {
+   "shared": 258,
+   "generic": 0,
+   "global": 6,
+   "insns": 1104
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb0ELb0ENS_5EmptyELPFffRKS4_E0Ef13__nv_fp8_e5m2Lb1ELb0ELb1ELm128ELm128ELm128EEEv14CUtensorMap_stSA_SA_SA_PhSB_PKfPfSE_mmmm": {
+   "shared": 130,
+   "generic": 0,
+   "global": 6,
+   "insns": 1056
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dgeluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 5,
+   "insns": 3864
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dgeluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 114,
+   "generic": 0,
+   "global": 3,
+   "insns": 3080
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dgeluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 5,
+   "insns": 3920
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dgeluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 114,
+   "generic": 0,
+   "global": 3,
+   "insns": 3112
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dgeluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 5,
+   "insns": 3864
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dgeluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 3,
+   "insns": 3048
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dgeluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 114,
+   "generic": 0,
+   "global": 3,
+   "insns": 3048
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dgeluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 5,
+   "insns": 3912
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dgeluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 3,
+   "insns": 3064
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dgeluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 114,
+   "generic": 0,
+   "global": 3,
+   "insns": 3072
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dgeluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 5,
+   "insns": 3864
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dgeluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 3,
+   "insns": 3048
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dgeluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 114,
+   "generic": 0,
+   "global": 3,
+   "insns": 3048
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dgeluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 5,
+   "insns": 3912
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dgeluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 3,
+   "insns": 3064
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dgeluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 114,
+   "generic": 0,
+   "global": 3,
+   "insns": 3072
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dgeluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 5,
+   "insns": 3328
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dgeluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 3,
+   "insns": 2784
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dgeluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 114,
+   "generic": 0,
+   "global": 3,
+   "insns": 2608
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dgeluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 5,
+   "insns": 3384
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dgeluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 3,
+   "insns": 2808
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dgeluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 114,
+   "generic": 0,
+   "global": 3,
+   "insns": 2632
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dgeluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 5,
+   "insns": 3328
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dgeluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 3,
+   "insns": 2784
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dgeluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 114,
+   "generic": 0,
+   "global": 3,
+   "insns": 2608
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dgeluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 5,
+   "insns": 3384
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dgeluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 3,
+   "insns": 2808
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dgeluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 114,
+   "generic": 0,
+   "global": 3,
+   "insns": 2632
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dreluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 5,
+   "insns": 2208
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dreluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 3,
+   "insns": 1376
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dreluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 114,
+   "generic": 0,
+   "global": 3,
+   "insns": 1416
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dreluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 5,
+   "insns": 2256
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dreluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 3,
+   "insns": 1400
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dreluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 114,
+   "generic": 0,
+   "global": 3,
+   "insns": 1432
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dreluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 5,
+   "insns": 2208
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dreluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 3,
+   "insns": 1376
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dreluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 114,
+   "generic": 0,
+   "global": 3,
+   "insns": 1416
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dreluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 5,
+   "insns": 2256
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dreluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 3,
+   "insns": 1400
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dreluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 114,
+   "generic": 0,
+   "global": 3,
+   "insns": 1432
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dreluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 5,
+   "insns": 2208
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dreluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 3,
+   "insns": 1376
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dreluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 114,
+   "generic": 0,
+   "global": 3,
+   "insns": 1384
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dreluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 5,
+   "insns": 2256
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dreluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 3,
+   "insns": 1400
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dreluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 114,
+   "generic": 0,
+   "global": 3,
+   "insns": 1400
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dreluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 5,
+   "insns": 2208
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dreluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 3,
+   "insns": 1376
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dreluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 114,
+   "generic": 0,
+   "global": 3,
+   "insns": 1384
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dreluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 5,
+   "insns": 2256
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dreluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 3,
+   "insns": 1400
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dreluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 114,
+   "generic": 0,
+   "global": 3,
+   "insns": 1400
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dreluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 5,
+   "insns": 1672
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dreluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 3,
+   "insns": 1120
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dreluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 114,
+   "generic": 0,
+   "global": 3,
+   "insns": 944
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dreluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 5,
+   "insns": 1736
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dreluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 3,
+   "insns": 1144
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dreluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 114,
+   "generic": 0,
+   "global": 3,
+   "insns": 968
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dreluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 5,
+   "insns": 1672
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dreluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 3,
+   "insns": 1120
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dreluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 114,
+   "generic": 0,
+   "global": 3,
+   "insns": 944
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dreluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 5,
+   "insns": 1736
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dreluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 3,
+   "insns": 1144
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dreluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 114,
+   "generic": 0,
+   "global": 3,
+   "insns": 968
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dsiluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 5,
+   "insns": 4000
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dsiluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 3,
+   "insns": 3200
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dsiluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 114,
+   "generic": 0,
+   "global": 3,
+   "insns": 3208
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dsiluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 5,
+   "insns": 4056
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dsiluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 3,
+   "insns": 3248
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dsiluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 114,
+   "generic": 0,
+   "global": 3,
+   "insns": 3200
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dsiluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 5,
+   "insns": 4000
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dsiluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 3,
+   "insns": 3200
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dsiluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 114,
+   "generic": 0,
+   "global": 3,
+   "insns": 3208
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dsiluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 5,
+   "insns": 4056
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dsiluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 3,
+   "insns": 3248
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dsiluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 114,
+   "generic": 0,
+   "global": 3,
+   "insns": 3200
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dsiluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 3,
+   "insns": 3200
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dsiluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 114,
+   "generic": 0,
+   "global": 3,
+   "insns": 3184
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dsiluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 3,
+   "insns": 3256
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dsiluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 114,
+   "generic": 0,
+   "global": 3,
+   "insns": 3168
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_6dqgeluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 5,
+   "insns": 4072
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_6dqgeluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 3,
+   "insns": 3264
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_6dqgeluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 114,
+   "generic": 0,
+   "global": 3,
+   "insns": 3272
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_6dqgeluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 5,
+   "insns": 4128
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_6dqgeluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 3,
+   "insns": 3312
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_6dqgeluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 114,
+   "generic": 0,
+   "global": 3,
+   "insns": 3264
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_6dqgeluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 5,
+   "insns": 4072
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_6dqgeluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 3,
+   "insns": 3264
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_6dqgeluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 114,
+   "generic": 0,
+   "global": 3,
+   "insns": 3272
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_6dqgeluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 5,
+   "insns": 4128
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_6dqgeluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 3,
+   "insns": 3312
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_6dqgeluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 114,
+   "generic": 0,
+   "global": 3,
+   "insns": 3264
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_6dqgeluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 5,
+   "insns": 4064
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_6dqgeluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 3,
+   "insns": 3264
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_6dqgeluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 114,
+   "generic": 0,
+   "global": 3,
+   "insns": 3256
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_6dqgeluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 5,
+   "insns": 4128
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_6dqgeluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 3,
+   "insns": 3320
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_6dqgeluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 114,
+   "generic": 0,
+   "global": 3,
+   "insns": 3232
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_6dqgeluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 3,
+   "insns": 3264
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_6dqgeluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 3,
+   "insns": 3320
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dsiluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 5,
+   "insns": 4008
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dsiluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 5,
+   "insns": 4056
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dsiluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 5,
+   "insns": 4008
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dsiluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 3,
+   "insns": 3200
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dsiluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 114,
+   "generic": 0,
+   "global": 3,
+   "insns": 3184
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dsiluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 5,
+   "insns": 4056
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dsiluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 3,
+   "insns": 3256
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dsiluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 114,
+   "generic": 0,
+   "global": 3,
+   "insns": 3168
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dsiluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 5,
+   "insns": 3456
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dsiluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 3,
+   "insns": 2968
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dsiluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 114,
+   "generic": 0,
+   "global": 3,
+   "insns": 2768
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dsiluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 5,
+   "insns": 3528
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dsiluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 3,
+   "insns": 3000
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dsiluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 114,
+   "generic": 0,
+   "global": 3,
+   "insns": 2768
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dsiluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 5,
+   "insns": 3456
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dsiluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 3,
+   "insns": 2968
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dsiluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 114,
+   "generic": 0,
+   "global": 3,
+   "insns": 2768
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dsiluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 5,
+   "insns": 3528
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dsiluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 3,
+   "insns": 3000
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_5dsiluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 114,
+   "generic": 0,
+   "global": 3,
+   "insns": 2768
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_6dqgeluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 5,
+   "insns": 4064
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_6dqgeluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 114,
+   "generic": 0,
+   "global": 3,
+   "insns": 3256
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_6dqgeluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 5,
+   "insns": 4128
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_6dqgeluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 114,
+   "generic": 0,
+   "global": 3,
+   "insns": 3232
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_6dqgeluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 5,
+   "insns": 3520
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_6dqgeluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 3,
+   "insns": 3016
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_6dqgeluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 114,
+   "generic": 0,
+   "global": 3,
+   "insns": 2840
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_6dqgeluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 5,
+   "insns": 3592
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_6dqgeluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 3,
+   "insns": 3064
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_6dqgeluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 114,
+   "generic": 0,
+   "global": 3,
+   "insns": 2832
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_6dqgeluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 5,
+   "insns": 3520
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_6dqgeluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 3,
+   "insns": 3016
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_6dqgeluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 114,
+   "generic": 0,
+   "global": 3,
+   "insns": 2840
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_6dqgeluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 5,
+   "insns": 3592
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_6dqgeluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 3,
+   "insns": 3064
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_6dqgeluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 114,
+   "generic": 0,
+   "global": 3,
+   "insns": 2832
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_6dsreluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 5,
+   "insns": 2272
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_6dsreluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 3,
+   "insns": 1440
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_6dsreluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 114,
+   "generic": 0,
+   "global": 3,
+   "insns": 1480
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_6dsreluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 5,
+   "insns": 2320
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_6dsreluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 3,
+   "insns": 1464
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_6dsreluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e4m3Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 114,
+   "generic": 0,
+   "global": 3,
+   "insns": 1496
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_6dsreluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 5,
+   "insns": 2272
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_6dsreluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 3,
+   "insns": 1440
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_6dsreluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 114,
+   "generic": 0,
+   "global": 3,
+   "insns": 1480
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_6dsreluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 5,
+   "insns": 2320
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_6dsreluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 3,
+   "insns": 1464
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_6dsreluIffEET_T0_RKS4_EE13__nv_bfloat1613__nv_fp8_e5m2Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 114,
+   "generic": 0,
+   "global": 3,
+   "insns": 1496
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_6dsreluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 5,
+   "insns": 2272
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_6dsreluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 3,
+   "insns": 1440
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_6dsreluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 114,
+   "generic": 0,
+   "global": 3,
+   "insns": 1448
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_6dsreluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 5,
+   "insns": 2320
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_6dsreluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 3,
+   "insns": 1464
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_6dsreluIffEET_T0_RKS4_EE6__half13__nv_fp8_e4m3Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 114,
+   "generic": 0,
+   "global": 3,
+   "insns": 1464
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_6dsreluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 5,
+   "insns": 2272
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_6dsreluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 3,
+   "insns": 1440
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_6dsreluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 114,
+   "generic": 0,
+   "global": 3,
+   "insns": 1448
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_6dsreluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 5,
+   "insns": 2320
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_6dsreluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 3,
+   "insns": 1464
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_6dsreluIffEET_T0_RKS4_EE6__half13__nv_fp8_e5m2Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSC_SC_SC_PhSD_PKfPfSG_mmmm": {
+   "shared": 114,
+   "generic": 0,
+   "global": 3,
+   "insns": 1464
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_6dsreluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 5,
+   "insns": 1736
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_6dsreluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 3,
+   "insns": 1184
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_6dsreluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 114,
+   "generic": 0,
+   "global": 3,
+   "insns": 1008
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_6dsreluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 5,
+   "insns": 1800
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_6dsreluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 3,
+   "insns": 1208
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_6dsreluIffEET_T0_RKS4_EEf13__nv_fp8_e4m3Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 114,
+   "generic": 0,
+   "global": 3,
+   "insns": 1032
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_6dsreluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb1ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 5,
+   "insns": 1736
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_6dsreluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb0ELb1ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 3,
+   "insns": 1184
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_6dsreluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb1ELb0ELb0ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 114,
+   "generic": 0,
+   "global": 3,
+   "insns": 1008
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_6dsreluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb1ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 290,
+   "generic": 0,
+   "global": 5,
+   "insns": 1800
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_6dsreluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb0ELb1ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 194,
+   "generic": 0,
+   "global": 3,
+   "insns": 1208
+  },
+  "_ZN18transformer_engine8dispatch5mxfp815quantize_kernel21quantize_mxfp8_kernelILb1ELb1ELb0ENS_5EmptyEXadL_ZNS_6dsreluIffEET_T0_RKS4_EEf13__nv_fp8_e5m2Lb1ELb0ELb1ELm64ELm64ELm64EEEv14CUtensorMap_stSB_SB_SB_PhSC_PKfPfSF_mmmm": {
+   "shared": 114,
+   "generic": 0,
+   "global": 3,
+   "insns": 1032
+  }
+ },
+ "missing": []
+}

@@ -1,0 +1,7 @@
+# Prebuilt libraries under test (~150 MB each) and raw nsys captures.
+# Needed to re-run run_nsys_all.sh, but far too large to track. The derived
+# CSV/JSON that the report generators actually read ARE tracked.
+*.so
+*.nsys-rep
+*.sqlite
+__pycache__/
