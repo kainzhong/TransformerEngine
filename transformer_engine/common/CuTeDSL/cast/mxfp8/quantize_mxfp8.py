@@ -260,6 +260,15 @@ def quantize_rowwise_mxfp8(
 
         # Each wave we read PACK_SIZE elements, and we have WAVES waves, so we read WAVES * PACK_SIZE (= MXFP8_BLOCK_SCALING_SIZE) elements in total.
         in_r = [[None] * PACK_SIZE for _ in range(WAVES)]
+        # Hoisted OOB bounds (mirrors col_out_of_bounds_colwise in the CUDA kernel).
+        # The row index is invariant across both loops, and the column index only changes
+        # per wave: a PACK_SIZE group can never straddle N because `start` is PACK_SIZE-
+        # aligned (offset = bank_group * PACK_SIZE) and sym_N carries divisibility=16.
+        # Declared unconditionally because CuTeDSL requires values read inside staged
+        # control flow to be bound in the enclosing scope; when SKIP_MASKING is set these
+        # are unread and get dead-code-eliminated.
+        row_oob = (tile_row_start + tidx // CTA_THREADS_X) >= M
+        col_base = tile_col_start + (tidx % CTA_THREADS_X) * MXFP8_BLOCK_SCALING_SIZE
         for w in cutlass.range_constexpr(WAVES):
             start = (w * PACK_SIZE + offset) % MXFP8_BLOCK_SCALING_SIZE
             for i in cutlass.range_constexpr(PACK_SIZE):
@@ -273,19 +282,11 @@ def quantize_rowwise_mxfp8(
                     if not cutlass.const_expr(FUSE_RELU):
                         x = op(x)
                     if not cutlass.const_expr(SKIP_MASKING):
-                        # If the input shape is not divisible by the tile size,
-                        # TMA would zero-fills the input tile outside its logical MxN bounds.
-                        # This is fine for non-activation cases, but for activation cases,
-                        # op(0) might not be 0 which will pollute the amax and dbias.
-                        # So we must manually mask the OOB region here.
-                        global_row = tile_row_start + tidx // CTA_THREADS_X
-                        global_col = (
-                            tile_col_start
-                            + (tidx % CTA_THREADS_X) * MXFP8_BLOCK_SCALING_SIZE
-                            + start
-                            + i
-                        )
-                        if global_row >= M or global_col >= N:
+                        # TMA zero-fills OOB lanes; op(0) might not be 0, which would
+                        # pollute the amax and dbias. Operands are hoisted above; `start`
+                        # is constexpr so this compare is invariant across the PACK_SIZE
+                        # body and collapses to one test per wave.
+                        if row_oob or (col_base + start) >= N:
                             x = Float32(0.0)
                 # Accumulate to the per-thread dbias register buffer for this tile if WITH_DBIAS
                 if cutlass.const_expr(WITH_DBIAS):
@@ -413,17 +414,18 @@ def quantize_colwise_mxfp8(
                 rX_thread_f32[i] = rX_thread_f32[i] * dop(Float32(sA_thread[i]))
         elif cutlass.const_expr(WITH_ACT):
             op = SUPPORTED_ACTIVATIONS[ACTIVATION]
+            # Must be declared before the loop that reads it: CuTeDSL requires values used
+            # inside staged control flow to exist before the region reading them.
+            # Hoisted: the column index is invariant across this unrolled loop (mirrors
+            # col_out_of_bounds_colwise in the CUDA kernel), leaving only the row compare
+            # per element. Declared unconditionally; DCE'd when SKIP_MASKING is set.
+            col_oob = (tile_col_start + tidx) >= N
             for i in cutlass.range_constexpr(MXFP8_BLOCK_SCALING_SIZE):
                 rX_thread_f32[i] = op(rX_thread_f32[i])
-                # If the input shape is not divisible by the tile size,
-                # TMA would zero-fills the input tile outside its logical MxN bounds. 
-                # This is fine for non-activation cases, but for activation cases, 
-                # op(0) might not be 0 which will pollute the amax and dbias.
-                # So we must manually mask the OOB region here.
                 if not cutlass.const_expr(SKIP_MASKING):
-                    global_row = tile_row_start + i
-                    global_col = tile_col_start + tidx
-                    if global_row >= M or global_col >= N:
+                    # TMA zero-fills OOB lanes; op(0) might not be 0, which would pollute
+                    # the amax and dbias. So mask them here.
+                    if col_oob or (tile_row_start + i) >= M:
                         rX_thread_f32[i] = Float32(0.0)
         # Accumulate fp32 activations to DBIAS before we truncate to half precision when the input is half precision
         if cutlass.const_expr(WITH_DBIAS):
