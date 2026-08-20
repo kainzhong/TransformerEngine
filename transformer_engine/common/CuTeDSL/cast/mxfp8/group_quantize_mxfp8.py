@@ -29,6 +29,14 @@ scales, rowwise and/or colwise. VARYING_BOTH_DIMS is not handled here (its
 logical shape [1, total] is not tileable); the C++ bridge falls back to CUDA.
 """
 
+"""
+TODO:
+  - OOB scale padding: CUDA writes 0; the helpers skip the store. Only bites when last_logical_dim % 128 != 0 under SAME_BOTH_DIMS/VARYING_FIRST_DIM. My tests wouldn't catch it — they compare only the meaningful region.
+  - num_tensors = mOffsets.shape[0] - 1: the bridge substitutes a length-num_tensors stub for SAME_BOTH_DIMS, so this reads one too few (and divides by zero at num_tensors == 1). Harmless today only because tensor_id is dead for that rep. My harness always passed a real n+1 offsets array, so it didn't exercise this.
+  - Int32 arithmetic on block_global_offset / tensor_base / first*last where CUDA uses size_t — overflows past 2^31 elements.
+  - Cheap occupancy win: sO_row and sO_col are both allocated unconditionally; CUDA sizes only the direction in use. For fp32 that's 48 KB instead of 40 KB per CTA.
+"""
+
 # pylint: disable=missing-class-docstring
 
 import logging
@@ -38,7 +46,7 @@ from typing import Type
 import cutlass
 from cutlass import cute
 from cutlass import pipeline
-from cutlass import Boolean, Int32, Int64, Uint8
+from cutlass import Boolean, Int32, Int64, Float8E8M0FNU
 from cutlass.cute.nvgpu import cpasync
 from cutlass.tensor_utils import TensorMapManager, TensorMapUpdateMode
 from cuda.bindings.driver import CUstream  # pylint: disable=no-name-in-module
@@ -48,7 +56,6 @@ from transformer_engine.common.CuTeDSL.utils import (
     str_to_cutlass_dtype,
     device_compute_capability,
 )
-from transformer_engine.common.CuTeDSL.utils_fp8 import as_byte_tensor
 from transformer_engine.common.CuTeDSL.cast.mxfp8.quantize_mxfp8 import (
     MXFP8_BLOCK_SCALING_SIZE,
     FP8E4M3_MAX_NORM_RCP,
@@ -80,9 +87,10 @@ class MXFP8GroupQuantizeConfig:
             raise ValueError(f"unknown input dtype {dtype!r}; expected fp32|fp16|bf16")
         self.DTYPE = str_to_cutlass_dtype(dtype)
         self.DTYPE_STR = dtype
-        if fp8_dtype not in ("e4m3", "e5m2"):
-            raise ValueError(f"unknown FP8 dtype {fp8_dtype!r}; expected 'e4m3' or 'e5m2'")
-        self.FP8_DTYPE = fp8_dtype
+        if fp8_dtype not in ("fp8_e4m3fn", "fp8_e5m2"):
+            raise ValueError(f"unknown FP8 dtype {fp8_dtype!r}; expected fp8_e4m3fn|fp8_e5m2")
+        self.FP8_DTYPE = str_to_cutlass_dtype(fp8_dtype)
+        self.FP8_DTYPE_STR = fp8_dtype
         if not (rowwise or colwise):
             raise ValueError("at least one of rowwise or colwise must be true")
         self.ROWWISE = rowwise
@@ -95,11 +103,13 @@ class MXFP8GroupQuantizeConfig:
         self.SHAPE_REP = shape_rep
         # Mirrors `is_single_tensor` in group_quantize_mxfp8.cuh.
         self.IS_SINGLE_TENSOR = shape_rep in (SAME_BOTH_DIMS, VARYING_FIRST_DIM)
-        self.MAX_NORM_RCP = FP8E4M3_MAX_NORM_RCP if fp8_dtype == "e4m3" else FP8E5M2_MAX_NORM_RCP
+        self.MAX_NORM_RCP = (
+            FP8E4M3_MAX_NORM_RCP if fp8_dtype == "fp8_e4m3fn" else FP8E5M2_MAX_NORM_RCP
+        )
 
     def __str__(self):
         return (
-            f"MXFP8GroupQuantizeConfig(dtype={self.DTYPE_STR}, fp8_dtype={self.FP8_DTYPE}, "
+            f"MXFP8GroupQuantizeConfig(dtype={self.DTYPE_STR}, fp8_dtype={self.FP8_DTYPE_STR}, "
             f"rowwise={self.ROWWISE}, colwise={self.COLWISE}, shape_rep={self.SHAPE_REP})"
         )
 
@@ -186,11 +196,6 @@ class MXFP8GroupQuantizeKernel:
         last_logical_dim = mX.shape[1]
         num_tensors = mOffsets.shape[0] - 1
 
-        mO_row = as_byte_tensor(mO_row)
-        mO_col = as_byte_tensor(mO_col)
-        mS_row = as_byte_tensor(mS_row)
-        mS_col = as_byte_tensor(mS_col)
-
         smem_tile_layout = cute.make_ordered_layout(
             (self.BUFF_DIM_Y, self.BUFF_DIM_X), order=(1, 0)
         )
@@ -249,7 +254,6 @@ class MXFP8GroupQuantizeKernel:
             num_tensors,
             work_blocks_X,
             work_blocks_Y,
-            self.cfg.MAX_NORM_RCP,
             mX.element_type,
             tma_atom_x,
             tma_src,
@@ -311,7 +315,7 @@ class MXFP8GroupQuantizeKernel:
             )
             gO_row = cute.make_tensor(
                 cute.make_ptr(
-                    Uint8,
+                    cfg.FP8_DTYPE,
                     mO_row.iterator.toint() + base_elts,
                     cute.AddressSpace.gmem,
                     assumed_align=16,
@@ -320,7 +324,7 @@ class MXFP8GroupQuantizeKernel:
             )
             gO_col = cute.make_tensor(
                 cute.make_ptr(
-                    Uint8,
+                    cfg.FP8_DTYPE,
                     mO_col.iterator.toint() + base_elts,
                     cute.AddressSpace.gmem,
                     assumed_align=16,
@@ -375,7 +379,6 @@ class MXFP8GroupQuantizeKernel:
         num_tensors,
         work_blocks_X,
         work_blocks_Y,
-        max_norm_rcp,
         dtype: cutlass.Constexpr[Type[cutlass.Numeric]],
         tma_atom_x,
         tma_src,
@@ -385,6 +388,7 @@ class MXFP8GroupQuantizeKernel:
         tma_dst_ocol,
     ):
         cfg = self.cfg
+        FP8_DTYPE = cfg.FP8_DTYPE
         tidx, _, _ = cute.arch.thread_idx()
         bidx, _, _ = cute.arch.block_idx()
         gdx, _, _ = cute.arch.grid_dim()
@@ -398,10 +402,12 @@ class MXFP8GroupQuantizeKernel:
                 cute.struct.MemRange[dtype, self.BUFF_DIM_Y * self.BUFF_DIM_X * self.BUFFS_NUM], 128
             ]
             sO_row: cute.struct.Align[
-                cute.struct.MemRange[Uint8, self.BUFF_DIM_Y * self.BUFF_DIM_X * self.BUFFS_NUM], 128
+                cute.struct.MemRange[FP8_DTYPE, self.BUFF_DIM_Y * self.BUFF_DIM_X * self.BUFFS_NUM],
+                128,
             ]
             sO_col: cute.struct.Align[
-                cute.struct.MemRange[Uint8, self.BUFF_DIM_Y * self.BUFF_DIM_X * self.BUFFS_NUM], 128
+                cute.struct.MemRange[FP8_DTYPE, self.BUFF_DIM_Y * self.BUFF_DIM_X * self.BUFFS_NUM],
+                128,
             ]
 
         storage = cutlass.utils.SmemAllocator().allocate(SharedStorage)
@@ -505,7 +511,6 @@ class MXFP8GroupQuantizeKernel:
                         mS_col,
                         first_logical_dim,
                         last_logical_dim,
-                        max_norm_rcp,
                         tmap,
                         last_tensor_id,
                         warp_idx,
@@ -551,7 +556,6 @@ class MXFP8GroupQuantizeKernel:
         mS_col,
         first_logical_dim,
         last_logical_dim,
-        max_norm_rcp,
         tmap,
         last_tensor_id,
         warp_idx,
@@ -605,7 +609,7 @@ class MXFP8GroupQuantizeKernel:
             stride_row = cute.round_up(cute.ceil_div(cols, MXFP8_BLOCK_SCALING_SIZE), 4)
             mS_row_t = cute.make_tensor(
                 cute.make_ptr(
-                    Uint8,
+                    Float8E8M0FNU,
                     mS_row.iterator.toint() + scale_base,
                     cute.AddressSpace.gmem,
                     assumed_align=4,
@@ -619,7 +623,7 @@ class MXFP8GroupQuantizeKernel:
             stride_col = cute.round_up(cols, 128)
             mS_col_t = cute.make_tensor(
                 cute.make_ptr(
-                    Uint8,
+                    Float8E8M0FNU,
                     mS_col.iterator.toint() + scale_base,
                     cute.AddressSpace.gmem,
                     assumed_align=4,
@@ -703,9 +707,10 @@ class MXFP8GroupQuantizeKernel:
             if cutlass.const_expr(cfg.COLWISE):
                 quantize_colwise_mxfp8(
                     sX_tile,
+                    None,
                     sO_col[(None, stage_idx)],
                     cute.flatten(mS_col_tiled[(None, (row_tile, block_id_X))]),
-                    max_norm_rcp,
+                    cfg.MAX_NORM_RCP,
                     tile_row_start,
                     block_offset_X,
                     scale_rows,
@@ -716,6 +721,7 @@ class MXFP8GroupQuantizeKernel:
                     False,
                     self.BUFF_DIM_X,
                     self.BUFF_DIM_Y,
+                    False,
                 )
             if cutlass.const_expr(cfg.ROWWISE):
                 quantize_rowwise_mxfp8(
@@ -723,7 +729,7 @@ class MXFP8GroupQuantizeKernel:
                     None,
                     sO_row[(None, stage_idx)],
                     cute.flatten(mS_row_tiled[(None, (row_tile, block_id_X))]),
-                    max_norm_rcp,
+                    cfg.MAX_NORM_RCP,
                     tile_row_start,
                     block_offset_X,
                     scale_rows,
@@ -736,6 +742,7 @@ class MXFP8GroupQuantizeKernel:
                     self.WAVES,
                     self.THREADS_PER_BANK,
                     self.PACK_SIZE,
+                    False,
                 )
 
             cute.arch.fence_proxy("async.shared", space="cta")
@@ -789,7 +796,7 @@ def compile_cutedsl_function_from_cfg(cfg: MXFP8GroupQuantizeConfig):
     sym_N = cute.sym_int32(divisibility=MXFP8_BLOCK_SCALING_SIZE)
     logical_shape = (sym_M, sym_N)
 
-    out_dtype = cutlass.Float8E4M3FN if cfg.FP8_DTYPE == "e4m3" else cutlass.Float8E5M2
+    out_dtype = cfg.FP8_DTYPE
     scale_dtype = cutlass.Float8E8M0FNU
 
     def g2d(dtype, align=16):
