@@ -388,10 +388,10 @@ class MXFP8GroupQuantizeKernel:
         dtype: cutlass.Constexpr[Type[cutlass.Numeric]],
         tma_atom_x,
         tma_src,
-        tma_atom_orow,
-        tma_dst_orow,
-        tma_atom_ocol,
-        tma_dst_ocol,
+        tma_atom_out_row,
+        tma_dst_out_row,
+        tma_atom_out_col,
+        tma_dst_out_col,
     ):
         cfg = self.cfg
         FP8_DTYPE = cfg.FP8_DTYPE
@@ -444,13 +444,13 @@ class MXFP8GroupQuantizeKernel:
         # the descriptor is swapped per tensor and the tile coords are tensor-local.
         gX_tiled = cute.zipped_divide(tma_src, (self.BUFF_DIM_Y, self.BUFF_DIM_X))
         tXsX, tXgX = cpasync.tma_partition(tma_atom_x, 0, cute.make_layout(1), sX, gX_tiled)
-        gO_row_tiled = cute.zipped_divide(tma_dst_orow, (self.BUFF_DIM_Y, self.BUFF_DIM_X))
+        gO_row_tiled = cute.zipped_divide(tma_dst_out_row, (self.BUFF_DIM_Y, self.BUFF_DIM_X))
         tXsO_row, tXgO_row = cpasync.tma_partition(
-            tma_atom_orow, 0, cute.make_layout(1), sO_row, gO_row_tiled
+            tma_atom_out_row, 0, cute.make_layout(1), sO_row, gO_row_tiled
         )
-        gO_col_tiled = cute.zipped_divide(tma_dst_ocol, (self.BUFF_DIM_Y, self.BUFF_DIM_X))
+        gO_col_tiled = cute.zipped_divide(tma_dst_out_col, (self.BUFF_DIM_Y, self.BUFF_DIM_X))
         tXsO_col, tXgO_col = cpasync.tma_partition(
-            tma_atom_ocol, 0, cute.make_layout(1), sO_col, gO_col_tiled
+            tma_atom_out_col, 0, cute.make_layout(1), sO_col, gO_col_tiled
         )
 
         tmap = TensorMapManager(TensorMapUpdateMode.GMEM, BYTES_PER_TENSORMAP)
@@ -531,8 +531,8 @@ class MXFP8GroupQuantizeKernel:
                         tXsO_col,
                         tXgO_col,
                         tma_atom_x,
-                        tma_atom_orow,
-                        tma_atom_ocol,
+                        tma_atom_out_row,
+                        tma_atom_out_col,
                         mainloop_pipeline,
                         prod_state,
                         cons_state,
@@ -576,8 +576,8 @@ class MXFP8GroupQuantizeKernel:
         tXsO_col,
         tXgO_col,
         tma_atom_x,
-        tma_atom_orow,
-        tma_atom_ocol,
+        tma_atom_out_row,
+        tma_atom_out_col,
         mainloop_pipeline,
         prod_state,
         cons_state,
@@ -646,14 +646,14 @@ class MXFP8GroupQuantizeKernel:
         # (CUDA: fence_acquire_tensormap on tensor switch).
         if cutlass.const_expr(not cfg.IS_SINGLE_TENSOR):
             desc_x = tmap.get_tensormap_ptr(mTensormaps[(tensor_id, 0, None)].iterator)
-            desc_orow = tmap.get_tensormap_ptr(mTensormaps[(tensor_id, 1, None)].iterator)
-            desc_ocol = tmap.get_tensormap_ptr(mTensormaps[(tensor_id, 2, None)].iterator)
+            desc_out_row = tmap.get_tensormap_ptr(mTensormaps[(tensor_id, 1, None)].iterator)
+            desc_out_col = tmap.get_tensormap_ptr(mTensormaps[(tensor_id, 2, None)].iterator)
             if tensor_id != last_tensor_id:
                 tmap.fence_tensormap_update(desc_x)
                 if cutlass.const_expr(cfg.ROWWISE):
-                    tmap.fence_tensormap_update(desc_orow)
+                    tmap.fence_tensormap_update(desc_out_row)
                 if cutlass.const_expr(cfg.COLWISE):
-                    tmap.fence_tensormap_update(desc_ocol)
+                    tmap.fence_tensormap_update(desc_out_col)
         cute.arch.sync_threads()
 
         row_tile_base = block_offset_Y // self.BUFF_DIM_Y
@@ -759,33 +759,33 @@ class MXFP8GroupQuantizeKernel:
                 if cutlass.const_expr(cfg.ROWWISE):
                     if cutlass.const_expr(cfg.IS_SINGLE_TENSOR):
                         cute.copy(
-                            tma_atom_orow,
+                            tma_atom_out_row,
                             tXsO_row[(None, stage_idx)],
                             tXgO_row[(None, (row_tile, block_id_X))],
                         )
                     else:
                         cute.copy(
-                            tma_atom_orow,
+                            tma_atom_out_row,
                             tXsO_row[(None, stage_idx)],
                             tXgO_row[(None, (row_tile, block_id_X))],
                             tma_desc_ptr=tmap.get_tensormap_ptr(
-                                desc_orow, cute.AddressSpace.generic
+                                desc_out_row, cute.AddressSpace.generic
                             ),
                         )
                 if cutlass.const_expr(cfg.COLWISE):
                     if cutlass.const_expr(cfg.IS_SINGLE_TENSOR):
                         cute.copy(
-                            tma_atom_ocol,
+                            tma_atom_out_col,
                             tXsO_col[(None, stage_idx)],
                             tXgO_col[(None, (row_tile, block_id_X))],
                         )
                     else:
                         cute.copy(
-                            tma_atom_ocol,
+                            tma_atom_out_col,
                             tXsO_col[(None, stage_idx)],
                             tXgO_col[(None, (row_tile, block_id_X))],
                             tma_desc_ptr=tmap.get_tensormap_ptr(
-                                desc_ocol, cute.AddressSpace.generic
+                                desc_out_col, cute.AddressSpace.generic
                             ),
                         )
                 cute.arch.cp_async_bulk_commit_group()
