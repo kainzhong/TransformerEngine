@@ -148,7 +148,7 @@ class MXFP8GroupQuantizeKernel:
     def _tensor_rows_cols(
         self, tensor_id, mFirstDims, mLastDims, first_logical_dim, last_logical_dim
     ):
-        """get_tensor_rows_num / get_tensor_cols_num for this shape rep."""
+        """Get the shape (rows, cols) of the tensor by tensor_id."""
         cfg = self.cfg
         if cutlass.const_expr(cfg.SHAPE_REP == VARYING_FIRST_DIM):
             rows = Int32(mFirstDims[tensor_id])
