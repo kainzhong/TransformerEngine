@@ -206,6 +206,8 @@ class MXFP8GroupQuantizeKernel:
         tma_atom_x, tma_src = cpasync.make_tiled_tma_atom(
             op_load, mX, smem_tile_layout, cta_tiler, num_multicast=1
         )
+        print(f"tma_atom_x={tma_atom_x}\n")
+        print(f"tma_src={tma_src}\n")
         op_store = cpasync.CopyBulkTensorTileS2GOp()
         tma_atom_out_row, tma_dst_out_row = cpasync.make_tiled_tma_atom(
             op_store, mO_row, smem_tile_layout, cta_tiler, num_multicast=1
@@ -213,10 +215,6 @@ class MXFP8GroupQuantizeKernel:
         tma_atom_out_col, tma_dst_out_col = cpasync.make_tiled_tma_atom(
             op_store, mO_col, smem_tile_layout, cta_tiler, num_multicast=1
         )
-        print(f"tma_atom_out_row={tma_atom_out_row}\n")
-        print(f"tma_dst_out_row={tma_dst_out_row}\n")
-        print(f"tma_atom_out_col={tma_atom_out_col}\n")
-        print(f"tma_dst_out_col={tma_dst_out_col}\n")
 
         if cutlass.const_expr(cfg.IS_SINGLE_TENSOR):
             # mx is interpreted as a single 2D tensor of shape (first_logical_dim, last_logical_dim).
@@ -452,7 +450,8 @@ class MXFP8GroupQuantizeKernel:
         tXsO_col, tXgO_col = cpasync.tma_partition(
             tma_atom_out_col, 0, cute.make_layout(1), sO_col, gO_col_tiled
         )
-
+        print(f"tma_atom_x={tma_atom_x}\n")
+        print(f"tma_src={tma_src}\n")
         print(f"gX_tiled={gX_tiled}\n")
         print(f"tXsX={tXsX}\n")
         print(f"tXgX={tXgX}\n")
