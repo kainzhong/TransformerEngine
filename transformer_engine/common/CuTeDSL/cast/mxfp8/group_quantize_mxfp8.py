@@ -200,24 +200,30 @@ class MXFP8GroupQuantizeKernel:
             (self.BUFF_DIM_Y, self.BUFF_DIM_X), order=(1, 0)
         )
         cta_tiler = (self.BUFF_DIM_Y, self.BUFF_DIM_X)
+        print(f"mx={mX}, smem_tile_layout={smem_tile_layout}, cta_tiler={cta_tiler}\n")
 
         op_load = cpasync.CopyBulkTensorTileG2SOp()
         tma_atom_x, tma_src = cpasync.make_tiled_tma_atom(
             op_load, mX, smem_tile_layout, cta_tiler, num_multicast=1
         )
         op_store = cpasync.CopyBulkTensorTileS2GOp()
-        tma_atom_orow, tma_dst_orow = cpasync.make_tiled_tma_atom(
+        tma_atom_out_row, tma_dst_out_row = cpasync.make_tiled_tma_atom(
             op_store, mO_row, smem_tile_layout, cta_tiler, num_multicast=1
         )
-        tma_atom_ocol, tma_dst_ocol = cpasync.make_tiled_tma_atom(
+        tma_atom_out_col, tma_dst_out_col = cpasync.make_tiled_tma_atom(
             op_store, mO_col, smem_tile_layout, cta_tiler, num_multicast=1
         )
+        print(f"tma_atom_out_row={tma_atom_out_row}\n")
+        print(f"tma_dst_out_row={tma_dst_out_row}\n")
+        print(f"tma_atom_out_col={tma_atom_out_col}\n")
+        print(f"tma_dst_out_col={tma_dst_out_col}\n")
 
-        # Virtual work grid (mirrors the host-side work_blocks_* computation).
         if cutlass.const_expr(cfg.IS_SINGLE_TENSOR):
+            # mx is interpreted as a single 2D tensor of shape (first_logical_dim, last_logical_dim).
             work_blocks_Y = cute.ceil_div(first_logical_dim, self.CHUNK_DIM_Y)
             work_blocks_X = cute.ceil_div(Int32(last_logical_dim), self.CHUNK_DIM_X)
         else:
+            # mX is interpreted as a 1D tensor of shape (1, first_logical_dim * last_logical_dim)
             work_blocks_Y = Int32(1)
             work_blocks_X = cute.ceil_div(
                 Int32(first_logical_dim) * Int32(last_logical_dim), self.ELTS_PER_CHUNK
@@ -238,8 +244,8 @@ class MXFP8GroupQuantizeKernel:
                 last_logical_dim,
                 mX.element_type,
                 tma_atom_x,
-                tma_atom_orow,
-                tma_atom_ocol,
+                tma_atom_out_row,
+                tma_atom_out_col,
             ).launch(grid=[num_tensors, 1, 1], block=[THREADS_PER_WARP, 1, 1], stream=stream)
 
         self.kernel(
@@ -257,10 +263,10 @@ class MXFP8GroupQuantizeKernel:
             mX.element_type,
             tma_atom_x,
             tma_src,
-            tma_atom_orow,
-            tma_dst_orow,
-            tma_atom_ocol,
-            tma_dst_ocol,
+            tma_atom_out_row,
+            tma_dst_out_row,
+            tma_atom_out_col,
+            tma_dst_out_col,
         ).launch(
             grid=[self.sm_count * self.STATIC_PERSISTENT_BLOCKS_PER_SM, 1, 1],
             block=[self.THREADS_PER_CHUNK, 1, 1],
