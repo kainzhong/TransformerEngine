@@ -351,7 +351,7 @@ class MXFP8GroupQuantizeKernel:
                     (tma_atom_x, tma_atom_orow, tma_atom_ocol),
                     (desc_x, desc_orow, desc_ocol),
                     0,
-                    (desc_x, desc_orow, desc_ocol),
+                    (),  # smem staging is unused in GMEM update mode
                 )
             elif cutlass.const_expr(cfg.ROWWISE):
                 tmap.update_tensormap(
@@ -359,7 +359,7 @@ class MXFP8GroupQuantizeKernel:
                     (tma_atom_x, tma_atom_orow),
                     (desc_x, desc_orow),
                     0,
-                    (desc_x, desc_orow),
+                    (),  # smem staging is unused in GMEM update mode
                 )
             else:
                 tmap.update_tensormap(
@@ -367,7 +367,7 @@ class MXFP8GroupQuantizeKernel:
                     (tma_atom_x, tma_atom_ocol),
                     (desc_x, desc_ocol),
                     0,
-                    (desc_x, desc_ocol),
+                    (),  # smem staging is unused in GMEM update mode
                 )
 
     # ------------------------------------------------------------ main kernel
@@ -452,6 +452,10 @@ class MXFP8GroupQuantizeKernel:
         tXsO_col, tXgO_col = cpasync.tma_partition(
             tma_atom_out_col, 0, cute.make_layout(1), sO_col, gO_col_tiled
         )
+
+        print(f"gX_tiled={gX_tiled}\n")
+        print(f"tXsX={tXsX}\n")
+        print(f"tXgX={tXgX}\n")
 
         tmap = TensorMapManager(TensorMapUpdateMode.GMEM, BYTES_PER_TENSORMAP)
         cute.arch.sync_threads()
