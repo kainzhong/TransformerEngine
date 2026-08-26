@@ -2460,7 +2460,7 @@ class MXFP8QuantizeEntry(MXFP8QuantizeKernelBase):
         # and we will pick the right one at runtime based on the input shape and config.
         self.general_divisible_kernel = MXFP8QuantizeKernel(cfg, SKIP_MASKING=True)
         # Same as general_divisible_kernel but with the per-thread scale-store bound check
-        # dropped. Selected at launch by the `scales_in_bounds` check in __call__ below.
+        # dropped. Selected at launch by the `tiles_exact` check in __call__ below.
         self.general_aligned_kernel = MXFP8QuantizeKernel(
             cfg, SKIP_MASKING=True, SKIP_SCALE_BOUNDS=True
         )
@@ -2542,42 +2542,32 @@ class MXFP8QuantizeEntry(MXFP8QuantizeKernelBase):
                 )
         # If not using a specialized kernel, fall back to the general kernel
         if not dispatched_to_specialized:
-            # The scale-store guards (`scale_row < M and scale_col_first_elt < N` rowwise,
-            # `tile_row_start < M and scale_col < N` colwise) are implied by the grid tiling
-            # M/N exactly: grid is (ceil_div(N, TILE_COLS), ceil_div(M, TILE_ROWS*NUM_TILES)),
-            # so with no ragged edge every thread's scale slot is in bounds. This is a
-            # divisibility fact, but sym_int32's `divisibility=` does not propagate into the
-            # comparison, so we decide it here on the host (cheap scalar math in the launch
-            # stub) and pick a kernel whose flag makes it a compile-time constant.
+            # Whether the shape divides the tile exactly. This decides two things at once:
+            #
+            #  * OOB masking of the TMA-loaded input tile (the original SKIP_MASKING use), and
+            #  * the two scale-store guards (`scale_row < M and scale_col_first_elt < N`
+            #    rowwise, `tile_row_start < M and scale_col < N` colwise).
+            #
+            # For the scale stores, TILE_ROWS (not TILE_ROWS * NUM_TILES) is the right bound:
+            # num_tiles is already clamped to ceil_div(M - bidy*TILE_ROWS*NUM_TILES, TILE_ROWS),
+            # and tile_idx < ceil(remaining/TILE_ROWS) implies tile_idx*TILE_ROWS < remaining,
+            # so `tile_row_start < M` holds for free -- a CTA never enters a tile that starts
+            # past M. What is left is the rowwise store, where a thread reaches
+            # tile_row_start + TILE_ROWS - 1, so the last tile must not be partial.
+            # Columnwise a thread reaches tile_col_start + TILE_COLS - 1, hence N % TILE_COLS.
+            #
+            # sym_int32's `divisibility=` does not propagate into these comparisons, so we
+            # decide it here on the host (cheap scalar math in the launch stub) and pick a
+            # kernel whose Constexpr flags make them compile-time constants.
             k = self.general_divisible_kernel
-            scales_in_bounds = (
-                mX.shape[0] % (k._TILE_ROWS * k._NUM_TILES) == 0
-                and mX.shape[1] % k._TILE_COLS == 0
+            tiles_exact = (
+                mX.shape[0] % k._TILE_ROWS == 0 and mX.shape[1] % k._TILE_COLS == 0
             )
-            # Only skip masking if not WITH_ACT (zeros filled by TMA are still zeros without applying activation to them),
-            # or if the shape is already divisible by the tile size (so no masking is needed)
             if cutlass.const_expr(self.ACT_NEED_MASKING):
-                skip_masking = (
-                    mX.shape[0] % self.general_divisible_kernel._TILE_ROWS == 0
-                    and mX.shape[1] % self.general_divisible_kernel._TILE_COLS == 0
-                )
-                # scales_in_bounds implies skip_masking (it is the strictly stronger
-                # divisibility), so these three cases stay mutually exclusive.
-                if scales_in_bounds:
+                # Masking and the scale guards now share one condition, so this is a plain
+                # two-way choice: either the shape tiles exactly (drop both) or it does not.
+                if tiles_exact:
                     self.general_aligned_kernel(
-                        mX,
-                        mO_row,
-                        mS_row,
-                        mO_col,
-                        mS_col,
-                        mAmax,
-                        mNoop,
-                        mDActInput,
-                        mWorkspace,
-                        stream,
-                    )
-                elif skip_masking:
-                    self.general_divisible_kernel(
                         mX,
                         mO_row,
                         mS_row,
@@ -2603,7 +2593,7 @@ class MXFP8QuantizeEntry(MXFP8QuantizeKernelBase):
                         stream,
                     )
             else:
-                if scales_in_bounds:
+                if tiles_exact:
                     self.general_aligned_kernel(
                         mX,
                         mO_row,
