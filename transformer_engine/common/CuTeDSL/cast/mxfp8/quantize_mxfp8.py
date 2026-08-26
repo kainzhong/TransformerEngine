@@ -156,6 +156,7 @@ def quantize_rowwise_mxfp8(
     THREADS_PER_BANK: cutlass.Constexpr[int],
     PACK_SIZE: cutlass.Constexpr[int],
     SKIP_MASKING: cutlass.Constexpr[bool],
+    SKIP_SCALE_BOUNDS: cutlass.Constexpr[bool] = False,
     WITH_ACT: cutlass.Constexpr[bool] = False,
     WITH_DACT: cutlass.Constexpr[bool] = False,
     WITH_DBIAS: cutlass.Constexpr[bool] = False,
@@ -343,10 +344,17 @@ def quantize_rowwise_mxfp8(
 
     # For irregular shapes, skip the scale store if this thread's logical row / col-block lies past the input's actual extents.
     # TMA already zero-fills OOB input reads and drops OOB output writes; only the direct scale-byte gmem store needs an explicit guard.
-    scale_row = tile_row_start + tidx // CTA_THREADS_X
-    scale_col_first_elt = tile_col_start + (tidx % CTA_THREADS_X) * MXFP8_BLOCK_SCALING_SIZE
-    if scale_row < M and scale_col_first_elt < N:
+    # When the caller has proven the grid tiles M/N exactly (SKIP_SCALE_BOUNDS), every
+    # thread's scale slot is in bounds by construction, so the compare is dropped. It is a
+    # real branch otherwise: M/N are runtime values, so the predicate cannot fold and the
+    # store sits inside a BSSY/BSYNC reconvergent region.
+    if cutlass.const_expr(SKIP_SCALE_BOUNDS):
         mS_row_stage[(tidx // CTA_THREADS_X, tidx % CTA_THREADS_X)] = biased_exp_r
+    else:
+        scale_row = tile_row_start + tidx // CTA_THREADS_X
+        scale_col_first_elt = tile_col_start + (tidx % CTA_THREADS_X) * MXFP8_BLOCK_SCALING_SIZE
+        if scale_row < M and scale_col_first_elt < N:
+            mS_row_stage[(tidx // CTA_THREADS_X, tidx % CTA_THREADS_X)] = biased_exp_r
 
     inv_scale_r = exp2f_rcp(biased_exp_r)  # f32 reciprocal of the scale
     scale_2x = pack_f32x2(inv_scale_r, inv_scale_r)
@@ -388,6 +396,7 @@ def quantize_colwise_mxfp8(
     TILE_X: cutlass.Constexpr[int],
     TILE_Y: cutlass.Constexpr[int],  # pylint: disable=unused-argument  # kept for API consistency
     SKIP_MASKING: cutlass.Constexpr[bool],
+    SKIP_SCALE_BOUNDS: cutlass.Constexpr[bool] = False,
     WITH_ACT: cutlass.Constexpr[bool] = False,
     WITH_DACT: cutlass.Constexpr[bool] = False,
     WITH_DBIAS: cutlass.Constexpr[bool] = False,
@@ -477,12 +486,20 @@ def quantize_colwise_mxfp8(
     # column lies past the input extents. TILE_Y == MXFP8_BLOCK_SCALING_SIZE so each stage
     # is exactly one scale-row; valid iff `tile_row_start < M`.
     biased_exp_c = cvt_f32_to_fp8e8m0fnu(amax_c * MAX_NORM_RCP)
-    scale_col = tile_col_start + tidx
-    if tile_row_start < M and scale_col < N:
+    # See the rowwise store above: SKIP_SCALE_BOUNDS means the caller proved the grid tiles
+    # M/N exactly, so this guard is statically true and the branch disappears.
+    if cutlass.const_expr(SKIP_SCALE_BOUNDS):
         if cutlass.const_expr(SWIZZLE):
             mS_col_stage[(0, tidx % 32, tidx // 32)] = biased_exp_c
         else:
             mS_col_stage[(0, tidx)] = biased_exp_c
+    else:
+        scale_col = tile_col_start + tidx
+        if tile_row_start < M and scale_col < N:
+            if cutlass.const_expr(SWIZZLE):
+                mS_col_stage[(0, tidx % 32, tidx // 32)] = biased_exp_c
+            else:
+                mS_col_stage[(0, tidx)] = biased_exp_c
 
     inv_scale_c = exp2f_rcp(biased_exp_c)
     # cvt.rn.satfinite can be vectorized to convert 2 f32 to 2 fp8 in one instruction
@@ -875,10 +892,20 @@ class MXFP8QuantizeKernel(MXFP8QuantizeKernelBase):
     _THREADS_PER_BANK = _TOTAL_BANKS_WIDTH // MXFP8_BLOCK_SCALING_SIZE  # 4 threads per bank
     _NUM_STAGES = 2  # The pipeline depth is always 2
 
-    def __init__(self, cfg: MXFP8QuantizeConfig, SKIP_MASKING: bool = False):
+    def __init__(
+        self,
+        cfg: MXFP8QuantizeConfig,
+        SKIP_MASKING: bool = False,
+        SKIP_SCALE_BOUNDS: bool = False,
+    ):
         self.cfg = cfg
         # If the input shape is divisible by the tile size, we can skip the OOB masking in the kernel and save some instructions.
         self.SKIP_MASKING = SKIP_MASKING
+        # If the grid tiles M/N exactly, every scale slot a thread writes is in bounds, so the
+        # per-thread scale-store guard is statically true and can be dropped. Unlike SKIP_MASKING
+        # this is about the direct scale-byte gmem stores, not the TMA-loaded input tile.
+        # See MXFP8QuantizeEntry.__call__ for the host-side condition that sets it.
+        self.SKIP_SCALE_BOUNDS = SKIP_SCALE_BOUNDS
         # Only honor the noop flag when no activation or dbias is fused to match CUDA C++'s implementation
         self.CHECK_NOOP_FLAG: cutlass.const_expr = (
             not self.cfg.WITH_ACT and not self.cfg.WITH_DACT and not self.cfg.WITH_DBIAS
@@ -1676,6 +1703,7 @@ class MXFP8QuantizeKernel(MXFP8QuantizeKernelBase):
             THREADS_PER_BANK=self._THREADS_PER_BANK,
             PACK_SIZE=self._PACK_SIZE,
             SKIP_MASKING=self.SKIP_MASKING,
+            SKIP_SCALE_BOUNDS=self.SKIP_SCALE_BOUNDS,
             WITH_ACT=cfg.WITH_ACT and not self.CACHE_ACTIVATION,
             WITH_DACT=cfg.WITH_DACT and not self.CACHE_ACTIVATION,
             WITH_DBIAS=self.DBIAS_REDUCTION_IN_ROWWISE,
@@ -1712,6 +1740,7 @@ class MXFP8QuantizeKernel(MXFP8QuantizeKernelBase):
             TILE_X=self._TILE_COLS,
             TILE_Y=self._TILE_ROWS,
             SKIP_MASKING=self.SKIP_MASKING,
+            SKIP_SCALE_BOUNDS=self.SKIP_SCALE_BOUNDS,
             WITH_ACT=cfg.WITH_ACT,
             WITH_DACT=cfg.WITH_DACT,
             WITH_DBIAS=self.DBIAS_REDUCTION_IN_COLWISE,
@@ -2430,6 +2459,11 @@ class MXFP8QuantizeEntry(MXFP8QuantizeKernelBase):
         # Instantiate all possible kernels at compile time,
         # and we will pick the right one at runtime based on the input shape and config.
         self.general_divisible_kernel = MXFP8QuantizeKernel(cfg, SKIP_MASKING=True)
+        # Same as general_divisible_kernel but with the per-thread scale-store bound check
+        # dropped. Selected at launch by the `scales_in_bounds` check in __call__ below.
+        self.general_aligned_kernel = MXFP8QuantizeKernel(
+            cfg, SKIP_MASKING=True, SKIP_SCALE_BOUNDS=True
+        )
         self.general_non_divisible_kernel = (
             # We only need to mask when WITH_ACT is enabled because with activations applied zeros filled by TMA affect block statistics
             MXFP8QuantizeKernel(cfg, SKIP_MASKING=False)
@@ -2508,6 +2542,18 @@ class MXFP8QuantizeEntry(MXFP8QuantizeKernelBase):
                 )
         # If not using a specialized kernel, fall back to the general kernel
         if not dispatched_to_specialized:
+            # The scale-store guards (`scale_row < M and scale_col_first_elt < N` rowwise,
+            # `tile_row_start < M and scale_col < N` colwise) are implied by the grid tiling
+            # M/N exactly: grid is (ceil_div(N, TILE_COLS), ceil_div(M, TILE_ROWS*NUM_TILES)),
+            # so with no ragged edge every thread's scale slot is in bounds. This is a
+            # divisibility fact, but sym_int32's `divisibility=` does not propagate into the
+            # comparison, so we decide it here on the host (cheap scalar math in the launch
+            # stub) and pick a kernel whose flag makes it a compile-time constant.
+            k = self.general_divisible_kernel
+            scales_in_bounds = (
+                mX.shape[0] % (k._TILE_ROWS * k._NUM_TILES) == 0
+                and mX.shape[1] % k._TILE_COLS == 0
+            )
             # Only skip masking if not WITH_ACT (zeros filled by TMA are still zeros without applying activation to them),
             # or if the shape is already divisible by the tile size (so no masking is needed)
             if cutlass.const_expr(self.ACT_NEED_MASKING):
@@ -2515,7 +2561,22 @@ class MXFP8QuantizeEntry(MXFP8QuantizeKernelBase):
                     mX.shape[0] % self.general_divisible_kernel._TILE_ROWS == 0
                     and mX.shape[1] % self.general_divisible_kernel._TILE_COLS == 0
                 )
-                if skip_masking:
+                # scales_in_bounds implies skip_masking (it is the strictly stronger
+                # divisibility), so these three cases stay mutually exclusive.
+                if scales_in_bounds:
+                    self.general_aligned_kernel(
+                        mX,
+                        mO_row,
+                        mS_row,
+                        mO_col,
+                        mS_col,
+                        mAmax,
+                        mNoop,
+                        mDActInput,
+                        mWorkspace,
+                        stream,
+                    )
+                elif skip_masking:
                     self.general_divisible_kernel(
                         mX,
                         mO_row,
@@ -2542,9 +2603,48 @@ class MXFP8QuantizeEntry(MXFP8QuantizeKernelBase):
                         stream,
                     )
             else:
-                self.general_divisible_kernel(
-                    mX, mO_row, mS_row, mO_col, mS_col, mAmax, mNoop, mDActInput, mWorkspace, stream
-                )
+                if scales_in_bounds:
+                    self.general_aligned_kernel(
+                        mX,
+                        mO_row,
+                        mS_row,
+                        mO_col,
+                        mS_col,
+                        mAmax,
+                        mNoop,
+                        mDActInput,
+                        mWorkspace,
+                        stream,
+                    )
+                else:
+                    self.general_divisible_kernel(
+                        mX,
+                        mO_row,
+                        mS_row,
+                        mO_col,
+                        mS_col,
+                        mAmax,
+                        mNoop,
+                        mDActInput,
+                        mWorkspace,
+                        stream,
+                    )
+
+
+def _static_mn_from_env():
+    """(M, N) to compile the kernel at STATICALLY, or None for the symbolic build.
+
+    Experiment hook (NVTE_CUTEDSL_STATIC_MN="M,N"): compile the fake tensors with
+    concrete extents instead of cute.sym_int32(), so every bound, grid dim, div/mod
+    and OOB predicate that derives from M/N folds at compile time. Only valid when
+    the process runs exactly that one shape -- the tvm-ffi registry is keyed by
+    config, not by shape, so a second shape would reuse this kernel.
+    """
+    spec = os.environ.get("NVTE_CUTEDSL_STATIC_MN", "").strip()
+    if not spec:
+        return None
+    m, n = (int(v.strip()) for v in spec.split(","))
+    return m, n
 
 
 def compile_cutedsl_function_from_cfg(cfg):
@@ -2553,19 +2653,40 @@ def compile_cutedsl_function_from_cfg(cfg):
     """
 
     kernel_obj = MXFP8QuantizeEntry(cfg)
-    sym_M = cute.sym_int32()
-    sym_N = cute.sym_int32(divisibility=SYM_N_DIVISIBILITY)
-    in_shape = out_shape = (sym_M, sym_N)
-    # TE allocates scale tensors at a padded shape (see
-    # MXFP8Quantizer::get_scale_shape in transformer_engine/pytorch/csrc):
-    #   rowwise:    (roundup(M, 128),           roundup(ceildiv(N, 32), 4))
-    #   columnwise: (roundup(ceildiv(M, 32), 4), roundup(N, 128))
-    # These padded extents are NOT M/N (and SymInt has no `//`/`+`), so give the
-    # scales their own fresh syms carrying the divisibility the padding
-    # guarantees (rowwise: 128 x 4; colwise: 4 x 128).
-    scale_rowwise_shape = (cute.sym_int32(divisibility=128), cute.sym_int32(divisibility=4))
-    scale_colwise_shape = (cute.sym_int32(divisibility=4), cute.sym_int32(divisibility=128))
-    ws_shape = (cute.sym_int32(), sym_N)  # (blocks_Y, N); N ties to input N
+    static_mn = _static_mn_from_env()
+    if static_mn is not None:
+        M, N = static_mn
+        assert N % SYM_N_DIVISIBILITY == 0, f"static N={N} must be divisible by {SYM_N_DIVISIBILITY}"
+
+        def _roundup(a, b):
+            return ((a + b - 1) // b) * b
+
+        def _ceildiv(a, b):
+            return (a + b - 1) // b
+
+        in_shape = out_shape = (M, N)
+        # Same padded extents the C++ bridge allocates (see below), but concrete.
+        scale_rowwise_shape = (_roundup(M, 128), _roundup(_ceildiv(N, 32), 4))
+        scale_colwise_shape = (_roundup(_ceildiv(M, 32), 4), _roundup(N, 128))
+        # Rows of the dbias workspace == ceil(M / chunk_rows); chunk_rows mirrors
+        # mxfp8_quantize_cutedsl (128 for cast+dbias only, else 64).
+        cast_dbias_only = cfg.WITH_DBIAS and not cfg.WITH_DACT and not cfg.WITH_ACT
+        ws_shape = (_ceildiv(M, 128 if cast_dbias_only else 64), N)
+        logger.debug("CuTeDSL MXFP8: compiling with STATIC shape M=%d N=%d", M, N)
+    else:
+        sym_M = cute.sym_int32()
+        sym_N = cute.sym_int32(divisibility=SYM_N_DIVISIBILITY)
+        in_shape = out_shape = (sym_M, sym_N)
+        # TE allocates scale tensors at a padded shape (see
+        # MXFP8Quantizer::get_scale_shape in transformer_engine/pytorch/csrc):
+        #   rowwise:    (roundup(M, 128),           roundup(ceildiv(N, 32), 4))
+        #   columnwise: (roundup(ceildiv(M, 32), 4), roundup(N, 128))
+        # These padded extents are NOT M/N (and SymInt has no `//`/`+`), so give the
+        # scales their own fresh syms carrying the divisibility the padding
+        # guarantees (rowwise: 128 x 4; colwise: 4 x 128).
+        scale_rowwise_shape = (cute.sym_int32(divisibility=128), cute.sym_int32(divisibility=4))
+        scale_colwise_shape = (cute.sym_int32(divisibility=4), cute.sym_int32(divisibility=128))
+        ws_shape = (cute.sym_int32(), sym_N)  # (blocks_Y, N); N ties to input N
     # Native FP8/E8M0 dtypes at the FFI boundary (matches the DLPack dtype the C++
     # bridge sends).
     out_dtype = cfg.FP8_DTYPE
