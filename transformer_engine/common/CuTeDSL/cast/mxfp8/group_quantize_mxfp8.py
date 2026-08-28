@@ -403,14 +403,21 @@ class MXFP8GroupQuantizeKernel:
         class SharedStorage:
             mbar: cute.struct.MemRange[cute.Int64, 2 * self.PIPELINE_DEPTH]
             sX: cute.struct.Align[
-                cute.struct.MemRange[dtype, self.BUFF_DIM_Y * self.BUFF_DIM_X * self.PIPELINE_DEPTH], 128
+                cute.struct.MemRange[
+                    dtype, self.BUFF_DIM_Y * self.BUFF_DIM_X * self.PIPELINE_DEPTH
+                ],
+                128,
             ]
             sO_row: cute.struct.Align[
-                cute.struct.MemRange[FP8_DTYPE, self.BUFF_DIM_Y * self.BUFF_DIM_X * self.PIPELINE_DEPTH],
+                cute.struct.MemRange[
+                    FP8_DTYPE, self.BUFF_DIM_Y * self.BUFF_DIM_X * self.PIPELINE_DEPTH
+                ],
                 128,
             ]
             sO_col: cute.struct.Align[
-                cute.struct.MemRange[FP8_DTYPE, self.BUFF_DIM_Y * self.BUFF_DIM_X * self.PIPELINE_DEPTH],
+                cute.struct.MemRange[
+                    FP8_DTYPE, self.BUFF_DIM_Y * self.BUFF_DIM_X * self.PIPELINE_DEPTH
+                ],
                 128,
             ]
 
@@ -486,7 +493,7 @@ class MXFP8GroupQuantizeKernel:
                 )
             else:
                 # In non single tensor cases, the whole tensor group is flattened into a 1D tensor with an 1D block grid: (cdiv(first_logical_dim * last_logical_dim, 128*128), 1)
-                # and ELTS_PER_CHUNK is 128x128, so the global offset is just 
+                # and ELTS_PER_CHUNK is 128x128, so the global offset is just
                 block_global_offset = block_id * self.ELTS_PER_CHUNK
 
             # get_current_tensor_id
@@ -562,36 +569,75 @@ class MXFP8GroupQuantizeKernel:
 
         cute.arch.cp_async_bulk_wait_group(0, read=False)
 
+    def _issue_load(
+        self,
+        pipeline_obj,
+        prod_state,
+        tile_y,
+        tile_x,
+        tma_atom_x,
+        tXgX,
+        tXsX,
+        tmap,
+        desc_x,
+    ):
+        """Emit one 32x128 TMA load into the current pipeline buffer.
+
+        Caller gates this on warp 0 and advances `prod_state` afterwards -- the advance
+        must happen outside the gate or the mutated SSA values stay trapped in the scf.if.
+        """
+        # Wait for the consumer to finish using this SMEM buffer
+        pipeline_obj.producer_acquire(prod_state)
+        if cutlass.const_expr(self.cfg.IS_SINGLE_TENSOR):
+            cute.copy(
+                tma_atom_x,
+                tXgX[(None, (tile_y, tile_x))],
+                tXsX[(None, prod_state.index)],
+                tma_bar_ptr=pipeline_obj.producer_get_barrier(prod_state),
+            )
+        else:
+            # Every member shares tXgX's tile-coordinate arithmetic (the coefficients are
+            # just the tile size); tma_desc_ptr supplies this member's geometry.
+            cute.copy(
+                tma_atom_x,
+                tXgX[(None, (tile_y, tile_x))],
+                tXsX[(None, prod_state.index)],
+                tma_bar_ptr=pipeline_obj.producer_get_barrier(prod_state),
+                tma_desc_ptr=tmap.get_tensormap_ptr(desc_x, cute.AddressSpace.generic),
+            )
+        # Notify the consumer that this SMEM buffer is ready for consumption
+        pipeline_obj.producer_commit(prod_state)
+
     @cute.jit
     def _process_block(
         self,
-        block_id, # Which 128x128 chunk we're working on (global block ID)
-        tensor_id, # Which tensor this block belongs to (global tensor ID)
-        rows, # Number of rows in this tensor (logical shape)
-        cols, # Number of columns in this tensor (logical shape)
-        mOffsets, # Offsets of each tensor in the group
-        mTensormaps, # TMA descriptors for each tensor (input, rowwise output, colwise output)
-        mS_row, # Grouped rowwise scales
-        mS_col, # Grouped colwise scales
-        first_logical_dim, # First dimension of the grouped tensor
-        last_logical_dim, # Last dimension of the grouped tensor
-        tmap, # TensorMapManager for managing TMA descriptors
-        last_tensor_id, # Last tensor ID processed by this CTA (for descriptor fencing)
+        block_id,  # Which 128x128 chunk we're working on (global block ID)
+        tensor_id,  # Which tensor this block belongs to (global tensor ID)
+        rows,  # Number of rows in this tensor (logical shape)
+        cols,  # Number of columns in this tensor (logical shape)
+        mOffsets,  # Offsets of each tensor in the group
+        mTensormaps,  # TMA descriptors for each tensor (input, rowwise output, colwise output)
+        mS_row,  # Grouped rowwise scales
+        mS_col,  # Grouped colwise scales
+        first_logical_dim,  # First dimension of the grouped tensor
+        last_logical_dim,  # Last dimension of the grouped tensor
+        tmap,  # TensorMapManager for managing TMA descriptors
+        last_tensor_id,  # Last tensor ID processed by this CTA (for descriptor fencing)
         warp_idx,
         tidx,
-        sX, # SMEM input for this block
-        sO_row, # SMEM rowwise output for this block
-        sO_col, # SMEM colwise output for this block
-        tXsX, # Tiled sX for TMA
-        tXgX, # Tiled gX for TMA
-        tXsO_row, # Tiled sO_row for TMA
-        tXgO_row, # Tiled gO_row for TMA
-        tXsO_col, # Tiled sO_col for TMA
-        tXgO_col, # Tiled gO_col for TMA
-        tma_atom_x, # TMA atom for input
-        tma_atom_out_row, # TMA atom for rowwise output
-        tma_atom_out_col, # TMA atom for colwise output
-        mainloop_pipeline, 
+        sX,  # SMEM input for this block
+        sO_row,  # SMEM rowwise output for this block
+        sO_col,  # SMEM colwise output for this block
+        tXsX,  # Tiled sX for TMA
+        tXgX,  # Tiled gX for TMA
+        tXsO_row,  # Tiled sO_row for TMA
+        tXgO_row,  # Tiled gO_row for TMA
+        tXsO_col,  # Tiled sO_col for TMA
+        tXgO_col,  # Tiled gO_col for TMA
+        tma_atom_x,  # TMA atom for input
+        tma_atom_out_row,  # TMA atom for rowwise output
+        tma_atom_out_col,  # TMA atom for colwise output
+        mainloop_pipeline: cutlass.pipeline.PipelineTmaAsync,
         prod_state,
         cons_state,
     ):
@@ -650,7 +696,8 @@ class MXFP8GroupQuantizeKernel:
                     assumed_align=4,
                 ),
                 cute.make_layout(
-                    (scale_rows // MXFP8_BLOCK_SCALING_SIZE, scale_col_stride), stride=(scale_col_stride, 1)
+                    (scale_rows // MXFP8_BLOCK_SCALING_SIZE, scale_col_stride),
+                    stride=(scale_col_stride, 1),
                 ),
             )
             mS_col_tiled = cute.zipped_divide(
@@ -669,61 +716,40 @@ class MXFP8GroupQuantizeKernel:
                     tmap.fence_tensormap_update(desc_out_row)
                 if cutlass.const_expr(cfg.COLWISE):
                     tmap.fence_tensormap_update(desc_out_col)
+        else:
+            desc_x = desc_out_row = desc_out_col = None
         cute.arch.sync_threads()
 
-        # Coordinates of this tile within the tensor
-        tile_id_Y = block_offset_Y // self.BUFF_DIM_Y
-        tile_id_X = block_offset_X
+        # This chunk's coordinates in the tile grid (32x128 TMA boxes, not elements).
+        tile_id_Y = block_id_Y * self.STAGES
+        tile_id_X = block_id_X
 
-        # Prefetch the pipeline
-        if warp_idx == 0:
-            mainloop_pipeline.producer_acquire(prod_state)
-            if cutlass.const_expr(cfg.IS_SINGLE_TENSOR):
-                cute.copy(
+        # Fill every buffer up front, then issue one more each time a stage is consumed.
+        for prologue_stage in cutlass.range_constexpr(self.PIPELINE_DEPTH):
+            if warp_idx == 0:
+                self._issue_load(
+                    mainloop_pipeline,
+                    prod_state,
+                    tile_id_Y + prologue_stage,
+                    tile_id_X,
                     tma_atom_x,
-                    tXgX[(None, (tile_id_Y, block_id_X))],
-                    tXsX[(None, prod_state.index)],
-                    tma_bar_ptr=mainloop_pipeline.producer_get_barrier(prod_state),
+                    tXgX,
+                    tXsX,
+                    tmap,
+                    desc_x,
                 )
-            else:
-                cute.copy(
-                    tma_atom_x,
-                    tXgX[(None, (tile_id_Y, block_id_X))],
-                    tXsX[(None, prod_state.index)],
-                    tma_bar_ptr=mainloop_pipeline.producer_get_barrier(prod_state),
-                    tma_desc_ptr=tmap.get_tensormap_ptr(desc_x, cute.AddressSpace.generic),
-                )
-            mainloop_pipeline.producer_commit(prod_state)
             prod_state.advance()
 
         for stage in cutlass.range_constexpr(self.STAGES):
-            # Prefetch the next slice.
-            if stage < self.STAGES - 1:
-                if warp_idx == 0:
-                    mainloop_pipeline.producer_acquire(prod_state)
-                    nxt = tile_id_Y + stage + 1
-                    if cutlass.const_expr(cfg.IS_SINGLE_TENSOR):
-                        cute.copy(
-                            tma_atom_x,
-                            tXgX[(None, (nxt, block_id_X))],
-                            tXsX[(None, prod_state.index)],
-                            tma_bar_ptr=mainloop_pipeline.producer_get_barrier(prod_state),
-                        )
-                    else:
-                        cute.copy(
-                            tma_atom_x,
-                            tXgX[(None, (nxt, block_id_X))],
-                            tXsX[(None, prod_state.index)],
-                            tma_bar_ptr=mainloop_pipeline.producer_get_barrier(prod_state),
-                            tma_desc_ptr=tmap.get_tensormap_ptr(desc_x, cute.AddressSpace.generic),
-                        )
-                    mainloop_pipeline.producer_commit(prod_state)
-                    prod_state.advance()
-
+            # Wait for at most DEPTH-1 iters on the fly, which means the the last DEPTH iter has finished
+            # so we can reuse its SMEM output buffer
+            # (input buffer is managed by the producer and consumer pipeline states)
+            if warp_idx == 0:
+                cute.arch.cp_async_bulk_wait_group(self.PIPELINE_DEPTH - 1, read=True)
+            # Wait for this stage's input buffer to be filled by the producer
             mainloop_pipeline.consumer_wait(cons_state)
             cute.arch.sync_threads()
-            stage_idx = cons_state.index
-            sX_tile = sX[(None, stage_idx)]
+            sX_tile = sX[(None, cons_state.index)]
             row_tile = tile_id_Y + stage
             tile_row_start = block_offset_Y + stage * self.BUFF_DIM_Y
 
@@ -731,8 +757,8 @@ class MXFP8GroupQuantizeKernel:
                 quantize_colwise_mxfp8(
                     sX_tile,
                     None,
-                    sO_col[(None, stage_idx)],
-                    cute.flatten(mS_col_tiled[(None, (row_tile, block_id_X))]),
+                    sO_col[(None, cons_state.index)],
+                    cute.flatten(mS_col_tiled[(None, (row_tile, tile_id_X))]),
                     cfg.MAX_NORM_RCP,
                     tile_row_start,
                     block_offset_X,
@@ -750,8 +776,8 @@ class MXFP8GroupQuantizeKernel:
                 quantize_rowwise_mxfp8(
                     sX_tile,
                     None,
-                    sO_row[(None, stage_idx)],
-                    cute.flatten(mS_row_tiled[(None, (row_tile, block_id_X))]),
+                    sO_row[(None, cons_state.index)],
+                    cute.flatten(mS_row_tiled[(None, (row_tile, tile_id_X))]),
                     cfg.MAX_NORM_RCP,
                     tile_row_start,
                     block_offset_X,
@@ -768,23 +794,44 @@ class MXFP8GroupQuantizeKernel:
                     False,
                 )
 
+            # Force consumer's write to SMEM to be visible to TMA stores later
             cute.arch.fence_proxy("async.shared", space="cta")
+            # Only after everyone finishes computation then this stage can be considered as "consumed"
             cute.arch.sync_threads()
+            # I'm done with my input SMEM buffer, so the producer can write the next stage's data into it
             mainloop_pipeline.consumer_release(cons_state)
 
+            # I just freed my input SMEM buffer (stage), so the producer now can use it for writing
+            # (stage+DEPTH) stage's data if that stage exists
+            if cutlass.const_expr(stage + self.PIPELINE_DEPTH < self.STAGES):
+                if warp_idx == 0:
+                    self._issue_load(
+                        mainloop_pipeline,
+                        prod_state,
+                        tile_id_Y + stage + self.PIPELINE_DEPTH,
+                        tile_id_X,
+                        tma_atom_x,
+                        tXgX,
+                        tXsX,
+                        tmap,
+                        desc_x,
+                    )
+                prod_state.advance()
+
+            # Write result to GMEM via TMA
             if warp_idx == 0:
                 if cutlass.const_expr(cfg.ROWWISE):
                     if cutlass.const_expr(cfg.IS_SINGLE_TENSOR):
                         cute.copy(
                             tma_atom_out_row,
-                            tXsO_row[(None, stage_idx)],
-                            tXgO_row[(None, (row_tile, block_id_X))],
+                            tXsO_row[(None, cons_state.index)],
+                            tXgO_row[(None, (row_tile, tile_id_X))],
                         )
                     else:
                         cute.copy(
                             tma_atom_out_row,
-                            tXsO_row[(None, stage_idx)],
-                            tXgO_row[(None, (row_tile, block_id_X))],
+                            tXsO_row[(None, cons_state.index)],
+                            tXgO_row[(None, (row_tile, tile_id_X))],
                             tma_desc_ptr=tmap.get_tensormap_ptr(
                                 desc_out_row, cute.AddressSpace.generic
                             ),
@@ -793,20 +840,20 @@ class MXFP8GroupQuantizeKernel:
                     if cutlass.const_expr(cfg.IS_SINGLE_TENSOR):
                         cute.copy(
                             tma_atom_out_col,
-                            tXsO_col[(None, stage_idx)],
-                            tXgO_col[(None, (row_tile, block_id_X))],
+                            tXsO_col[(None, cons_state.index)],
+                            tXgO_col[(None, (row_tile, tile_id_X))],
                         )
                     else:
                         cute.copy(
                             tma_atom_out_col,
-                            tXsO_col[(None, stage_idx)],
-                            tXgO_col[(None, (row_tile, block_id_X))],
+                            tXsO_col[(None, cons_state.index)],
+                            tXgO_col[(None, (row_tile, tile_id_X))],
                             tma_desc_ptr=tmap.get_tensormap_ptr(
                                 desc_out_col, cute.AddressSpace.generic
                             ),
                         )
+                # Commit all TMA operations of this iteration
                 cute.arch.cp_async_bulk_commit_group()
-                cute.arch.cp_async_bulk_wait_group(1, read=True)
 
             cons_state.advance()
 
