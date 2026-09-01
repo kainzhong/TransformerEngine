@@ -570,11 +570,18 @@ class MXFP8GroupQuantizeKernel:
                 desc_x = tmap.get_tensormap_ptr(mTensormaps[(tensor_id, 0, None)].iterator)
                 desc_out_row = tmap.get_tensormap_ptr(mTensormaps[(tensor_id, 1, None)].iterator)
                 desc_out_col = tmap.get_tensormap_ptr(mTensormaps[(tensor_id, 2, None)].iterator)
-                tmap.fence_tensormap_update(desc_x)
-                if cutlass.const_expr(cfg.ROWWISE):
-                    tmap.fence_tensormap_update(desc_out_row)
-                if cutlass.const_expr(cfg.COLWISE):
-                    tmap.fence_tensormap_update(desc_out_col)
+                # Acquire the descriptors on ONE thread, as the CUDA kernel does
+                # (`leading_thread` in group_quantize_mxfp8.cuh); the sync_threads below
+                # publishes it CTA-wide. Running the tensormap acquire fence on all 128
+                # threads is correct but very expensive -- it more than doubles the
+                # kernel time on the multi-tensor path (4096x14336 bidirectional:
+                # 133 us -> 58 us), since the cost scales with threads x descriptors.
+                if tidx == 0:
+                    tmap.fence_tensormap_update(desc_x)
+                    if cutlass.const_expr(cfg.ROWWISE):
+                        tmap.fence_tensormap_update(desc_out_row)
+                    if cutlass.const_expr(cfg.COLWISE):
+                        tmap.fence_tensormap_update(desc_out_col)
 
                 cute.arch.sync_threads()
 
