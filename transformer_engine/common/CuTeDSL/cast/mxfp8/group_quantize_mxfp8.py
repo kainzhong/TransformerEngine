@@ -30,11 +30,17 @@ logical shape [1, total] is not tileable); the C++ bridge falls back to CUDA.
 """
 
 """
-TODO:
-  - OOB scale padding: CUDA writes 0; the helpers skip the store. Only bites when last_logical_dim % 128 != 0 under SAME_BOTH_DIMS/VARYING_FIRST_DIM. My tests wouldn't catch it — they compare only the meaningful region.
-  - num_tensors = mOffsets.shape[0] - 1: the bridge substitutes a length-num_tensors stub for SAME_BOTH_DIMS, so this reads one too few (and divides by zero at num_tensors == 1). Harmless today only because tensor_id is dead for that rep. My harness always passed a real n+1 offsets array, so it didn't exercise this.
-  - Int32 arithmetic on block_global_offset / tensor_base / first*last where CUDA uses size_t — overflows past 2^31 elements.
-  - Cheap occupancy win: sO_row and sO_col are both allocated unconditionally; CUDA sizes only the direction in use. For fp32 that's 48 KB instead of 40 KB per CTA.
+Measured, deliberately NOT changed:
+  - sO_row and sO_col are both allocated unconditionally, where CUDA sizes only the
+    direction in use. Sizing them conditionally does work -- ncu confirms the shared-memory
+    occupancy limit goes 6 -> 9 CTAs/SM for a single-direction bf16 config -- but it is a
+    small LOSS on GB200, not a win: rep_med_sbd bf16 colwise 54.9 -> 56.1 us, rowwise
+    56.5 -> 57.0 us (fp32 rowwise gains ~1%). The kernel is DRAM-bandwidth-bound at
+    ~6.3 TB/s, so extra resident CTAs only add contention. Verified by a control that kept
+    the conditional code but padded SMEM back to the old size: timings returned exactly to
+    the unconditional numbers, so the effect is the occupancy, not codegen. Revisit if a
+    future variant (dbias / activation) makes this kernel latency- rather than
+    bandwidth-bound.
 """
 
 # pylint: disable=missing-class-docstring
@@ -185,7 +191,13 @@ class MXFP8GroupQuantizeKernel:
         cfg = self.cfg
         first_logical_dim = mX.shape[0]
         last_logical_dim = mX.shape[1]
-        num_tensors = mOffsets.shape[0] - 1
+        # Number of group members. Do NOT derive this from mOffsets: a caller is free to
+        # pass a length-num_tensors stub for SAME_BOTH_DIMS (where the offsets array is
+        # unused), which would make `mOffsets.shape[0] - 1` read one too few and divide by
+        # zero at num_tensors == 1. The per-tensor descriptor workspace is num_tensors long
+        # by construction -- one slot set per member -- so it is the reliable source, and it
+        # is only consulted on the multi-tensor path that actually needs the workspace.
+        num_tensors = mTensormaps.shape[0]
 
         smem_tile_layout = cute.make_ordered_layout(
             (self.BUFF_DIM_Y, self.BUFF_DIM_X), order=(1, 0)
@@ -214,15 +226,18 @@ class MXFP8GroupQuantizeKernel:
             # Each CTA handles a block from one individual tensor
             grid = [work_blocks_X * work_blocks_Y, 1, 1]
         else:
-            # How many blocks does the whole grouped tensor if flattened to a single row of blocks
+            # The work-block grid is per-tensor here, not global: each CTA derives its own
+            # block range from its tensor's extents (see the kernel's `else` branch), so
+            # work_blocks_X/Y are dead on this path -- the kernel reads them only under
+            # IS_SINGLE_TENSOR. Pass dummies rather than computing first*last, which is an
+            # ELEMENT count and would wrap Int32 past 2^31 elements.
             work_blocks_Y = Int32(1)
-            work_blocks_X = cute.ceil_div(
-                Int32(first_logical_dim) * Int32(last_logical_dim), self.ELTS_PER_CHUNK
-            )
+            work_blocks_X = Int32(1)
             # There is in total SM_COUNT * STATIC_PERSISTENT_BLOCKS_PER_SM workers, and they handle all tensors
             # So each tensor gets workers_per_tensor workers
             workers_per_tensor = cute.ceil_div(
-                Int32(self.SM_COUNT * self.STATIC_PERSISTENT_BLOCKS_PER_SM), Int32(num_tensors)
+                Int32(self.SM_COUNT * self.STATIC_PERSISTENT_BLOCKS_PER_SM),
+                cutlass.max(Int32(num_tensors), Int32(1)),  # never divide by zero
             )
             # workers_per_tensor works server a tensor regardless of this tensor's shape
             # And we laucnh num_tensors such groups to cover all tensors
@@ -479,7 +494,11 @@ class MXFP8GroupQuantizeKernel:
         # Metadata of the tensor that owns this block
         tensor_rows = Int32(0)
         tensor_cols = Int32(0)
-        tensor_base = Int32(0)
+        # Element offset of this tensor within the group: Int64 (CUDA uses size_t), since a
+        # group can exceed 2^31 elements even when every individual extent is small.
+        # Element offset of this tensor within the group: Int64 (CUDA uses size_t), since a
+        # group can exceed 2^31 elements even when every individual extent is small.
+        tensor_base = Int64(0)
         # Block's offset and id in this individual tensor / global single tensor
         block_offset_Y = Int32(0)
         block_id_X = Int32(0)
@@ -500,7 +519,10 @@ class MXFP8GroupQuantizeKernel:
             block_offset_Y = block_id_Y * self.CHUNK_DIM_Y
             if cutlass.const_expr(cfg.SHAPE_REP == VARYING_FIRST_DIM):
                 # Check if this block contains any valid tokens since the last offset <= logical_first_dim * logical_last_dim
-                if Int64(block_offset_Y) * Int64(last_logical_dim) >= Int64(mOffsets[num_tensors]):
+                # Last CSR offset == the group's total element count. Indexed off the
+                # array's own length so it does not depend on num_tensors.
+                total_elts = Int64(mOffsets[mOffsets.shape[0] - 1])
+                if Int64(block_offset_Y) * Int64(last_logical_dim) >= total_elts:
                     has_work = Boolean(False)
         else:
             # grid = [workers_per_tensor, Int32(num_tensors), 1]
@@ -509,7 +531,7 @@ class MXFP8GroupQuantizeKernel:
             meta = mTensormaps[(tensor_id, META_SLOT, None)]
             tensor_rows = Int32(meta[0])
             tensor_cols = Int32(meta[1])
-            tensor_base = Int32(meta[2])
+            tensor_base = Int64(meta[2])
             if tensor_rows > 0 and tensor_cols > 0:
                 # How many blocks does this tensor have in both directions
                 block_columns_in_tensor = cute.ceil_div(tensor_cols, self.CHUNK_DIM_X)
@@ -678,7 +700,7 @@ class MXFP8GroupQuantizeKernel:
         block_id_X_in_tensor,  # Column-chunk index within the tensor
         rows,  # Number of rows in this tensor (logical shape)
         cols,  # Number of columns in this tensor (logical shape)
-        tensor_base,  # Element offset of this tensor in the group (0 for single-tensor)
+        tensor_base,  # Int64 element offset of this tensor in the group (0 for single-tensor)
         desc_x,  # Per-tensor descriptors, already acquired by the caller (None if single-tensor)
         desc_out_row,
         desc_out_col,
@@ -713,7 +735,7 @@ class MXFP8GroupQuantizeKernel:
         scale_base = (
             Int64(0)
             if cutlass.const_expr(cfg.IS_SINGLE_TENSOR)
-            else Int64(tensor_base) // MXFP8_BLOCK_SCALING_SIZE
+            else tensor_base // Int64(MXFP8_BLOCK_SCALING_SIZE)
         )
 
         if cutlass.const_expr(cfg.ROWWISE):
@@ -802,10 +824,11 @@ class MXFP8GroupQuantizeKernel:
                     None,
                     cfg.DTYPE,
                     cfg.FP8_DTYPE,
-                    False,
+                    False,  # SWIZZLE
                     self.BUFF_DIM_X,
                     self.BUFF_DIM_Y,
-                    False,
+                    False,  # SKIP_MASKING
+                    True,  # ZERO_OOB_SCALES: mirror CUDA's zero-fill of the scale padding
                 )
             if cutlass.const_expr(cfg.ROWWISE):
                 quantize_rowwise_mxfp8(
@@ -826,7 +849,8 @@ class MXFP8GroupQuantizeKernel:
                     self.WAVES,
                     self.THREADS_PER_BANK,
                     self.PACK_SIZE,
-                    False,
+                    False,  # SKIP_MASKING
+                    True,  # ZERO_OOB_SCALES: mirror CUDA's zero-fill of the scale padding
                 )
 
             # Force consumer's write to SMEM to be visible to TMA stores later
