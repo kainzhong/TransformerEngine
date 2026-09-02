@@ -4,12 +4,14 @@
 
 """Cross-backend bit-exactness tests for the CuTeDSL grouped MXFP8 quantize kernel.
 
-Unlike tests/pytorch/mxfp8/test_mxfp8_cutedsl_backend.py, the grouped kernel has no C++
-bridge yet, so it cannot be reached through the public dispatch by toggling
-nvte_set_cutedsl_quant_backend. Instead the CuTeDSL kernel is invoked directly with the
-same marshalling the bridge will use, and its output is compared byte-for-byte against
-the CUDA grouped kernel reached through tex.group_quantize.
+Two levels, both compared byte-for-byte against the CUDA grouped kernel:
+  * the CuTeDSL kernel invoked directly, with the same marshalling the C++ bridge uses;
+  * the same kernel reached through the public dispatch (tex.group_quantize) with the
+    bridge in group_quantize_mxfp8_cutedsl.cuh selected via nvte_set_cutedsl_quant_backend.
 """
+
+import ctypes
+import os
 
 import pytest
 import torch
@@ -18,6 +20,9 @@ import transformer_engine.pytorch as te
 import transformer_engine_torch as tex
 from transformer_engine.pytorch import MXFP8Quantizer
 
+import tvm_ffi
+
+from transformer_engine.common import _get_shared_object_file
 from transformer_engine.common.CuTeDSL.cast.mxfp8.group_quantize_mxfp8 import (
     MXFP8GroupQuantizeConfig,
     compile_cutedsl_function_from_cfg,
@@ -27,6 +32,22 @@ from transformer_engine.common.CuTeDSL.cast.mxfp8.group_quantize_mxfp8 import (
 
 recipe_available, reason_for_no_recipe = te.is_mxfp8_available(return_reason=True)
 pytestmark = pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+
+# The already-loaded core lib (dlopen refcounts: this returns the same handle, so the call
+# mutates the same dispatcher singleton the quantize ops read).
+CORE_LIB = ctypes.CDLL(str(_get_shared_object_file("core")))
+if not hasattr(CORE_LIB, "nvte_set_cutedsl_quant_backend"):
+    raise RuntimeError(
+        "libtransformer_engine.so lacks nvte_set_cutedsl_quant_backend -- rebuild the "
+        "Transformer Engine core library."
+    )
+
+# The CuTeDSL entrypoints are registered only when NVTE_ENABLE_CUTEDSL_QUANT_BACKEND is set
+# (see common/__init__.py); without it the dispatch has nothing to select.
+cutedsl_enabled = os.environ.get("NVTE_ENABLE_CUTEDSL_QUANT_BACKEND", "0") != "0"
+requires_dispatch = pytest.mark.skipif(
+    not cutedsl_enabled, reason="NVTE_ENABLE_CUTEDSL_QUANT_BACKEND is not set"
+)
 
 DEV = "cuda"
 
@@ -85,14 +106,31 @@ def build_group(shapes, rep, in_dtype, seed=0):
     return members, payload, offsets, logical, first_dims, last_dims
 
 
-def run_cuda(payload, logical, num_tensors, first_dims, last_dims, fp8_dtype, rowwise, colwise):
-    """Reference: the CUDA grouped kernel through the public dispatch."""
+def set_cutedsl_backend(enabled):
+    CORE_LIB.nvte_set_cutedsl_quant_backend(1 if enabled else 0)
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _restore_backend_choice_from_env():
+    """Restore the backend choice this pytest module toggles when it is done."""
+    yield
+    set_cutedsl_backend(cutedsl_enabled)
+
+
+def run_dispatch(
+    payload, logical, num_tensors, first_dims, last_dims, fp8_dtype, rowwise, colwise, cutedsl=False
+):
+    """The grouped kernel through the public dispatch, on the requested backend."""
     q = MXFP8Quantizer(fp8_dtype=fp8_dtype, rowwise=rowwise, columnwise=colwise)
     q.optimize_for_gemm = False  # compact (non-swizzled) scales; CuTeDSL has no swizzle path
     to_dev = lambda v: None if v is None else torch.tensor(v, dtype=torch.int64, device=DEV)
-    out = tex.group_quantize(
-        payload.view(*logical), q, num_tensors, to_dev(first_dims), to_dev(last_dims)
-    )
+    set_cutedsl_backend(cutedsl)
+    try:
+        out = tex.group_quantize(
+            payload.view(*logical), q, num_tensors, to_dev(first_dims), to_dev(last_dims)
+        )
+    finally:
+        set_cutedsl_backend(False)
     return out.split_into_quantized_tensors()
 
 
@@ -162,7 +200,7 @@ def run_test_case(rep, shapes, in_dtype, fp8_dtype, block_size):
     colwise = block_size[0] != 1
     members, payload, offsets, logical, first_dims, last_dims = build_group(shapes, rep, in_dtype)
 
-    ref = run_cuda(
+    ref = run_dispatch(
         payload, logical, len(shapes), first_dims, last_dims, fp8_dtype, rowwise, colwise
     )
     o_row, o_col, s_row, s_col = run_cutedsl(
@@ -227,3 +265,110 @@ def test_group_dtypes(rep, shapes, fp8_dtype, in_dtype):
 )
 def test_group_large(rep, shapes):
     run_test_case(rep, shapes, torch.bfloat16, tex.DType.kFloat8E4M3, (32, 32))
+
+
+def get_cfg_key(in_dtype, fp8_dtype, rowwise, colwise, rep):
+    """Mirror of MXFP8GroupQuantConfig::to_key (group_quantize_mxfp8_cutedsl.cuh): the name
+    the bridge registers this config's compiled kernel under.
+    """
+    return "_".join(
+        [
+            "cutedsl_group_mxfp8",
+            DTYPE_TO_STR[in_dtype],
+            FP8_TO_KEY[fp8_dtype],
+            "1" if rowwise else "0",
+            "1" if colwise else "0",
+            rep,
+        ]
+    )
+
+
+def run_dispatch_test_case(rep, shapes, in_dtype, fp8_dtype, block_size):
+    """Assert the public dispatch reaches the CuTeDSL bridge and matches CUDA bit-for-bit."""
+    rowwise = block_size[1] != 1
+    colwise = block_size[0] != 1
+    _, payload, _, logical, first_dims, last_dims = build_group(shapes, rep, in_dtype)
+
+    args = (payload, logical, len(shapes), first_dims, last_dims, fp8_dtype, rowwise, colwise)
+    ref = run_dispatch(*args, cutedsl=False)
+    got = run_dispatch(*args, cutedsl=True)
+
+    # Without this the comparison below would silently be CUDA against CUDA.
+    key = get_cfg_key(in_dtype, fp8_dtype, rowwise, colwise, rep)
+    assert (
+        tvm_ffi.get_global_func(key, allow_missing=True) is not None
+    ), f"the bridge did not select the CuTeDSL backend for {key}"
+
+    for i, (mi, ni) in enumerate(shapes):
+        if mi == 0 or ni == 0:
+            continue
+        tag = f"{rep}/member {i} ({mi}x{ni})/{DTYPE_TO_STR[in_dtype]}/{get_fp8_id(fp8_dtype)}"
+        # Only the meaningful scale region: the [128,4] / [4,128] alignment padding is
+        # zeroed by CUDA but skipped by CuTeDSL (same convention as run_test_case).
+        if rowwise:
+            assert torch.equal(
+                got[i]._rowwise_data.view(torch.uint8), ref[i]._rowwise_data.view(torch.uint8)
+            ), f"{tag}: rowwise data differ between backends"
+            assert torch.equal(
+                got[i]._rowwise_scale_inv.view(torch.uint8)[:mi, : (ni + 31) // 32],
+                ref[i]._rowwise_scale_inv.view(torch.uint8)[:mi, : (ni + 31) // 32],
+            ), f"{tag}: rowwise scales differ between backends"
+        if colwise:
+            assert torch.equal(
+                got[i]._columnwise_data.view(torch.uint8),
+                ref[i]._columnwise_data.view(torch.uint8),
+            ), f"{tag}: colwise data differ between backends"
+            assert torch.equal(
+                got[i]._columnwise_scale_inv.view(torch.uint8)[: mi // 32, :ni],
+                ref[i]._columnwise_scale_inv.view(torch.uint8)[: mi // 32, :ni],
+            ), f"{tag}: colwise scales differ between backends"
+
+
+# Same coverage as test_group_cast_only, but through nvte_group_quantize so the C++ bridge
+# (config -> key -> compiled kernel, tensor marshalling, descriptor workspace) is exercised.
+@requires_dispatch
+@pytest.mark.parametrize("rep,shapes", GROUP_CASES, ids=GROUP_IDS)
+@pytest.mark.parametrize("block_size", BLOCK_SIZES, ids=get_block_id)
+def test_group_dispatch_cast_only(block_size, rep, shapes):
+    run_dispatch_test_case(rep, shapes, torch.bfloat16, tex.DType.kFloat8E4M3, block_size)
+
+
+@requires_dispatch
+@pytest.mark.parametrize("in_dtype", IN_DTYPES, ids=get_dtype_id)
+@pytest.mark.parametrize("fp8_dtype", FP8_DTYPES, ids=get_fp8_id)
+@pytest.mark.parametrize("rep,shapes", GROUP_CASES[::2], ids=GROUP_IDS[::2])
+def test_group_dispatch_dtypes(rep, shapes, fp8_dtype, in_dtype):
+    run_dispatch_test_case(rep, shapes, in_dtype, fp8_dtype, (32, 32))
+
+
+# The bridge has no swizzled-scale path, so the dispatch must stay on CUDA. Comparing the
+# whole scale buffer -- alignment padding included -- is what makes this a fallback check:
+# CuTeDSL writes neither the swizzle nor the padding, so a bridge that wrongly claimed the
+# config would not reproduce these bytes.
+@requires_dispatch
+def test_group_dispatch_falls_back_on_swizzled_scales():
+    shapes = [(256, 256), (256, 256)]
+    _, payload, _, logical, _, _ = build_group(shapes, "same_both_dims", torch.bfloat16)
+    q = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=True)
+    q.optimize_for_gemm = True
+
+    def quantize(cutedsl):
+        set_cutedsl_backend(cutedsl)
+        try:
+            return tex.group_quantize(
+                payload.view(*logical), q, len(shapes), None, None
+            ).split_into_quantized_tensors()
+        finally:
+            set_cutedsl_backend(False)
+
+    ref, got = quantize(False), quantize(True)
+    for i in range(len(shapes)):
+        for name, attr in (("rowwise", "_rowwise"), ("colwise", "_columnwise")):
+            assert torch.equal(
+                getattr(got[i], attr + "_data").view(torch.uint8),
+                getattr(ref[i], attr + "_data").view(torch.uint8),
+            ), f"member {i}: {name} data differ, so the swizzled config did not fall back"
+            assert torch.equal(
+                getattr(got[i], attr + "_scale_inv").view(torch.uint8),
+                getattr(ref[i], attr + "_scale_inv").view(torch.uint8),
+            ), f"member {i}: {name} scales differ, so the swizzled config did not fall back"
