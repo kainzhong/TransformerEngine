@@ -143,11 +143,15 @@ inline bool mxfp8_group_quantize_cutedsl(const MXFP8GroupQuantConfig &config,
   const size_t last_logical_dim = input_tensor->logical_shape.data[1];
 
   // The kernel is compiled with cute.sym_int32(divisibility=...) on both logical extents,
-  // so a violating shape would silently mis-tile rather than fail. CUDA already requires
-  // the first check; the second is the MXFP8 block size.
-  if (first_logical_dim % CHUNK_DIM_Y != 0 || last_logical_dim % SCALE_DIM_X != 0) {
-    maybe_warn_cutedsl_not_chosen("the grouped logical shape is not a multiple of (", CHUNK_DIM_Y,
-                                  ", ", SCALE_DIM_X, ").");
+  // so a violating shape would silently mis-tile rather than fail. These mirror sym_M /
+  // sym_N in CuTeDSL/cast/mxfp8/group_quantize_mxfp8.py -- the DSL kernel's own chunk
+  // height and MXFP8 block size, which it tiles independently of the CUDA kernel's
+  // CastTraits<SHAPE_REP>.
+  constexpr size_t kChunkDimY = 128;
+  constexpr size_t kScaleDimX = 32;
+  if (first_logical_dim % kChunkDimY != 0 || last_logical_dim % kScaleDimX != 0) {
+    maybe_warn_cutedsl_not_chosen("the grouped logical shape is not a multiple of (", kChunkDimY,
+                                  ", ", kScaleDimX, ").");
     return false;
   }
 

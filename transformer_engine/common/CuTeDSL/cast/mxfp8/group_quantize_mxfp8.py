@@ -7,17 +7,27 @@
 Strategy-aligned port of group_quantize_mxfp8.cuh. The scheduling, descriptor
 management and per-tensor scale addressing mirror the CUDA kernel one-for-one:
 
-  * persistent grid: sm_count * STATIC_PERSISTENT_BLOCKS_PER_SM CTAs, each
-    grid-striding over a virtual work grid of 128x128 chunks (decode_job /
-    is_job_valid / job_has_work / advance_to_next_job).
-  * `is_single_tensor` reps (SAME_BOTH_DIMS, VARYING_FIRST_DIM) address the group
-    through ONE static TMA descriptor with global block offsets -- exactly the
-    CUDA `tensor_map_*_static` path. The other reps get per-tensor descriptors
-    written by a prologue kernel (the CuTeDSL analog of update_tma_descriptors
-    filling g_tensor_maps) and acquired with a tensormap proxy fence.
+  * `is_single_tensor` reps (SAME_BOTH_DIMS, VARYING_FIRST_DIM) launch ONE CTA per
+    128x128 chunk and address the group through ONE static TMA descriptor with
+    global block offsets -- the CUDA `tensor_map_*_static` "direct mapper" path.
+    For SAME_BOTH_DIMS the CUDA grid is linearized per tensor (X, Y-in-tensor,
+    tensor) while this kernel linearizes it flat over the stacked rows; both
+    require every member's row count to be a multiple of CHUNK_DIM_Y, and under
+    that precondition the two decode to the identical (block_offset_Y, block_id_X)
+    for every block index.
+  * the other reps launch grid=(workers_per_tensor, num_tensors) and bind
+    tensor_id to blockIdx.y, so a CTA grid-strides only within its own tensor and
+    never re-resolves which tensor a chunk belongs to. They get per-tensor
+    descriptors written by a prologue kernel (the CuTeDSL analog of
+    update_tma_descriptors filling g_tensor_maps) and acquired with a tensormap
+    proxy fence.
   * per-tensor scale bases/strides follow the CUDA formulas:
         scales_* += is_single_tensor ? 0 : tensor_base / 32
         stride_rowwise = roundup(cols/32, 4)   stride_colwise = roundup(cols, 128)
+
+Both kernels dropped the older flat persistent grid that strided across tensor
+boundaries (CUDA's decode_job / advance_to_next_job, removed in #3483); the
+per-tensor grid above is what replaced it on both sides.
 
 Mechanics that provably yield the same bytes may differ: the mbarrier pipeline is
 expressed with PipelineTmaAsync instead of hand-rolled mbarriers, and
@@ -27,6 +37,13 @@ kernel writes 0 there; downstream only consumes the meaningful region).
 Scope: cast-only (no dbias / activation / dact / amax), compact (non-swizzled)
 scales, rowwise and/or colwise. VARYING_BOTH_DIMS is not handled here (its
 logical shape [1, total] is not tileable); the C++ bridge falls back to CUDA.
+
+Known gap vs CUDA: the CUDA kernel validates on device that every member's first
+dim is a multiple of 128 (get_tensor_rows_num -> NVTE_DEVICE_ERROR). This kernel
+shares the precondition but cannot check it -- CuTeDSL has no device-side assert,
+and for VARYING_FIRST_DIM the per-tensor extents live in device memory, so the
+C++ bridge cannot check them either without a sync. A violating group mis-tiles
+silently here where CUDA raises.
 """
 
 """
@@ -233,14 +250,35 @@ class MXFP8GroupQuantizeKernel:
             # ELEMENT count and would wrap Int32 past 2^31 elements.
             work_blocks_Y = Int32(1)
             work_blocks_X = Int32(1)
-            # There is in total SM_COUNT * STATIC_PERSISTENT_BLOCKS_PER_SM workers, and they handle all tensors
-            # So each tensor gets workers_per_tensor workers
-            workers_per_tensor = cute.ceil_div(
-                Int32(self.SM_COUNT * self.STATIC_PERSISTENT_BLOCKS_PER_SM),
-                cutlass.max(Int32(num_tensors), Int32(1)),  # never divide by zero
+            # Persistent worker count, mirroring get_launch_config() in
+            # group_quantize_mxfp8.cuh. There are SM_COUNT * STATIC_PERSISTENT_BLOCKS_PER_SM
+            # workers in total, split evenly across tensors -- but clamped to the average
+            # number of chunks a tensor actually holds, so a group of small tensors does not
+            # launch CTAs that only reach the `first_block_id >= blocks_in_tensor` early-out.
+            n_tensors = cutlass.max(Int32(num_tensors), Int32(1))  # never divide by zero
+            # CUDA's DIVUP(elts_total, CHUNK_DIM_Y * TILE_DIM_X) / STAGES_X, where TILE_DIM_X
+            # is BUFF_DIM_X here and STAGES_X is 1 for every rep this kernel supports. The
+            # element product would wrap Int32 past 2^31 elements, so divide the first extent
+            # by CHUNK_DIM_Y up front -- it is exact, the kernel is compiled with
+            # sym_int32(divisibility=CHUNK_DIM_Y) on that extent -- and keep the whole
+            # estimate in Int32. Feeding an Int64 into the grid poisons the tile arithmetic
+            # downstream ('cute.make_tile' expects width=32).
+            estimated_work_blocks = cute.ceil_div(
+                (Int32(first_logical_dim) // self.CHUNK_DIM_Y) * Int32(last_logical_dim),
+                self.ELTS_PER_CHUNK // self.CHUNK_DIM_Y,
             )
-            # workers_per_tensor works server a tensor regardless of this tensor's shape
-            # And we laucnh num_tensors such groups to cover all tensors
+            requested_workers_per_tensor = cutlass.max(
+                Int32(1),
+                Int32(self.SM_COUNT * self.STATIC_PERSISTENT_BLOCKS_PER_SM) // n_tensors,
+            )
+            average_work_blocks_per_tensor = cutlass.max(
+                Int32(1), cute.ceil_div(estimated_work_blocks, n_tensors)
+            )
+            workers_per_tensor = cutlass.min(
+                requested_workers_per_tensor, average_work_blocks_per_tensor
+            )
+            # Each group of workers_per_tensor CTAs serves one tensor, and we launch
+            # num_tensors such groups to cover the whole group.
             grid = [workers_per_tensor, Int32(num_tensors), 1]
 
         # Only manually create descriptors for the non-single-tensor case because we will need to manually
@@ -821,14 +859,13 @@ class MXFP8GroupQuantizeKernel:
                     block_offset_X,
                     scale_rows,
                     cols,
-                    None,
-                    cfg.DTYPE,
-                    cfg.FP8_DTYPE,
-                    False,  # SWIZZLE
-                    self.BUFF_DIM_X,
-                    self.BUFF_DIM_Y,
-                    False,  # SKIP_MASKING
-                    True,  # ZERO_OOB_SCALES: mirror CUDA's zero-fill of the scale padding
+                    ACTIVATION=None,
+                    DTYPE=cfg.DTYPE,
+                    FP8_DTYPE=cfg.FP8_DTYPE,
+                    SWIZZLE=False,
+                    TILE_X=self.BUFF_DIM_X,
+                    TILE_Y=self.BUFF_DIM_Y,
+                    SKIP_MASKING=False,
                 )
             if cutlass.const_expr(cfg.ROWWISE):
                 quantize_rowwise_mxfp8(
@@ -841,16 +878,15 @@ class MXFP8GroupQuantizeKernel:
                     block_offset_X,
                     scale_rows,
                     cols,
-                    None,
-                    cfg.DTYPE,
-                    cfg.FP8_DTYPE,
-                    self.BUFF_DIM_X,
-                    self.BUFF_DIM_Y,
-                    self.WAVES,
-                    self.THREADS_PER_BANK,
-                    self.PACK_SIZE,
-                    False,  # SKIP_MASKING
-                    True,  # ZERO_OOB_SCALES: mirror CUDA's zero-fill of the scale padding
+                    ACTIVATION=None,
+                    DTYPE=cfg.DTYPE,
+                    FP8_DTYPE=cfg.FP8_DTYPE,
+                    TILE_X=self.BUFF_DIM_X,
+                    TILE_Y=self.BUFF_DIM_Y,
+                    WAVES=self.WAVES,
+                    THREADS_PER_BANK=self.THREADS_PER_BANK,
+                    PACK_SIZE=self.PACK_SIZE,
+                    SKIP_MASKING=False,
                 )
 
             # Force consumer's write to SMEM to be visible to TMA stores later
