@@ -63,11 +63,13 @@ python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_hybrid_quantizat
 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_identity_quantizer.xml $TE_PATH/tests/pytorch/test_identity_quantizer.py || test_fail "test_identity_quantizer.py"
 NVTE_ALLOW_UNSAFE_PICKLE_EXTRA_STATE=1 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_attention.xml $TE_PATH/tests/pytorch/attention/test_attention.py || test_fail "test_attention.py"
 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_flex_attention.xml $TE_PATH/tests/pytorch/attention/test_flex_attention.py || test_fail "test_flex_attention.py"
+NVTE_GDN_TEST_REQUIRED=1 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_gdn_attention.xml $TE_PATH/tests/pytorch/attention/test_gdn_attention.py || test_fail "test_gdn_attention.py"
 NVTE_ALLOW_UNSAFE_PICKLE_EXTRA_STATE=1 NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_attention_deterministic.xml $TE_PATH/tests/pytorch/attention/test_attention.py || test_fail "NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 test_attention.py"
 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_linear_mxfp8_attention.xml $TE_PATH/tests/pytorch/attention/test_linear_mxfp8_attention.py || test_fail "test_linear_mxfp8_attention.py"
 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_fused_mla_q_uproj.xml $TE_PATH/tests/pytorch/attention/test_fused_mla_q_uproj.py || test_fail "test_fused_mla_q_uproj.py"
 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_kv_cache.xml $TE_PATH/tests/pytorch/attention/test_kv_cache.py || test_fail "test_kv_cache.py"
 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_cu_seqlens_cache.xml $TE_PATH/tests/pytorch/attention/test_cu_seqlens_cache.py || test_fail "test_cu_seqlens_cache.py"
+python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_mixed_thd_attention.xml $TE_PATH/tests/pytorch/attention/test_mixed_thd_attention.py || test_fail "test_mixed_thd_attention.py"
 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_hf_integration.xml $TE_PATH/tests/pytorch/test_hf_integration.py || test_fail "test_hf_integration.py"
 export NVTE_TEST_CHECKPOINT_ARTIFACT_PATH=$TE_PATH/artifacts/tests/pytorch/test_checkpoint
 if [ ! -d "$NVTE_TEST_CHECKPOINT_ARTIFACT_PATH" ]; then
@@ -83,6 +85,18 @@ NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 NVTE_DISABLE_TRITON_AUTOTUNING=1 NVIDIA_TF32_
 PYTORCH_JIT=0 NVTE_TORCH_COMPILE=0 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_grouped_linear.xml $TE_PATH/tests/pytorch/test_grouped_linear.py || test_fail "test_grouped_linear.py"
 PYTORCH_JIT=0 NVTE_TORCH_COMPILE=0 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_ops_grouped_linear_distributed_weight.xml $TE_PATH/tests/pytorch/test_ops_grouped_linear_distributed_weight.py || test_fail "test_ops_grouped_linear_distributed_weight.py"
 NVTE_GROUPED_LINEAR_SINGLE_PARAM=1 NVTE_CUTEDSL_FUSED_GROUPED_MLP=1 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_grouped_mlp.xml $TE_PATH/tests/pytorch/test_grouped_mlp.py || test_fail "test_grouped_mlp.py"
+
+export NVTE_ENABLE_CUTEDSL_QUANT_BACKEND=1
+export NVTE_DEBUG=1
+python3 -m pytest -s --tb=auto --junitxml=$XML_LOG_DIR/pytest_cutedsl_test_mxfp8.xml $TE_PATH/tests/pytorch/mxfp8 || test_fail "CuTeDSL backend: test_mxfp8"
+python3 -m pytest -s --tb=auto --junitxml=$XML_LOG_DIR/pytest_cutedsl_test_quantized_tensor.xml $TE_PATH/tests/pytorch/test_quantized_tensor.py || test_fail "CuTeDSL backend: test_quantized_tensor.py"
+NVTE_GROUPED_LINEAR_SINGLE_PARAM=1 python3 -m pytest -s --tb=auto --junitxml=$XML_LOG_DIR/pytest_cutedsl_test_grouped_tensor.xml $TE_PATH/tests/pytorch/test_grouped_tensor.py || test_fail "CuTeDSL backend: test_grouped_tensor.py"
+PYTORCH_JIT=0 NVTE_TORCH_COMPILE=0 NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 NVTE_FUSED_ATTN=0 python3 -m pytest -s --tb=auto --junitxml=$XML_LOG_DIR/pytest_cutedsl_test_cuda_graphs.xml $TE_PATH/tests/pytorch/test_cuda_graphs.py || test_fail "CuTeDSL backend: test_cuda_graphs.py"
+python3 -m pytest -s --tb=auto --junitxml=$XML_LOG_DIR/pytest_cutedsl_test_fusible_ops.xml $TE_PATH/tests/pytorch/test_fusible_ops.py || test_fail "CuTeDSL backend: test_fusible_ops.py"
+PYTORCH_JIT=0 NVTE_TORCH_COMPILE=0 NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 NVTE_FUSED_ATTN=0 python3 -m pytest -s --tb=auto --junitxml=$XML_LOG_DIR/pytest_cutedsl_test_numerics.xml $TE_PATH/tests/pytorch/test_numerics.py || test_fail "CuTeDSL backend: test_numerics.py"
+python3 -m pytest -s --tb=auto --junitxml=$XML_LOG_DIR/pytest_cutedsl_test_hybrid_quantization.xml $TE_PATH/tests/pytorch/test_hybrid_quantization.py || test_fail "CuTeDSL backend: test_hybrid_quantization.py"
+python3 -m pytest -s --tb=auto --junitxml=$XML_LOG_DIR/pytest_cutedsl_test_linear_mxfp8_attention.xml $TE_PATH/tests/pytorch/attention/test_linear_mxfp8_attention.py || test_fail "CuTeDSL backend: test_linear_mxfp8_attention.py"
+python3 -m pytest -s --tb=auto --junitxml=$XML_LOG_DIR/pytest_cutedsl_test_mxfp8_2d_quantize.xml $TE_PATH/tests/pytorch/test_mxfp8_2d_quantize.py || test_fail "CuTeDSL backend: test_mxfp8_2d_quantize.py"
 
 if [ "$RET" -ne 0 ]; then
     echo "Error in the following test cases:$FAILED_CASES"
