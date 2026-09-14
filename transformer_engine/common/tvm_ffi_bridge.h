@@ -169,6 +169,17 @@ class DLTensorWrapper : public DLTensor {
     this->shape = shape_buf_.data();
     this->strides = strides_buf_.data();
     this->byte_offset = 0;
+
+    // DLPack expresses shape and strides in units of the packed dtype rather than its lanes.
+    const int64_t packing = static_cast<int64_t>(this->dtype.lanes);
+    if (packing > 1 && this->ndim > 0) {
+      int64_t &innermost = shape_buf_[this->ndim - 1];
+      NVTE_CHECK(innermost % packing == 0, "Innermost extent of a ",
+                 static_cast<int>(this->dtype.bits), "-bit tensor must be a multiple of ", packing,
+                 ", but got ", innermost);
+      innermost /= packing;
+      for (int i = 0; i + 1 < this->ndim; ++i) strides_buf_[i] /= packing;
+    }
   }
 
   ~DLTensorWrapper() = default;
