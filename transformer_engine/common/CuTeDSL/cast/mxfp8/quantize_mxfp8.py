@@ -2791,7 +2791,10 @@ def get_mxfp8_quantization_function(
 
         logger.debug("Compiling CuTeDSL MXFP8 quantization kernel for %s", cfg)
         compiled = compile_cutedsl_function_from_cfg(cfg)
-        tvm_ffi.register_global_func(fn_name, compiled, override=True)
+        native = getattr(compiled, "__tvm_ffi_object__", lambda: None)()
+        tvm_ffi.register_global_func(
+            fn_name, native if native is not None else compiled, override=True
+        )
         return True
     except Exception as e:  # pylint: disable=broad-exception-caught
         logger.error(
