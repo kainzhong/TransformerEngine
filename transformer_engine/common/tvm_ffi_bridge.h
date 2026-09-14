@@ -13,9 +13,9 @@
 #include <tvm/ffi/function.h>
 #include <tvm/ffi/optional.h>
 
+#include <array>
 #include <atomic>
 #include <cstdint>
-#include <memory>
 #include <mutex>
 #include <optional>
 #include <shared_mutex>
@@ -132,15 +132,16 @@ class DLTensorWrapper : public DLTensor {
   // Null wrapper (data == nullptr): packs as TVM-FFI None, no allocation.
   DLTensorWrapper() : DLTensor{} {}
 
-  explicit DLTensorWrapper(const NVTEBasicTensor &tensor, bool flatten_2D = true) {
-    const int32_t device_index = transformer_engine::cuda::current_device();
+  explicit DLTensorWrapper(const NVTEBasicTensor &tensor, bool flatten_2D = true,
+                           int32_t device_index = -1) {
+    if (device_index < 0) {
+      device_index = transformer_engine::cuda::current_device();
+    }
     const int n = static_cast<int>(tensor.shape.ndim);
     if (flatten_2D && n > 2) {
       int64_t flat_first = 1;
       for (int i = 0; i + 1 < n; ++i) flat_first *= static_cast<int64_t>(tensor.shape.data[i]);
       const int64_t flat_last = static_cast<int64_t>(tensor.shape.data[n - 1]);
-      shape_buf_ = std::make_unique<int64_t[]>(2);
-      strides_buf_ = std::make_unique<int64_t[]>(2);
       shape_buf_[0] = flat_first;
       shape_buf_[1] = flat_last;
       strides_buf_[0] = flat_last;
@@ -148,16 +149,12 @@ class DLTensorWrapper : public DLTensor {
       this->ndim = 2;
     } else if (flatten_2D && n == 1) {
       const int64_t flat_last = static_cast<int64_t>(tensor.shape.data[0]);
-      shape_buf_ = std::make_unique<int64_t[]>(2);
-      strides_buf_ = std::make_unique<int64_t[]>(2);
       shape_buf_[0] = 1;
       shape_buf_[1] = flat_last;
       strides_buf_[0] = flat_last;
       strides_buf_[1] = 1;
       this->ndim = 2;
     } else {
-      shape_buf_ = std::make_unique<int64_t[]>(n);
-      strides_buf_ = std::make_unique<int64_t[]>(n);
       int64_t stride = 1;
       for (int i = n - 1; i >= 0; --i) {
         shape_buf_[i] = static_cast<int64_t>(tensor.shape.data[i]);
@@ -169,20 +166,36 @@ class DLTensorWrapper : public DLTensor {
     this->data = tensor.data_ptr;
     this->device = DLDevice{kDLCUDA, device_index};
     this->dtype = convert_to_dltype(tensor.dtype);
-    this->shape = shape_buf_.get();
-    this->strides = strides_buf_.get();
+    this->shape = shape_buf_.data();
+    this->strides = strides_buf_.data();
     this->byte_offset = 0;
   }
 
   ~DLTensorWrapper() = default;
-  DLTensorWrapper(const DLTensorWrapper &) = delete;
-  DLTensorWrapper &operator=(const DLTensorWrapper &) = delete;
-  DLTensorWrapper(DLTensorWrapper &&) = default;
-  DLTensorWrapper &operator=(DLTensorWrapper &&) = default;
+  DLTensorWrapper(const DLTensorWrapper &other) { copy_from(other); }
+  DLTensorWrapper &operator=(const DLTensorWrapper &other) {
+    if (this != &other) copy_from(other);
+    return *this;
+  }
+  DLTensorWrapper(DLTensorWrapper &&other) noexcept { copy_from(other); }
+  DLTensorWrapper &operator=(DLTensorWrapper &&other) noexcept {
+    if (this != &other) copy_from(other);
+    return *this;
+  }
 
  private:
-  std::unique_ptr<int64_t[]> shape_buf_;
-  std::unique_ptr<int64_t[]> strides_buf_;
+  static constexpr size_t kMaxNDim = std::extent_v<decltype(NVTEShape::data)>;
+
+  void copy_from(const DLTensorWrapper &other) {
+    static_cast<DLTensor &>(*this) = static_cast<const DLTensor &>(other);
+    shape_buf_ = other.shape_buf_;
+    strides_buf_ = other.strides_buf_;
+    this->shape = other.shape == nullptr ? nullptr : shape_buf_.data();
+    this->strides = other.strides == nullptr ? nullptr : strides_buf_.data();
+  }
+
+  std::array<int64_t, kMaxNDim> shape_buf_{};
+  std::array<int64_t, kMaxNDim> strides_buf_{};
 };
 
 }  // namespace tvm_ffi_bridge
