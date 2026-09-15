@@ -134,8 +134,11 @@ class DLTensorWrapper : public DLTensor {
   // Null wrapper (data == nullptr): packs as TVM-FFI None, no allocation.
   DLTensorWrapper() : DLTensor{} {}
 
-  explicit DLTensorWrapper(const NVTEBasicTensor &tensor, bool flatten_2D = true) {
-    const int32_t device_index = transformer_engine::cuda::current_device();
+  explicit DLTensorWrapper(const NVTEBasicTensor &tensor, bool flatten_2D = true,
+                           int32_t device_index = -1) : DLTensor{} {
+    if (device_index < 0) {
+      device_index = transformer_engine::cuda::current_device();
+    }
     const int n = static_cast<int>(tensor.shape.ndim);
     if (flatten_2D && n > 2) {
       int64_t flat_first = 1;
