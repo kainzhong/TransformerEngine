@@ -15,7 +15,7 @@
 
 #include <atomic>
 #include <cstdint>
-#include <memory>
+#include <cstring>
 #include <mutex>
 #include <optional>
 #include <shared_mutex>
@@ -129,6 +129,8 @@ inline DLDataType convert_to_dltype(NVTEDType type) {
 
 class DLTensorWrapper : public DLTensor {
  public:
+  static constexpr int kMaxNDim = sizeof(NVTEShape::data) / sizeof(NVTEShape::data[0]);
+
   // Null wrapper (data == nullptr): packs as TVM-FFI None, no allocation.
   DLTensorWrapper() : DLTensor{} {}
 
@@ -139,8 +141,6 @@ class DLTensorWrapper : public DLTensor {
       int64_t flat_first = 1;
       for (int i = 0; i + 1 < n; ++i) flat_first *= static_cast<int64_t>(tensor.shape.data[i]);
       const int64_t flat_last = static_cast<int64_t>(tensor.shape.data[n - 1]);
-      shape_buf_ = std::make_unique<int64_t[]>(2);
-      strides_buf_ = std::make_unique<int64_t[]>(2);
       shape_buf_[0] = flat_first;
       shape_buf_[1] = flat_last;
       strides_buf_[0] = flat_last;
@@ -148,16 +148,12 @@ class DLTensorWrapper : public DLTensor {
       this->ndim = 2;
     } else if (flatten_2D && n == 1) {
       const int64_t flat_last = static_cast<int64_t>(tensor.shape.data[0]);
-      shape_buf_ = std::make_unique<int64_t[]>(2);
-      strides_buf_ = std::make_unique<int64_t[]>(2);
       shape_buf_[0] = 1;
       shape_buf_[1] = flat_last;
       strides_buf_[0] = flat_last;
       strides_buf_[1] = 1;
       this->ndim = 2;
     } else {
-      shape_buf_ = std::make_unique<int64_t[]>(n);
-      strides_buf_ = std::make_unique<int64_t[]>(n);
       int64_t stride = 1;
       for (int i = n - 1; i >= 0; --i) {
         shape_buf_[i] = static_cast<int64_t>(tensor.shape.data[i]);
@@ -169,20 +165,36 @@ class DLTensorWrapper : public DLTensor {
     this->data = tensor.data_ptr;
     this->device = DLDevice{kDLCUDA, device_index};
     this->dtype = convert_to_dltype(tensor.dtype);
-    this->shape = shape_buf_.get();
-    this->strides = strides_buf_.get();
+    this->shape = shape_buf_;
+    this->strides = strides_buf_;
     this->byte_offset = 0;
   }
 
-  ~DLTensorWrapper() = default;
-  DLTensorWrapper(const DLTensorWrapper &) = delete;
-  DLTensorWrapper &operator=(const DLTensorWrapper &) = delete;
-  DLTensorWrapper(DLTensorWrapper &&) = default;
-  DLTensorWrapper &operator=(DLTensorWrapper &&) = default;
+  DLTensorWrapper(const DLTensorWrapper &other) : DLTensor{other} {
+    std::memcpy(shape_buf_, other.shape_buf_, sizeof(shape_buf_));
+    std::memcpy(strides_buf_, other.strides_buf_, sizeof(strides_buf_));
+    this->shape = shape_buf_;
+    this->strides = strides_buf_;
+  }
+
+  DLTensorWrapper &operator=(const DLTensorWrapper &other) {
+    if (this != &other) {
+      std::memcpy(shape_buf_, other.shape_buf_, sizeof(shape_buf_));
+      std::memcpy(strides_buf_, other.strides_buf_, sizeof(strides_buf_));
+      this->shape = shape_buf_;
+      this->strides = strides_buf_;
+      this->data = other.data;
+      this->device = other.device;
+      this->dtype = other.dtype;
+      this->ndim = other.ndim;
+      this->byte_offset = other.byte_offset;
+    }
+    return *this;
+  }
 
  private:
-  std::unique_ptr<int64_t[]> shape_buf_;
-  std::unique_ptr<int64_t[]> strides_buf_;
+  int64_t shape_buf_[kMaxNDim];
+  int64_t strides_buf_[kMaxNDim];
 };
 
 }  // namespace tvm_ffi_bridge
