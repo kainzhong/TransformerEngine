@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 
-cmake_minimum_required(VERSION 3.21)
+cmake_minimum_required(VERSION 3.26)
 
 # Language options
 set(CMAKE_CXX_STANDARD 17)
@@ -99,12 +99,10 @@ set(CUTLASS_INCLUDE_DIR
 set(CUTLASS_TOOLS_INCLUDE_DIR
   "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/cutlass/tools/util/include")
 
-# Python
-find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
-
 option(NVTE_WITH_CUTEDSL
        "Build the CuTeDSL quantize backend bridge (requires the apache-tvm-ffi Python package)" ON)
 if(NVTE_WITH_CUTEDSL)
+  find_package(Python 3.10 COMPONENTS Interpreter Development.SABIModule REQUIRED)
   if(NOT EXISTS "${TVM_FFI_INCLUDE_DIR}/tvm/ffi/any.h")
     message(FATAL_ERROR
             "Could not find the TVM-FFI headers in '${TVM_FFI_INCLUDE_DIR}'. "
@@ -112,6 +110,9 @@ if(NVTE_WITH_CUTEDSL)
             "or configure with "
             "-DNVTE_WITH_CUTEDSL=OFF to build the C++ library without the backend.")
   endif()
+else()
+  # TODO(kainingz): see if this is unused now. Looks like in the else path we don't link python at all
+  find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
 endif()
 
 find_path(NCCL_INCLUDE_DIR
@@ -216,6 +217,9 @@ list(APPEND transformer_engine_cpp_sources
 
 if(NVTE_WITH_CUTEDSL)
   list(APPEND transformer_engine_cpp_sources init_python.cpp)
+  set_source_files_properties(
+    init_python.cpp PROPERTIES
+    COMPILE_DEFINITIONS Py_LIMITED_API=0x030A0000)
 endif()
 
 list(APPEND transformer_engine_cuda_sources
@@ -407,7 +411,7 @@ if(NVTE_WITH_CUTEDSL)
   target_compile_definitions(
     transformer_engine PRIVATE
     NVTE_WITH_CUTEDSL)
-  target_link_libraries(transformer_engine PRIVATE Python::Module)
+  target_link_libraries(transformer_engine PRIVATE Python::SABIModule)
 endif()
 
 target_include_directories(transformer_engine PRIVATE

@@ -11,6 +11,46 @@
 namespace transformer_engine {
 namespace tvm_ffi_bridge {
 
+namespace {
+
+bool call_python_function(PyObject *module, const char *name) {
+  PyObject *function = PyObject_GetAttrString(module, name);
+  if (function == nullptr) {
+    return false;
+  }
+  PyObject *result = PyObject_CallObject(function, nullptr);
+  Py_DECREF(function);
+  if (result == nullptr) {
+    return false;
+  }
+  Py_DECREF(result);
+  return true;
+}
+
+bool import_and_register_cutedsl_backends(bool embedding_python) {
+  if (embedding_python) {
+    PyObject *modules = PyImport_GetModuleDict();
+    if (modules == nullptr ||
+        PyDict_SetItemString(modules, "transformer_engine.pytorch", Py_None) != 0 ||
+        PyDict_SetItemString(modules, "transformer_engine.jax", Py_None) != 0) {
+      return false;
+    }
+  }
+
+  PyObject *common = PyImport_ImportModule("transformer_engine.common");
+  if (common == nullptr) {
+    return false;
+  }
+  // Try to initialize again because it's possible that the CuTeDSL backend could be disabled with 
+  // NVTE_ENABLE_CUTEDSL_BACKEND=0 when launching the program
+  const bool initialized = call_python_function(common, "_load_tvm_ffi_library") &&
+                           call_python_function(common, "_register_cutedsl_backends");
+  Py_DECREF(common);
+  return initialized;
+}
+
+}  // namespace
+
 // Initialize the Python interpreter and import the CuTeDSL backend module. This is only compiled
 // with NVTE_WITH_CUTEDSL=ON in CMake and will be ignored otherwise
 bool initialize_python_cutedsl_backend() {
@@ -27,13 +67,7 @@ bool initialize_python_cutedsl_backend() {
           "CUDA backend as fallback.");
       return false;
     }
-    const bool initialized = PyRun_SimpleString(
-                                 "import sys\n"
-                                 "sys.modules['transformer_engine.pytorch'] = None\n"
-                                 "sys.modules['transformer_engine.jax'] = None\n"
-                                 "import transformer_engine.common as te_common\n"
-                                 "te_common._load_tvm_ffi_library()\n"
-                                 "te_common._register_cutedsl_backends()") == 0;
+    const bool initialized = import_and_register_cutedsl_backends(embedding_python);
     if (!initialized) {
       PyErr_Print();
       NVTE_WARN(
@@ -49,10 +83,7 @@ bool initialize_python_cutedsl_backend() {
   // Python is already running in this process but we don't know if it has imported TE or not,
   // so we import here just to be sure
   const PyGILState_STATE gil_state = PyGILState_Ensure();
-  const bool initialized = PyRun_SimpleString(
-                               "import transformer_engine.common as te_common\n"
-                               "te_common._load_tvm_ffi_library()\n"
-                               "te_common._register_cutedsl_backends()") == 0;
+  const bool initialized = import_and_register_cutedsl_backends(embedding_python);
   if (!initialized) {
     PyErr_Print();
     NVTE_WARN(
