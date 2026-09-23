@@ -1436,11 +1436,3 @@ extern "C" __attribute__((visibility("default"))) void nvte_set_cutedsl_backend(
   (void)enabled;
 #endif
 }
-
-extern "C" __attribute__((visibility("default"))) int nvte_get_tvm_ffi_available() {
-#ifdef NVTE_WITH_CUTEDSL
-  return transformer_engine::tvm_ffi_bridge::TVMFFICentral::getInstance().get_tvm_ffi_available();
-#else
-  return 0;
-#endif
-}

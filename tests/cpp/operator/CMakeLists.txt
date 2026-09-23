@@ -3,7 +3,6 @@
 # See LICENSE for license information.
 
 add_executable(test_operator
-               test_cutedsl_backend.cpp
                test_cast.cu
                test_cast_current_scaling.cu
                test_cast_current_scaling_grouped.cu
