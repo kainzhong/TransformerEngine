@@ -97,12 +97,10 @@ Optional Dependencies
 
    :Type: ``int`` (0 or 1)
    :Default: ``0``
-   :Description: Build CuTeDSL kernel bindings. Set to ``1`` for ``setup.py`` builds, or pass
-                 ``-DNVTE_WITH_CUTEDSL=ON`` when configuring with CMake directly. When enabled,
-                 ``libtransformer_engine.so`` uses the CPython Stable ABI from Python 3.10, and
-                 Apache TVM-FFI and CPython development headers are required for compilation.
-                 Standalone C++ executables linking this library must provide the CPython symbols,
-                 for example by linking CMake's ``Python::Python`` target.
+   :Description: Enable CuTeDSL support when building ``libtransformer_engine.so``. When set to ``1``, requires
+                 CPython Stable ABIs from Python 3.10 and above, and ``apache-tvm-ffi`` installed.
+                 Note: when linking ``libtransformer_engine.so`` built with ``NVTE_WITH_CUTEDSL=1`` to a standalone C++ executable,
+                 you must provide the definition of these CPython symbols. See ``tests/cpp/CMakeLists.txt`` for an example.
 
 .. envvar:: NVTE_BUILD_ACTIVATION_WITH_FAST_MATH
 
@@ -145,19 +143,15 @@ General
 
    :Type: ``int`` (0 or 1)
    :Default: ``0``
-   :Description: For Transformer Engine built with ``NVTE_WITH_CUTEDSL=1``, use CuTeDSL kernels
-                 when available. Set this before importing ``transformer_engine``. Apache TVM-FFI
-                 and the CuTeDSL Python dependencies must be available at runtime. If backend
-                 initialization fails after the library is loaded, Transformer Engine falls back
-                 to the CUDA C++ kernels when available.
+   :Description: Use CuTeDSL kernel implementations when available. This requires that Transformer Engine was built with ``NVTE_WITH_CUTEDSL=1``.
+                 It also requires ``apache-tvm-ffi``, ``nvidia-cutlass-dsl`` to be installed and you are using CPython 3.10 or later.
+                 If these requirements are not met, Transformer Engine will fall back to using CUDA C++ kernels if possible.
 
 .. envvar:: NVTE_WARN_IF_CUTEDSL_BACKEND_NOT_CHOSEN
 
    :Type: ``int`` (0 or 1)
    :Default: ``0``
-   :Description: Warn when TE falls back to the CUDA C++ kernels instead of dispatching to
-                 available CuTeDSL kernels. Useful to check if CuTeDSL path is taken,
-                 since a silent fallback is otherwise indistinguishable from success.
+   :Description: Warn when TE falls back to the CUDA C++ kernels instead of dispatching to available CuTeDSL kernels. Useful to verify if the CuTeDSL path is taken.
 
 .. envvar:: NVTE_GROUPED_TENSOR_HANDLE_POOL_SIZE_MB
 
