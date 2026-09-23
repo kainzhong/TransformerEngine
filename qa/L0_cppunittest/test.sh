@@ -16,9 +16,6 @@ export LD_LIBRARY_PATH=$TE_LIB_PATH:$LD_LIBRARY_PATH
 NUM_PHYSICAL_CORES=$(nproc)
 NUM_PARALLEL_JOBS=4
 
-export NVTE_ENABLE_CUTEDSL_BACKEND=1
-export NVTE_WARN_IF_CUTEDSL_BACKEND_NOT_CHOSEN=1
-
 cd $TE_PATH/tests/cpp
 cmake -GNinja -Bbuild .
 cmake --build build
