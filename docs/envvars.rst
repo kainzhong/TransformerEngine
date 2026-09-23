@@ -96,12 +96,11 @@ Optional Dependencies
 .. envvar:: NVTE_WITH_CUTEDSL
 
    :Type: ``int`` (0 or 1)
-   :Default: ``1``
-   :Description: Build CuTeDSL kernel bindings in C++. Set this environment variable to ``0`` when building through
-                 ``setup.py`` to disable them. If you prefer to control this through CMake, pass ``-DNVTE_WITH_CUTEDSL=OFF`` instead.
-                 Disable this for builds that do not want CuTeDSL support or Apache TVM-FFI as a build dependency.
-                 Note: Standalone C++ executables that link a ``libtransformer_engine.so`` built with CuTeDSL enabled must also
-                 link a Python embedding library using CMake's ``Python::Python`` target.
+   :Default: ``0``
+   :Description: Build CuTeDSL kernel bindings. Set to ``1`` for ``setup.py`` builds, or pass
+                 ``-DNVTE_WITH_CUTEDSL=ON`` when configuring with CMake directly. When enabled,
+                 ``libtransformer_engine.so`` uses the CPython Stable ABI from Python 3.10, and
+                 Apache TVM-FFI and CPython development headers are required for compilation.
 
 .. envvar:: NVTE_BUILD_ACTIVATION_WITH_FAST_MATH
 
@@ -144,9 +143,10 @@ General
 
    :Type: ``int`` (0 or 1)
    :Default: ``0``
-   :Description: Use CuTeDSL kernels when available; otherwise, fall back to the
-                 CUDA C++ kernels. CuTeDSL kernels will be registered when
-                 ``import transformer_engine`` so this env var should be set before that.
+   :Description: Use CuTeDSL kernels when available. Set this before importing ``transformer_engine``.
+                 When enabled, Apache TVM-FFI and CPython must be available at runtime. If either dependency
+                 cannot be loaded or initialization fails, Transformer Engine falls back to the CUDA C++ kernels
+                 if they are available.
 
 .. envvar:: NVTE_WARN_IF_CUTEDSL_BACKEND_NOT_CHOSEN
 

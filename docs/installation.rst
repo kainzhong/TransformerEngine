@@ -107,6 +107,19 @@ Execute the following commands to install Transformer Engine from source:
   export NVTE_FRAMEWORK=pytorch         # Optionally set framework
   pip3 install --no-build-isolation .   # Build and install
 
+To build the optional CuTeDSL C++ bridge, install its Python dependencies and opt in explicitly:
+
+.. code-block:: bash
+
+  pip3 install "apache-tvm-ffi>=0.1.12" "nvidia-cutlass-dsl>=4.7.0"
+  NVTE_WITH_CUTEDSL=1 pip3 install --no-build-isolation .
+
+For CUDA 13, install ``nvidia-cutlass-dsl[cu13]>=4.7.0`` instead. At runtime, set
+``NVTE_ENABLE_CUTEDSL_BACKEND=1`` to enable CuTeDSL kernels, which requires Apache TVM-FFI,
+NVIDIA CUTLASS DSL, and CPython 3.10 or later to be available.
+If a dependency cannot be loaded or initialization fails, Transformer Engine falls back to the
+CUDA C++ kernels if they are available.
+
 If the Git repository has already been cloned, make sure to also clone the submodules:
 
 .. code-block:: bash
