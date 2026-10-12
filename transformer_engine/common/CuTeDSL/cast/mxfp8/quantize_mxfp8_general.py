@@ -29,7 +29,7 @@ from typing import Optional, Type
 import cutlass
 from cutlass import cute
 from cutlass import pipeline
-from cutlass import Float32, Int32, Int64, Uint16, Uint32, Uint8
+from cutlass import Float32, Float8E8M0FNU, Int32, Int64, Uint16, Uint32, Uint8
 from cuda.bindings.driver import CUstream  # pylint: disable=no-name-in-module
 
 from transformer_engine.common.CuTeDSL.utils import (
@@ -62,77 +62,6 @@ from transformer_engine.common.CuTeDSL.utils_fp8 import (
     mul_f32x2_cvt_packed16x4_to_fp8x4,
 )
 
-CUTEDSL_DEBUG_LOGGING = os.environ.get("CUTEDSL_DEBUG_LOGGING", "0") == "1"
-
-logger = logging.getLogger("transformer_engine.cutedsl.mxfp8")
-
-# Number of elements per MXFP8 scale block. They will share the same E8M0 scale factor
-MXFP8_BLOCK_SCALING_SIZE = 32
-# How many threads are in one warp
-THREADS_PER_WARP = 32
-
-# FP8E4M3 max representable value
-FP8E4M3_MAX_NORM = 448.0
-FP8E4M3_MAX_NORM_RCP = 1.0 / FP8E4M3_MAX_NORM
-FP8E5M2_MAX_NORM = 57344.0
-FP8E5M2_MAX_NORM_RCP = 1.0 / FP8E5M2_MAX_NORM
-
-# If N is not divisible by 16, writing quantized FP8 output with N bytes per row will fail because
-# TMA requires 16-byte alignment for each row
-SYM_N_DIVISIBILITY = 16
-
-SUPPORTED_ACTIVATIONS = {
-    "relu": act_relu,
-    "gelu": act_gelu,
-    "silu": act_silu,
-    "qgelu": act_qgelu,
-    "srelu": act_srelu,
-}
-
-SUPPORTED_DACTIVATIONS = {
-    "drelu": dact_drelu,
-    "dgelu": dact_dgelu,
-    "dsilu": dact_dsilu,
-    "dqgelu": dact_dqgelu,
-    "dsrelu": dact_dsrelu,
-}
-
-
-@cute.jit
-def derive_swizzled_scale_layout(
-    M: Int32 | Int64,
-    N: Int32 | Int64,
-    ROWWISE: cutlass.Constexpr[bool],
-    COLWISE: cutlass.Constexpr[bool],
-    mS_row: Optional[cute.Tensor],
-    mS_col: Optional[cute.Tensor],
-):
-    """Derive the swizzled layout for the rowwise and colwise scale tensors."""
-    num_scale_cols = cute.ceil_div(N, MXFP8_BLOCK_SCALING_SIZE)
-    num_scale_rows = cute.ceil_div(M, MXFP8_BLOCK_SCALING_SIZE)
-
-    num_tiles_M = cute.ceil_div(M, 128)
-    num_tiles_SC = cute.ceil_div(num_scale_cols, 4)
-    num_tiles_SR = cute.ceil_div(num_scale_rows, 4)
-    num_tiles_N = cute.ceil_div(N, 128)
-
-    if cutlass.const_expr(ROWWISE):
-        mS_row = cute.make_tensor(
-            mS_row.iterator,
-            cute.make_layout(
-                ((32, 4, num_tiles_M), (4, num_tiles_SC)),
-                stride=((16, 4, num_tiles_SC * 512), (1, 512)),
-            ),
-        )
-    if cutlass.const_expr(COLWISE):
-        mS_col = cute.make_tensor(
-            mS_col.iterator,
-            cute.make_layout(
-                ((4, num_tiles_SR), (32, 4, num_tiles_N)),
-                stride=((1, 512), (16, 4, num_tiles_SR * 512)),
-            ),
-        )
-    return mS_row, mS_col
 from .quantize_mxfp8_common import (
     CUTEDSL_DEBUG_LOGGING,
     MXFP8QuantizeConfig,
@@ -189,7 +118,6 @@ def reduce_rowwise_dbias(
     for i in cutlass.range_constexpr(TILE_ROWS):
         block_dbias += sDbias_reduce[tidx, i]
     return block_dbias
-
 
 
 @cute.jit

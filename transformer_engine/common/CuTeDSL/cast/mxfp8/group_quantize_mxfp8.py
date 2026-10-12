@@ -25,7 +25,7 @@ from transformer_engine.common.CuTeDSL.utils import (
     str_to_cutlass_dtype,
     device_compute_capability,
 )
-from transformer_engine.common.CuTeDSL.cast.mxfp8.quantize_mxfp8 import (
+from .quantize_mxfp8_common import (
     MXFP8_BLOCK_SCALING_SIZE,
     SYM_N_DIVISIBILITY,
     FP8E4M3_MAX_NORM_RCP,
@@ -34,6 +34,8 @@ from transformer_engine.common.CuTeDSL.cast.mxfp8.quantize_mxfp8 import (
     SUPPORTED_DACTIVATIONS,
     derive_swizzled_scale_layout,
     noop_flag_is_set,
+)
+from .quantize_mxfp8_general import (
     reduce_rowwise_dbias,
     quantize_rowwise_mxfp8,
     quantize_colwise_mxfp8,
