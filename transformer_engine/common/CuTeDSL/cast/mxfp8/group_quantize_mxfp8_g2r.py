@@ -32,6 +32,7 @@ from .quantize_mxfp8_common import (
 )
 from .quantize_mxfp8_g2r_bidimensional import quantize_bidimensional_mxfp8_g2r
 from .group_quantize_mxfp8_common import (
+    MXFP8GroupQuantizeConfig,
     SAME_BOTH_DIMS,
     VARYING_FIRST_DIM,
     VARYING_LAST_DIM,
@@ -56,16 +57,30 @@ class MXFP8GroupQuantizeG2RKernel:
     # 32768x7168).
     WORKERS_PER_SM = 256
 
-    def __init__(self, shape_rep: str, cfg: MXFP8QuantizeConfig, sm_count: int) -> None:
+    def __init__(self, cfg: MXFP8GroupQuantizeConfig, sm_count: int) -> None:
+        assert self.supports(cfg), f"unsupported config {cfg}"
         self.cfg = cfg
         self.SM_COUNT = sm_count
-        self.ROWS_VARY = shape_rep not in (SAME_BOTH_DIMS, VARYING_LAST_DIM)
-        self.COLS_VARY = shape_rep not in (SAME_BOTH_DIMS, VARYING_FIRST_DIM)
-        self.SAME_BOTH_DIMS = shape_rep == SAME_BOTH_DIMS
+        self.ROWS_VARY = cfg.SHAPE_REP not in (SAME_BOTH_DIMS, VARYING_LAST_DIM)
+        self.COLS_VARY = cfg.SHAPE_REP not in (SAME_BOTH_DIMS, VARYING_FIRST_DIM)
+        self.SAME_BOTH_DIMS = cfg.SHAPE_REP == SAME_BOTH_DIMS
+        # The tile function is shared with the single-tensor bidimensional kernel and takes
+        # its config type.
+        self.tile_cfg = MXFP8QuantizeConfig(
+            dtype=cfg.DTYPE_STR,
+            fp8_dtype=cfg.FP8_DTYPE_STR,
+            rowwise=cfg.ROWWISE,
+            colwise=cfg.COLWISE,
+            with_gemm_swizzled_scales=cfg.WITH_GEMM_SWIZZLED_SCALES,
+            with_amax=False,
+            activation="none",
+        )
 
     @staticmethod
-    def supports(cfg: MXFP8QuantizeConfig) -> bool:
-        return cfg.is_plain_cast() and cfg.DTYPE is cutlass.BFloat16
+    def supports(cfg: MXFP8GroupQuantizeConfig) -> bool:
+        """BF16 plain casts: no dbias and no fused (d)activation."""
+        plain_cast = not (cfg.WITH_DBIAS or cfg.WITH_ACT or cfg.WITH_DACT)
+        return plain_cast and cfg.DTYPE is cutlass.BFloat16
 
     @cute.jit
     def __call__(
@@ -200,7 +215,7 @@ class MXFP8GroupQuantizeG2RKernel:
             gS_row_tile,
             gO_col_tile,
             gS_col_tile,
-            cfg,
+            self.tile_cfg,
             CTA_THREADS_Y=self._CTA_THREADS_Y,
             CTA_THREADS_X=self._CTA_THREADS_X,
             ELEMENTS_Y_PER_THREAD=self._ELEMENTS_Y_PER_THREAD,

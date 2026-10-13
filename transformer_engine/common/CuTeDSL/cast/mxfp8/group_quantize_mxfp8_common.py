@@ -191,24 +191,12 @@ class MXFP8GroupQuantizeEntry:
             self.SINGLE_TENSOR_MODE = "flat_rowwise"
         self.single_tensor_entry = None
         self.g2r_kernel = None
-        if self.SINGLE_TENSOR_MODE is None and plain_cast and cfg.DTYPE is cutlass.BFloat16:
+        if self.SINGLE_TENSOR_MODE is None:
             # pylint: disable=import-outside-toplevel
-            from .quantize_mxfp8_common import MXFP8QuantizeConfig
             from .group_quantize_mxfp8_g2r import MXFP8GroupQuantizeG2RKernel
 
-            self.g2r_kernel = MXFP8GroupQuantizeG2RKernel(
-                cfg.SHAPE_REP,
-                MXFP8QuantizeConfig(
-                    dtype=cfg.DTYPE_STR,
-                    fp8_dtype=cfg.FP8_DTYPE_STR,
-                    rowwise=cfg.ROWWISE,
-                    colwise=cfg.COLWISE,
-                    with_gemm_swizzled_scales=cfg.WITH_GEMM_SWIZZLED_SCALES,
-                    with_amax=False,
-                    activation="none",
-                ),
-                sm_count,
-            )
+            if MXFP8GroupQuantizeG2RKernel.supports(cfg):
+                self.g2r_kernel = MXFP8GroupQuantizeG2RKernel(cfg, sm_count)
         if self.SINGLE_TENSOR_MODE is not None:
             # pylint: disable=import-outside-toplevel
             from .quantize_mxfp8_common import MXFP8QuantizeConfig, MXFP8QuantizeEntry
