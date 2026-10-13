@@ -361,7 +361,7 @@ class MXFP8GroupQuantizeKernel:
             )
             # In average how many jobs per tensor (only an average, the actual jobs per tensor may vary)
             average_jobs_per_tensor = cutlass.max(
-                Int64(1), cute.ceil_div(estimated_jobs, Int64(num_tensors))
+                Int64(1), (estimated_jobs + Int64(num_tensors) - 1) // Int64(num_tensors)
             )
             # Don't launch more CTAs than the average jobs per tensor in case
             # STATIC_PERSISTENT_WORKERS_PER_SM causes redundancy
@@ -879,19 +879,28 @@ class MXFP8GroupQuantizeKernel:
                 descs = (None, None, None, None)
 
                 # Find how many rows this tensor member has and which row the member starts from
-                if cutlass.const_expr(cfg.SHAPE_REP == SAME_BOTH_DIMS):
-                    member_rows = Int64(first_logical_dim) // Int64(num_tensors)
-                    member_start_row = job_start_row - job_start_row % member_rows
-                elif cutlass.const_expr(cfg.SHAPE_REP == VARYING_FIRST_DIM):
-                    member_id = self._find_tensor_from_offsets(
-                        mOffsets, num_tensors, job_start_row * member_cols
-                    )
-                    member_rows = Int64(mFirstDims[member_id])
-                    member_start_row = Int64(mOffsets[member_id]) // member_cols
+                if cutlass.const_expr(cfg.COLWISE and cfg.WITH_GEMM_SWIZZLED_SCALES):
+                    # If colwise scale is swizzled, we can't view the grouped tensor as one tensor as a whole
+                    # in which case where the colwise is written to depends on the tensor member's first dimension,
+                    # so we need to actually find out the start of the tensor member the job belongs to
+                    if cutlass.const_expr(cfg.SHAPE_REP == SAME_BOTH_DIMS):
+                        # If SAME_BOTH_DIMS, the tensor member's start offset and rows can be obtained with division
+                        member_rows = Int64(first_logical_dim) // Int64(num_tensors)
+                        member_start_row = job_start_row - job_start_row % member_rows
+                    else: # VARYING_FIRST_DIM
+                        # Otherwise if VARYING_FIRST_DIM, we need to use find these tensor member metadata
+                        # from mFirstDims & mOffsets
+                        member_id = self._find_tensor_from_offsets(
+                            mOffsets, num_tensors, job_start_row * member_cols
+                        )
+                        member_rows = Int64(mFirstDims[member_id])
+                        member_start_row = Int64(mOffsets[member_id]) // member_cols
                 else:
-                    raise RuntimeError(
-                        "is_single_tensor requires SAME_BOTH_DIMS or VARYING_FIRST_DIM"
-                    )
+                    # If no swizzled colwise scale, quantizing a grouped tensor is equivalent to
+                    # quantizing a single tensor as a whole as long as M % 128 == 0 holds,
+                    # so we just pretend the whole tensor is the tensor member this CTA is working on
+                    member_rows = Int64(first_logical_dim)
+                    member_start_row = Int64(0)
 
                 # The starting offset for this tensor member's scale
                 member_scale_base = (
