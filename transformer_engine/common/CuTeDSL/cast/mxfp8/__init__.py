@@ -5,4 +5,4 @@
 """CuTeDSL MXFP8 quantization kernels."""
 
 from . import quantize_mxfp8_common
-from . import group_quantize_mxfp8
+from . import group_quantize_mxfp8_common

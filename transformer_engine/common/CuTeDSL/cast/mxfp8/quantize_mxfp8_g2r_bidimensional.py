@@ -332,12 +332,14 @@ def quantize_bidimensional_mxfp8_g2r(
     ELEMENTS_X_PER_THREAD: cutlass.Constexpr[int],
     cache_policy: Int64,
 ):
-    """Quantize one (TILE_ROWS, TILE_COLS) GMEM tile in both directions.
+    """Quantize one (TILE_ROWS, TILE_COLS) GMEM tile in cfg's directions.
 
     TILE_ROWS = CTA_THREADS_Y * ELEMENTS_Y_PER_THREAD = 32, so every columnwise
     MXFP8 block is contained in the tile. Each warp owns ELEMENTS_Y_PER_THREAD
     consecutive rows, and each lane owns ELEMENTS_X_PER_THREAD adjacent columns.
     Load the tile once, then reuse its registers for both quantization passes.
+    cfg.ROWWISE / cfg.COLWISE select the passes; the tensors of a disabled
+    direction are unused and may be None.
     """
     # Shape of the tile
     TILE_ROWS = CTA_THREADS_Y * ELEMENTS_Y_PER_THREAD
@@ -359,8 +361,6 @@ def quantize_bidimensional_mxfp8_g2r(
     )
 
     gX_thread = cute.composition(gX_tile, tv_layout)[tidx, None]
-    gO_row_thread = cute.composition(gO_row_tile, tv_layout)[tidx, None]
-    gO_col_thread = cute.composition(gO_col_tile, tv_layout)[tidx, None]
 
     # Group CTA threads by THREADS_X_PER_MX_BLOCK since they share the same rowwise scale for a MXFP8 block.
     # And assign stride 0 to that submode
@@ -374,7 +374,6 @@ def quantize_bidimensional_mxfp8_g2r(
             1,
         ),
     )
-    gS_row_thread = cute.composition(gS_row_tile, tv_row_scale)[tidx, None]
 
     # Group CTA threads by THREADS_Y_PER_MX_BLOCK since they share the same columnwise scale for a MXFP8 block.
     # And assign stride 0 to that submode
@@ -391,7 +390,6 @@ def quantize_bidimensional_mxfp8_g2r(
     # If CTA_THREADS_Y // THREADS_Y_PER_MX_BLOCK == 1, this will help compiler derive alignment
     # Otherwise coalesce will not do anything which is still fine
     tv_col_scale = cute.coalesce(tv_col_scale, target_profile=(1, 1))
-    gS_col_thread = cute.composition(gS_col_tile, tv_col_scale)[tidx, None]
 
     # Input fragment contains all rows it handles; output fragment contains only one row and we write it back row by row
     rX = cute.make_rmem_tensor((ELEMENTS_X_PER_THREAD, ELEMENTS_Y_PER_THREAD), cfg.DTYPE)
@@ -430,21 +428,57 @@ def quantize_bidimensional_mxfp8_g2r(
             load_atom, gX_thread[(None, row_idx),], rX[None, row_idx], cache_policy=cache_policy
         )
 
-    _quantize_rowwise(
-        rX,
-        gO_row_thread,
-        gS_row_thread,
-        output_store_atom=store_atom,
-        row_scale_store_atom=row_scale_atom,
-        cache_policy=cache_policy,
-        scale_and_pack=scale_and_pack,
-        THREADS_X_PER_MX_BLOCK=THREADS_X_PER_MX_BLOCK,
-        ELEMENTS_Y_PER_THREAD=ELEMENTS_Y_PER_THREAD,
-        ELEMENTS_X_PER_THREAD=ELEMENTS_X_PER_THREAD,
-        SCALE_DTYPE=SCALE_DTYPE,
-        FP8_DTYPE=cfg.FP8_DTYPE,
-    )
+    if cutlass.const_expr(cfg.ROWWISE):
+        _quantize_rowwise(
+            rX,
+            cute.composition(gO_row_tile, tv_layout)[tidx, None],
+            cute.composition(gS_row_tile, tv_row_scale)[tidx, None],
+            output_store_atom=store_atom,
+            row_scale_store_atom=row_scale_atom,
+            cache_policy=cache_policy,
+            scale_and_pack=scale_and_pack,
+            THREADS_X_PER_MX_BLOCK=THREADS_X_PER_MX_BLOCK,
+            ELEMENTS_Y_PER_THREAD=ELEMENTS_Y_PER_THREAD,
+            ELEMENTS_X_PER_THREAD=ELEMENTS_X_PER_THREAD,
+            SCALE_DTYPE=SCALE_DTYPE,
+            FP8_DTYPE=cfg.FP8_DTYPE,
+        )
+    if cutlass.const_expr(cfg.COLWISE):
+        _quantize_colwise_tile(
+            rX,
+            cute.composition(gO_col_tile, tv_layout)[tidx, None],
+            cute.composition(gS_col_tile, tv_col_scale)[tidx, None],
+            store_atom=store_atom,
+            col_scale_atom=col_scale_atom,
+            cache_policy=cache_policy,
+            scale_and_pack=scale_and_pack,
+            cfg=cfg,
+            CTA_THREADS_Y=CTA_THREADS_Y,
+            CTA_THREADS_X=CTA_THREADS_X,
+            ELEMENTS_Y_PER_THREAD=ELEMENTS_Y_PER_THREAD,
+            ELEMENTS_X_PER_THREAD=ELEMENTS_X_PER_THREAD,
+            SCALE_DTYPE=SCALE_DTYPE,
+        )
 
+
+@cute.jit
+def _quantize_colwise_tile(
+    rX: cute.Tensor,
+    gO_col_thread: cute.Tensor,
+    gS_col_thread: cute.Tensor,
+    store_atom: cute.CopyAtom,
+    col_scale_atom: cute.CopyAtom,
+    cache_policy: Int64,
+    scale_and_pack: cutlass.Constexpr[Callable[..., Uint32]],
+    cfg: cutlass.Constexpr[MXFP8QuantizeConfig],
+    CTA_THREADS_Y: cutlass.Constexpr[int],
+    CTA_THREADS_X: cutlass.Constexpr[int],
+    ELEMENTS_Y_PER_THREAD: cutlass.Constexpr[int],
+    ELEMENTS_X_PER_THREAD: cutlass.Constexpr[int],
+    SCALE_DTYPE: cutlass.Constexpr[Type[cutlass.Numeric]],
+):
+    """Columnwise pass of quantize_bidimensional_mxfp8_g2r over the registers in rX."""
+    tidx, _, _ = cute.arch.thread_idx()
     sAmaxs_col_scratch = _gather_partial_colwise_amaxes(
         rX,
         CTA_THREADS_Y=CTA_THREADS_Y,

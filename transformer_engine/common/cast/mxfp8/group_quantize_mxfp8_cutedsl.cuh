@@ -178,7 +178,7 @@ inline bool mxfp8_group_quantize_cutedsl(const MXFP8GroupQuantConfig &config,
   const size_t first_logical_dim = input_tensor->logical_shape.data[0];
   const size_t last_logical_dim = input_tensor->logical_shape.data[1];
 
-  // Match the symbolic divisibility checks in group_quantize_mxfp8.py.
+  // Match the symbolic divisibility checks in group_quantize_mxfp8_common.py.
   if (config.shape_rep != ShapeRepresentation::VARYING_BOTH_DIMS && first_logical_dim % 128 != 0) {
     maybe_warn_cutedsl_not_chosen(
         "the first logical dimension is not divisible by 128 for a non-varying both dimensions "
