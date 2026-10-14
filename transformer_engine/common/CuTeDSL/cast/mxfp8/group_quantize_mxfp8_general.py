@@ -69,12 +69,6 @@ class MXFP8GroupQuantizeKernel:
     NUM_WARPS = THREADS_PER_CTA // THREADS_PER_WARP  # 4
     THREADS_X = TILE_COLS // MXFP8_BLOCK_SCALING_SIZE  # 4
     THREADS_Y = THREADS_PER_CTA // THREADS_X  # 32
-    # How many elements a thread handles in a wave
-    PACK_SIZE = 4
-    # How many waves needed to handle a MXFP8 block
-    WAVES = MXFP8_BLOCK_SCALING_SIZE // PACK_SIZE  # 8
-    # How many threads per bank -- for avoiding bank conflicts
-    THREADS_PER_BANK = (32 * 4) // MXFP8_BLOCK_SCALING_SIZE  # 4
 
     def __init__(self, cfg: MXFP8GroupQuantizeConfig, SM_COUNT: int) -> None:
         self.cfg = cfg
@@ -1117,9 +1111,6 @@ class MXFP8GroupQuantizeKernel:
                         FP8_DTYPE=cfg.FP8_DTYPE,
                         TILE_X=self.TILE_COLS,
                         TILE_Y=self.TILE_ROWS,
-                        WAVES=self.WAVES,
-                        THREADS_PER_BANK=self.THREADS_PER_BANK,
-                        PACK_SIZE=self.PACK_SIZE,
                         WITH_ACT=cfg.WITH_ACT and not self.CACHE_ACTIVATION,
                         WITH_DACT=cfg.WITH_DACT and not self.CACHE_ACTIVATION,
                         WITH_DBIAS=self.DBIAS_IN_ROWWISE,
@@ -1186,8 +1177,6 @@ class MXFP8GroupQuantizeKernel:
                         dbias_row_acc,
                         self.TILE_ROWS,
                         self.TILE_COLS,
-                        self.PACK_SIZE,
-                        self.THREADS_PER_BANK,
                     )
                     # All threads must finish reading before the next job rewrites the buffer.
                     cute.arch.sync_threads()

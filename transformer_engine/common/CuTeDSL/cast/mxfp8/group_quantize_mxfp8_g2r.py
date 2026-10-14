@@ -27,7 +27,6 @@ from cuda.bindings.driver import CUstream  # pylint: disable=no-name-in-module
 from transformer_engine.common.CuTeDSL.utils import create_l2_policy
 from .quantize_mxfp8_common import (
     MXFP8_BLOCK_SCALING_SIZE,
-    MXFP8QuantizeConfig,
     derive_swizzled_scale_layout,
 )
 from .quantize_mxfp8_g2r_bidimensional import quantize_bidimensional_mxfp8_g2r
@@ -64,17 +63,6 @@ class MXFP8GroupQuantizeG2RKernel:
         self.ROWS_VARY = cfg.SHAPE_REP not in (SAME_BOTH_DIMS, VARYING_LAST_DIM)
         self.COLS_VARY = cfg.SHAPE_REP not in (SAME_BOTH_DIMS, VARYING_FIRST_DIM)
         self.SAME_BOTH_DIMS = cfg.SHAPE_REP == SAME_BOTH_DIMS
-        # The tile function is shared with the single-tensor bidimensional kernel and takes
-        # its config type.
-        self.tile_cfg = MXFP8QuantizeConfig(
-            dtype=cfg.DTYPE_STR,
-            fp8_dtype=cfg.FP8_DTYPE_STR,
-            rowwise=cfg.ROWWISE,
-            colwise=cfg.COLWISE,
-            with_gemm_swizzled_scales=cfg.WITH_GEMM_SWIZZLED_SCALES,
-            with_amax=False,
-            activation="none",
-        )
 
     @staticmethod
     def supports(cfg: MXFP8GroupQuantizeConfig) -> bool:
@@ -215,7 +203,11 @@ class MXFP8GroupQuantizeG2RKernel:
             gS_row_tile,
             gO_col_tile,
             gS_col_tile,
-            self.tile_cfg,
+            ROWWISE=cfg.ROWWISE,
+            COLWISE=cfg.COLWISE,
+            DTYPE=cfg.DTYPE,
+            FP8_DTYPE=cfg.FP8_DTYPE,
+            WITH_GEMM_SWIZZLED_SCALES=cfg.WITH_GEMM_SWIZZLED_SCALES,
             CTA_THREADS_Y=self._CTA_THREADS_Y,
             CTA_THREADS_X=self._CTA_THREADS_X,
             ELEMENTS_Y_PER_THREAD=self._ELEMENTS_Y_PER_THREAD,
