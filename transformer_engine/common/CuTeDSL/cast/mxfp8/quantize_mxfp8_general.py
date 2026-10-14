@@ -74,6 +74,10 @@ from .quantize_mxfp8_common import (
     noop_flag_is_set,
 )
 
+# Swizzle the 16-bit input and FP8 output SMEM tiles (TMA 128B / 64B modes) so the rowwise pass reads
+# and writes with conflict-free 16-byte autovec copies instead of bank-rotated 8-byte waves.
+USE_AUTO_SWIZZLE = True
+
 
 @cute.jit
 def quantize_rowwise_mxfp8(
@@ -97,8 +101,14 @@ def quantize_rowwise_mxfp8(
     WITH_DACT: cutlass.Constexpr[bool] = False,
     WITH_DBIAS: cutlass.Constexpr[bool] = False,
     dbias_acc: Optional[cute.Tensor] = None,  #  only needed when WITH_DBIAS is True
+    SMEM_SWIZZLED: cutlass.Constexpr[bool] = False,  # sX/sO tiles are swizzled in SMEM
 ):
-    """Quantize one SMEM tile rowwise to MXFP8 (per-row 32-elt block scales); returns the tile amax."""
+    """Quantize one SMEM tile rowwise to MXFP8 (per-row 32-elt block scales); returns the tile amax.
+
+    With SMEM_SWIZZLED, the swizzle already spreads natural-order accesses across banks, so each
+    thread reads and writes its fragment front to back with 16-byte autovec copies. Otherwise each
+    lane starts at a bank-rotated offset and walks its fragment in 8-byte waves.
+    """
     tidx, _, _ = cute.arch.thread_idx()
 
     # Vectorised SMEM access constants for bank-conflict avoidance. The loads and the fused 4-wide
@@ -124,14 +134,6 @@ def quantize_rowwise_mxfp8(
     sX_thread = sX_tv[tidx, None]  # shape (32,) bf16
     sO_thread = sO_tv[tidx, None]  # shape (32,) fp8
 
-    sO_thread_u32_ptr = cute.recast_ptr(sO_thread.iterator, dtype=Uint32)
-    sO_thread_u32 = cute.make_tensor(
-        sO_thread_u32_ptr,
-        cute.make_layout(
-            (MXFP8_BLOCK_SCALING_SIZE // 4,), stride=(1,)
-        ),  # 1 uint32 is 4 fp8 elements
-    )
-
     # PTX allows to fuse relu activation in `cvt.rn.satfinite` unless we need to reduction for dbias
     FUSE_RELU = cutlass.const_expr(ACTIVATION == "relu") and not WITH_DBIAS
     # For this fast path we can read in pack of 2 instead of reading individual f16 / bf16 element,
@@ -140,11 +142,13 @@ def quantize_rowwise_mxfp8(
 
     amax_r = Float32(0.0)
 
-    # Each thread start reading from the specfic bank based on its thread ID so they can do their best to access different banks
-    # to avoid bank conflict.
-    bank_group = (tidx % THREADS_PER_WARP) // THREADS_PER_BANK
-    # The offset this thread should start reading from based on what's its first bank to access.
-    offset = bank_group * PACK_SIZE
+    offset = 0
+    if cutlass.const_expr(not SMEM_SWIZZLED):
+        # Each thread start reading from the specfic bank based on its thread ID so they can do their best to access different banks
+        # to avoid bank conflict.
+        bank_group = (tidx % THREADS_PER_WARP) // THREADS_PER_BANK
+        # The offset this thread should start reading from based on what's its first bank to access.
+        offset = bank_group * PACK_SIZE
     if cutlass.const_expr(USE_HALF_PRECISION):
         # If no activation, f16 / bf16 and rowwise quantization, we can read 2 f16 / bf16 at once in a pack
         # and use max.xorsign.abs.f16x2 / max.xorsign.abs.bf16x2 to compute
@@ -152,17 +156,24 @@ def quantize_rowwise_mxfp8(
         abs_max_x2 = abs_max_x2_f16 if DTYPE is cutlass.Float16 else abs_max_x2_bf16
         x2_lo_to_f32 = x2_lo_to_f32_f16 if DTYPE is cutlass.Float16 else x2_lo_to_f32_bf16
         x2_hi_to_f32 = x2_hi_to_f32_f16 if DTYPE is cutlass.Float16 else x2_hi_to_f32_bf16
-        sX_thread_rw_i64 = cute.make_tensor(
-            cute.recast_ptr(sX_thread.iterator, dtype=Int64),
-            cute.make_layout(
-                (1, MXFP8_BLOCK_SCALING_SIZE // 4), stride=(0, 1)
-            ),  # 1 int64 is 4 fp16/bf16 elements
-        )
-        # Each wave reads its 4 elements (PACK_SIZE) as one 8-byte vectorized load
         in_r = [[None, None] for _ in range(WAVES)]
-        for w in cutlass.range_constexpr(WAVES):
-            idx = (w + offset // 4) % (MXFP8_BLOCK_SCALING_SIZE // 4)
-            in_r[w][0], in_r[w][1] = unpack_i64_to_i32x2(sX_thread_rw_i64[0, idx])
+        if cutlass.const_expr(SMEM_SWIZZLED):
+            rX = cute.make_rmem_tensor((MXFP8_BLOCK_SCALING_SIZE,), DTYPE)
+            cute.autovec_copy(sX_thread, rX)
+            rX_i32 = cute.recast_tensor(rX, Int32)
+            for w in cutlass.range_constexpr(WAVES):
+                in_r[w][0], in_r[w][1] = rX_i32[2 * w], rX_i32[2 * w + 1]
+        else:
+            sX_thread_rw_i64 = cute.make_tensor(
+                cute.recast_ptr(sX_thread.iterator, dtype=Int64),
+                cute.make_layout(
+                    (1, MXFP8_BLOCK_SCALING_SIZE // 4), stride=(0, 1)
+                ),  # 1 int64 is 4 fp16/bf16 elements
+            )
+            # Each wave reads its 4 elements (PACK_SIZE) as one 8-byte vectorized load
+            for w in cutlass.range_constexpr(WAVES):
+                idx = (w + offset // 4) % (MXFP8_BLOCK_SCALING_SIZE // 4)
+                in_r[w][0], in_r[w][1] = unpack_i64_to_i32x2(sX_thread_rw_i64[0, idx])
 
         if cutlass.const_expr(WITH_DBIAS):
             for w in cutlass.range_constexpr(WAVES):
@@ -313,17 +324,28 @@ def quantize_rowwise_mxfp8(
     else:
         mul_cvt_x4_func = mul_f32x2_cvt_f32x4_to_fp8x4(FP8_DTYPE, FUSE_RELU)
 
+    if cutlass.const_expr(SMEM_SWIZZLED):
+        rO = cute.make_rmem_tensor((MXFP8_BLOCK_SCALING_SIZE,), FP8_DTYPE)
+        out_u32 = cute.recast_tensor(rO, Uint32)
+    else:
+        # recast_ptr drops a pointer swizzle, so this view is only valid on plain SMEM
+        out_u32 = cute.make_tensor(
+            cute.recast_ptr(sO_thread.iterator, dtype=Uint32),
+            cute.make_layout(
+                (MXFP8_BLOCK_SCALING_SIZE // 4,), stride=(1,)
+            ),  # 1 uint32 is 4 fp8 elements
+        )
     for w in cutlass.range_constexpr(WAVES):
         idx = (w * 4 + offset) % MXFP8_BLOCK_SCALING_SIZE
         idx = idx // 4
         if cutlass.const_expr(USE_HALF_PRECISION):
             # Convert 2 packed f16/bf16 pairs to 4 fp8 in one fused op
-            sO_thread_u32[idx] = mul_cvt_x4_func(in_r[w][0], in_r[w][1], scale_2x)
+            out_u32[idx] = mul_cvt_x4_func(in_r[w][0], in_r[w][1], scale_2x)
         else:
             # Convert 4 f32 to 4 fp8 in one fused op
-            sO_thread_u32[idx] = mul_cvt_x4_func(
-                in_r[w][0], in_r[w][1], in_r[w][2], in_r[w][3], scale_2x
-            )
+            out_u32[idx] = mul_cvt_x4_func(in_r[w][0], in_r[w][1], in_r[w][2], in_r[w][3], scale_2x)
+    if cutlass.const_expr(SMEM_SWIZZLED):
+        cute.autovec_copy(rO, sO_thread)
 
     return amax_r
 
@@ -475,9 +497,7 @@ def quantize_colwise_mxfp8(
     inv_scale_c = exp2f_rcp(biased_exp_c)
     # cvt.rn.satfinite can be vectorized to convert 2 f32 to 2 fp8 in one instruction
     cvt_x2_func = get_cvt_f32x2_to_fp8x2_func(FP8_DTYPE, FUSE_RELU)
-    sO_thread_fp8 = cute.make_tensor(
-        cute.recast_ptr(sO_thread.iterator, dtype=FP8_DTYPE), sO_thread.layout
-    )
+    sO_thread_fp8 = sO_thread
     if cutlass.const_expr(USE_HALF_PRECISION):
         to_f32 = to_f32_f16 if DTYPE is cutlass.Float16 else to_f32_bf16
         for j in cutlass.range_constexpr(MXFP8_BLOCK_SCALING_SIZE // 2):
@@ -570,6 +590,7 @@ def quantize_mxfp8_tile(
     DBIAS_REDUCTION_IN_COLWISE: cutlass.Constexpr[bool],
     COLWISE_DBIAS_REDUCTION_ONLY: cutlass.Constexpr[bool],
     DBIAS_REDUCTION_IN_ROWWISE: cutlass.Constexpr[bool],
+    SMEM_SWIZZLED: cutlass.Constexpr[bool],
 ):
     """Quantize one SMEM tile in the directions enabled by ROWWISE / COLWISE; returns (amax, dbias).
 
@@ -646,6 +667,7 @@ def quantize_mxfp8_tile(
             WITH_DACT=WITH_DACT and not CACHE_ACTIVATION,
             WITH_DBIAS=DBIAS_REDUCTION_IN_ROWWISE,
             dbias_acc=rowwise_dbias_acc,
+            SMEM_SWIZZLED=SMEM_SWIZZLED,
         )
         if cutlass.const_expr(WITH_AMAX and not COLWISE):
             amax = amax_r
@@ -702,6 +724,14 @@ class MXFP8QuantizeKernel(MXFP8QuantizeKernelBase):
         # Never do dbias reduction in rowwise because it is slow. Leave this so in case it's enabled in the future
         self.DBIAS_REDUCTION_IN_ROWWISE = False
 
+        # TMA's 128B swizzle needs each input tile row to be exactly 128 bytes, which holds for 16-bit
+        # input with the 64-column tile but not for the 128-column dbias-only tile or FP32 input.
+        self.SWIZZLE_SMEM = (
+            USE_AUTO_SWIZZLE
+            and is_packed16(cfg.DTYPE)
+            and self._TILE_COLS * cfg.DTYPE.width // 8 == 128
+        )
+
         # Cache activation in-place in the SMEM input tile when we process both rowwise and colwise passes
         # so the activation is only computed once in the direction we favor (columnwise) and the other direction (rowwise)
         # reads the cached value instead of recomputing it.
@@ -753,13 +783,23 @@ class MXFP8QuantizeKernel(MXFP8QuantizeKernelBase):
             (self._TILE_ROWS, self._TILE_COLS), order=(1, 0)
         )
         cta_tiler = (self._TILE_ROWS, self._TILE_COLS)
+        in_smem_layout = smem_tile_layout
+        out_smem_layout = smem_tile_layout
+        if cutlass.const_expr(self.SWIZZLE_SMEM):
+            # Must match the SMEM tensor swizzles in _kernel_main
+            in_smem_layout = cute.make_composed_layout(
+                cute.make_swizzle(3, 4, 3), 0, smem_tile_layout
+            )
+            out_smem_layout = cute.make_composed_layout(
+                cute.make_swizzle(2, 4, 3), 0, smem_tile_layout
+            )
 
         # Input TMA atoms
         op_load = cute.nvgpu.cpasync.CopyBulkTensorTileG2SOp()
         tma_atom, tma_src = cute.nvgpu.cpasync.make_tiled_tma_atom(
             op_load,
             mX,
-            smem_tile_layout,
+            in_smem_layout,
             cta_tiler,
             num_multicast=1,
         )
@@ -771,14 +811,13 @@ class MXFP8QuantizeKernel(MXFP8QuantizeKernelBase):
             tma_atom_act, tma_src_act = cute.nvgpu.cpasync.make_tiled_tma_atom(
                 op_load,
                 mDActInput,
-                smem_tile_layout,
+                in_smem_layout,
                 cta_tiler,
                 num_multicast=1,
             )
 
         # Output TMA atoms
         op_store = cute.nvgpu.cpasync.CopyBulkTensorTileS2GOp()
-        out_smem_layout = cute.make_ordered_layout((self._TILE_ROWS, self._TILE_COLS), order=(1, 0))
         tma_atom_out_row = None
         tma_dst_out_row = None
         tma_atom_out_col = None
@@ -973,27 +1012,36 @@ class MXFP8QuantizeKernel(MXFP8QuantizeKernelBase):
 
         smem = cutlass.memory.SmemAllocator()
         storage = smem.allocate(SharedStorage)
+        # Same swizzles as the TMA atoms built in __call__
+        in_swizzle = None
+        out_swizzle = None
+        if cutlass.const_expr(self.SWIZZLE_SMEM):
+            in_swizzle = cute.make_swizzle(3, 4, 3)
+            out_swizzle = cute.make_swizzle(2, 4, 3)
         # Apply the layout to the allocated shared memory buffers so the first rank is the tile (nested layout)
         # and the second rank is the pipeline stage
         sX = storage.sX.get_tensor(
             cute.make_layout(
                 ((self._TILE_ROWS, self._TILE_COLS), self._NUM_STAGES),
                 stride=((self._TILE_COLS, 1), self._TILE_ROWS * self._TILE_COLS),
-            )
+            ),
+            swizzle=in_swizzle,
         )
         if cutlass.const_expr(cfg.ROWWISE):
             sO_row = storage.sO_row.get_tensor(
                 cute.make_layout(
                     ((self._TILE_ROWS, self._TILE_COLS), self._NUM_STAGES),
                     stride=((self._TILE_COLS, 1), self._TILE_ROWS * self._TILE_COLS),
-                )
+                ),
+                swizzle=out_swizzle,
             )
         if cutlass.const_expr(cfg.COLWISE):
             sO_col = storage.sO_col.get_tensor(
                 cute.make_layout(
                     ((self._TILE_ROWS, self._TILE_COLS), self._NUM_STAGES),
                     stride=((self._TILE_COLS, 1), self._TILE_ROWS * self._TILE_COLS),
-                )
+                ),
+                swizzle=out_swizzle,
             )
 
         # Allocate shared memory for the activation input used for the activation derivative fusion.
@@ -1014,7 +1062,8 @@ class MXFP8QuantizeKernel(MXFP8QuantizeKernelBase):
                 cute.make_layout(
                     ((self._TILE_ROWS, self._TILE_COLS), self._NUM_STAGES),
                     stride=((self._TILE_COLS, 1), self._TILE_ROWS * self._TILE_COLS),
-                )
+                ),
+                swizzle=in_swizzle,
             )
 
         warp_idx = cute.arch.warp_idx()
@@ -1226,6 +1275,7 @@ class MXFP8QuantizeKernel(MXFP8QuantizeKernelBase):
                 DBIAS_REDUCTION_IN_COLWISE=self.DBIAS_REDUCTION_IN_COLWISE,
                 COLWISE_DBIAS_REDUCTION_ONLY=self.COLWISE_DBIAS_REDUCTION_ONLY,
                 DBIAS_REDUCTION_IN_ROWWISE=self.DBIAS_REDUCTION_IN_ROWWISE,
+                SMEM_SWIZZLED=self.SWIZZLE_SMEM,
             )
             if cutlass.const_expr(cfg.WITH_AMAX):
                 per_thread_amax = cute.arch.fmax(per_thread_amax, amax)
@@ -1344,7 +1394,8 @@ class MXFP8QuantizeKernel(MXFP8QuantizeKernelBase):
         # to avoid bank conflict.
         bank_group = (tidx % THREADS_PER_WARP) // THREADS_PER_BANK
         # The offset this thread should start reading from based on what's its first bank to access.
-        offset = bank_group * PACK_SIZE
+        # With swizzled SMEM the quantizer fills rowwise_dbias_acc in natural order.
+        offset = 0 if self.SWIZZLE_SMEM else bank_group * PACK_SIZE
         for w in cutlass.range_constexpr(
             WAVES
         ):  # Each thread starts from this offset when writing into SMEM to avoid bank conflict
