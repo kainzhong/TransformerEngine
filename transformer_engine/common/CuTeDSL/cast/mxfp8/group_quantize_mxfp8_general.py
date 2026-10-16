@@ -50,10 +50,11 @@ from .group_quantize_mxfp8_common import (
     COLS_OFFSET,
     OFFSETS_OFFSET,
     MXFP8GroupQuantizeConfig,
+    MXFP8GroupQuantizeKernelBase,
 )
 
 
-class MXFP8GroupQuantizeKernel:
+class MXFP8GroupQuantizeKernel(MXFP8GroupQuantizeKernelBase):
     """Grouped MXFP8 quantize mirroring group_quantize_mxfp8_kernel's strategy."""
 
     # Target persistent CTA count per SM for sizing the grid
@@ -69,6 +70,28 @@ class MXFP8GroupQuantizeKernel:
     NUM_WARPS = THREADS_PER_CTA // THREADS_PER_WARP  # 4
     THREADS_X = TILE_COLS // MXFP8_BLOCK_SCALING_SIZE  # 4
     THREADS_Y = THREADS_PER_CTA // THREADS_X  # 32
+
+    @staticmethod
+    def supports(cfg: MXFP8GroupQuantizeConfig) -> bool:  # pylint: disable=unused-argument
+        """Every grouped config."""
+        return True
+
+    @cute.jit
+    def eligible_to_dispatch(
+        self,
+        mX: cute.Tensor,
+        mO_row: Optional[cute.Tensor],
+        mO_col: Optional[cute.Tensor],
+        mS_row: cute.Tensor,
+        mS_col: cute.Tensor,
+        mOffsets: Optional[cute.Tensor],
+        mFirstDims: Optional[cute.Tensor],
+        mLastDims: Optional[cute.Tensor],
+        num_tensors: Int32,
+        mNoop: cute.Pointer,
+    ) -> Boolean:
+        """Every call."""
+        return Boolean(True)
 
     def __init__(self, cfg: MXFP8GroupQuantizeConfig, SM_COUNT: int) -> None:
         self.cfg = cfg

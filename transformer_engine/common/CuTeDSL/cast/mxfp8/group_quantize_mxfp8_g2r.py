@@ -21,7 +21,7 @@ from typing import Optional
 
 import cutlass
 from cutlass import cute
-from cutlass import Int32, Int64
+from cutlass import Boolean, Int32, Int64
 from cuda.bindings.driver import CUstream  # pylint: disable=no-name-in-module
 
 from transformer_engine.common.CuTeDSL.utils import create_l2_policy
@@ -32,43 +32,96 @@ from .quantize_mxfp8_common import (
 from .quantize_mxfp8_g2r_bidim import quantize_mxfp8_gmem_tile_bidimensional
 from .group_quantize_mxfp8_common import (
     MXFP8GroupQuantizeConfig,
+    MXFP8GroupQuantizeKernelBase,
     SAME_BOTH_DIMS,
     VARYING_FIRST_DIM,
     VARYING_LAST_DIM,
 )
 
 
-class MXFP8GroupQuantizeG2RKernel:
+class MXFP8GroupQuantizeG2RKernel(MXFP8GroupQuantizeKernelBase):
     """Grid of (CTAs per member, num_tensors); each CTA grid-strides its member's tiles."""
 
-    _CTA_THREADS_Y = 8
-    # Eight lanes of 16 BF16 values (one 256-bit load each) per tile row: 1-8% faster than
-    # sixteen lanes of 8 values (128-bit loads) on GB200.
-    _CTA_THREADS_X = 8
-    _ELEMENTS_X_PER_THREAD = 16
-    _ELEMENTS_Y_PER_THREAD = MXFP8_BLOCK_SCALING_SIZE // _CTA_THREADS_Y  # 4
-    TILE_ROWS = _CTA_THREADS_Y * _ELEMENTS_Y_PER_THREAD  # 32
-    TILE_COLS = _CTA_THREADS_X * _ELEMENTS_X_PER_THREAD  # 128
-    THREADS_PER_CTA = _CTA_THREADS_Y * _CTA_THREADS_X  # 64
-    # CTAs per SM the grid is sized for, split evenly across the members. Far more than are
-    # resident: on GB200 the loop's latency is better hidden by more CTAs in flight than by
-    # each CTA walking more tiles (16 -> 256 per SM took colwise from ~107 to ~92 us at
-    # 32768x7168).
-    WORKERS_PER_SM = 256
+    def __init__(
+        self,
+        cfg: MXFP8GroupQuantizeConfig,
+        sm_count: int,
+        CTA_THREADS_Y: int = 8,
+        CTA_THREADS_X: int = 8,
+        ELEMENTS_X_PER_THREAD: int = 16,
+        WORKERS_PER_SM: int = 256,
+        INPUT_EVICT_LAST: bool = True,
+    ) -> None:
+        """Tunable launch parameters (defaults are the current choice):
 
-    def __init__(self, cfg: MXFP8GroupQuantizeConfig, sm_count: int) -> None:
+        CTA_THREADS_Y x CTA_THREADS_X threads per CTA; each thread covers
+        32 / CTA_THREADS_Y rows of ELEMENTS_X_PER_THREAD columns, so a tile is 32 rows by
+        CTA_THREADS_X * ELEMENTS_X_PER_THREAD columns (TILE_COLS; every member's cols must be
+        a multiple of it). Eight lanes of 16 BF16 values (one 256-bit load each) were 1-8%
+        faster than sixteen lanes of 8 on GB200.
+
+        WORKERS_PER_SM: CTAs per SM the grid is sized for, split evenly across the members.
+        Far more than are resident: on GB200 the loop's latency is better hidden by more
+        CTAs in flight than by each CTA walking more tiles (16 -> 256 per SM took colwise
+        from ~107 to ~92 us at 32768x7168).
+
+        INPUT_EVICT_LAST: L2 policy of the input loads (outputs always use evict_last).
+        """
         assert self.supports(cfg), f"unsupported config {cfg}"
+        assert MXFP8_BLOCK_SCALING_SIZE % CTA_THREADS_Y == 0
+        assert MXFP8_BLOCK_SCALING_SIZE % ELEMENTS_X_PER_THREAD == 0
         self.cfg = cfg
         self.SM_COUNT = sm_count
+        self._CTA_THREADS_Y = CTA_THREADS_Y
+        self._CTA_THREADS_X = CTA_THREADS_X
+        self._ELEMENTS_X_PER_THREAD = ELEMENTS_X_PER_THREAD
+        self._ELEMENTS_Y_PER_THREAD = MXFP8_BLOCK_SCALING_SIZE // CTA_THREADS_Y
+        self.TILE_ROWS = CTA_THREADS_Y * self._ELEMENTS_Y_PER_THREAD  # 32
+        self.TILE_COLS = CTA_THREADS_X * ELEMENTS_X_PER_THREAD
+        self.THREADS_PER_CTA = CTA_THREADS_Y * CTA_THREADS_X
+        self.WORKERS_PER_SM = WORKERS_PER_SM
+        self.INPUT_EVICT_LAST = INPUT_EVICT_LAST
         self.ROWS_VARY = cfg.SHAPE_REP not in (SAME_BOTH_DIMS, VARYING_LAST_DIM)
         self.COLS_VARY = cfg.SHAPE_REP not in (SAME_BOTH_DIMS, VARYING_FIRST_DIM)
         self.SAME_BOTH_DIMS = cfg.SHAPE_REP == SAME_BOTH_DIMS
+        # Members of VARYING_LAST_DIM / VARYING_BOTH_DIMS only have 128-aligned cols.
+        assert not self.COLS_VARY or self.TILE_COLS == 128, "varying cols need 128-wide tiles"
 
     @staticmethod
     def supports(cfg: MXFP8GroupQuantizeConfig) -> bool:
         """BF16 plain casts: no dbias and no fused (d)activation."""
         plain_cast = not (cfg.WITH_DBIAS or cfg.WITH_ACT or cfg.WITH_DACT)
         return plain_cast and cfg.DTYPE is cutlass.BFloat16
+
+    @cute.jit
+    def eligible_to_dispatch(
+        self,
+        mX: cute.Tensor,
+        mO_row: Optional[cute.Tensor],
+        mO_col: Optional[cute.Tensor],
+        mS_row: cute.Tensor,
+        mS_col: cute.Tensor,
+        mOffsets: Optional[cute.Tensor],
+        mFirstDims: Optional[cute.Tensor],
+        mLastDims: Optional[cute.Tensor],
+        num_tensors: Int32,
+        mNoop: cute.Pointer,
+    ) -> Boolean:
+        # No cast-noop support (as the non-grouped GMEM-to-RMEM kernels); member-local Int32
+        # indexing; 256-bit input loads need a 32-byte aligned payload and the vectorized
+        # colwise scale stores a 16-byte aligned buffer.
+        eligible = (
+            Int64(mX.shape[0]) * Int64(mX.shape[1]) < Int64(2**31)
+            and mNoop.toint() == 0
+            and mX.iterator.toint() % 32 == 0
+        )
+        if cutlass.const_expr(self.cfg.COLWISE):
+            eligible = eligible and mS_col.iterator.toint() % 16 == 0
+        if cutlass.const_expr(not self.COLS_VARY):
+            # The common cols must tile exactly; VARYING_LAST_DIM / VARYING_BOTH_DIMS members
+            # are 128-aligned by the grouped kernels' contract and use 128-wide tiles.
+            eligible = eligible and mX.shape[1] % self.TILE_COLS == 0
+        return eligible
 
     @cute.jit
     def __call__(
@@ -81,7 +134,11 @@ class MXFP8GroupQuantizeG2RKernel:
         mOffsets: Optional[cute.Tensor],
         mFirstDims: Optional[cute.Tensor],
         mLastDims: Optional[cute.Tensor],
+        mTensormaps: Optional[cute.Tensor],
         num_tensors: Int32,
+        mNoop: cute.Pointer,
+        mActInput: Optional[cute.Tensor],
+        mWorkspace: Optional[cute.Tensor],
         stream: CUstream,
     ) -> None:
         # Spread the persistent worker budget across the members, but never launch more CTAs
@@ -173,6 +230,7 @@ class MXFP8GroupQuantizeG2RKernel:
             )
 
         cache_policy = create_l2_policy(True)
+        input_policy = create_l2_policy(self.INPUT_EVICT_LAST)
         tiles_X = N // self.TILE_COLS
         num_tiles = (M // self.TILE_ROWS) * tiles_X
         # Grid-stride over this member's tiles (column tiles fastest, as the single-tensor
@@ -180,11 +238,15 @@ class MXFP8GroupQuantizeG2RKernel:
         tile = Int32(bidx)
         while tile < num_tiles:
             coord = (tile // tiles_X, tile % tiles_X)
-            self._quantize_tile(gX, gO_row, gS_row, gO_col, gS_col, coord, cache_policy)
+            self._quantize_tile(
+                gX, gO_row, gS_row, gO_col, gS_col, coord, input_policy, cache_policy
+            )
             tile += Int32(gdx)
 
     @cute.jit
-    def _quantize_tile(self, gX, gO_row, gS_row, gO_col, gS_col, coord, cache_policy):
+    def _quantize_tile(
+        self, gX, gO_row, gS_row, gO_col, gS_col, coord, input_policy, cache_policy
+    ):
         """Quantize the (TILE_ROWS, TILE_COLS) tile at `coord` of one member."""
         cfg = self.cfg
         TILER = (self.TILE_ROWS, self.TILE_COLS)
@@ -217,4 +279,5 @@ class MXFP8GroupQuantizeG2RKernel:
             ELEMENTS_Y_PER_THREAD=self._ELEMENTS_Y_PER_THREAD,
             ELEMENTS_X_PER_THREAD=self._ELEMENTS_X_PER_THREAD,
             cache_policy=cache_policy,
+            load_cache_policy=input_policy,
         )

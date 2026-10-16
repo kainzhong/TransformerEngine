@@ -14,13 +14,14 @@ bridge (group_quantize_mxfp8_cutedsl.cuh) calls.
 
 # pylint: disable=missing-class-docstring
 
+import abc
 import logging
 import os
 from typing import Optional
 
 import cutlass
 from cutlass import cute
-from cutlass import Float32, Int32, Int64
+from cutlass import Boolean, Float32, Int32
 from cutlass.utils import HardwareInfo
 from cuda.bindings.driver import CUstream  # pylint: disable=no-name-in-module
 import tvm_ffi
@@ -152,66 +153,102 @@ class MXFP8GroupQuantizeConfig:
     __repr__ = __str__
 
 
+class MXFP8GroupQuantizeKernelBase(abc.ABC):
+    """Base class for grouped MXFP8 quantize kernels dispatched by MXFP8GroupQuantizeEntry."""
+
+    @staticmethod
+    def supports(cfg: MXFP8GroupQuantizeConfig) -> bool:  # pylint: disable=unused-argument
+        """Compile time check: whether this kernel handles cfg at all."""
+        return False
+
+    def eligible_to_dispatch(
+        self,
+        mX: cute.Tensor,
+        mO_row: Optional[cute.Tensor],
+        mO_col: Optional[cute.Tensor],
+        mS_row: cute.Tensor,
+        mS_col: cute.Tensor,
+        mOffsets: Optional[cute.Tensor],
+        mFirstDims: Optional[cute.Tensor],
+        mLastDims: Optional[cute.Tensor],
+        num_tensors: Int32,
+        mNoop: cute.Pointer,
+    ) -> Boolean:
+        """Runtime check: whether this call's shapes, alignments and cast-noop flag allow
+        dispatching to this kernel (decorate with @cute.jit)."""
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    def __call__(
+        self,
+        mX: cute.Tensor,
+        mO_row: Optional[cute.Tensor],
+        mO_col: Optional[cute.Tensor],
+        mS_row: cute.Tensor,
+        mS_col: cute.Tensor,
+        mOffsets: Optional[cute.Tensor],
+        mFirstDims: Optional[cute.Tensor],
+        mLastDims: Optional[cute.Tensor],
+        mTensormaps: Optional[cute.Tensor],
+        num_tensors: Int32,
+        mNoop: cute.Pointer,
+        mActInput: Optional[cute.Tensor],
+        mWorkspace: Optional[cute.Tensor],
+        stream: CUstream,
+    ):
+        """Compiled kernel entrypoint (decorate with @cute.jit), with the argument order the C++
+        bridge (group_quantize_mxfp8_cutedsl.cuh) calls the compiled function with."""
+
+
 class MXFP8GroupQuantizeEntry:
-    """Pick the kernel for a grouped config at compile time.
+    """Select the grouped MXFP8 quantization kernel from the config and the runtime arguments.
 
-    Plain casts (no dbias/act/dact) whose scales need no per-member addressing are run as a
-    single-tensor cast by the single-tensor entry, which dispatches to the GMEM-to-RMEM
-    specialized kernels:
+    As MXFP8QuantizeEntry does for single tensors: every kernel that supports the config is
+    instantiated at compile time, and each call runs the first one, in this priority order,
+    whose runtime check passes:
 
-    * "stacked": SAME_BOTH_DIMS / VARYING_FIRST_DIM members start on 128-row boundaries and
-      share the column count, so unless colwise scales are GEMM-swizzled (whose indices
-      restart per member) the group is byte-for-byte the stacked (sum(rows), cols) tensor.
-    * "flat_rowwise": with packed (non-swizzled) rowwise scales only, scale i covers elements
-      32i..32i+31 of the flat payload whatever the member shapes, as long as every member's
-      cols are a multiple of 128 (which both grouped kernels require for VARYING_LAST_DIM /
-      VARYING_BOTH_DIMS). Any group is then a cast of a (total / 128, 128) tensor.
-
-    * "grouped_g2r": the remaining BF16 plain casts (colwise / both directions of
-      VARYING_LAST_DIM / VARYING_BOTH_DIMS, and swizzled colwise of every representation) run
-      MXFP8GroupQuantizeG2RKernel, which addresses each member on its own.
-
-    Everything else, and any call these paths cannot take at runtime (a cast-noop flag,
-    2^31+ elements, cols not a multiple of 128, unaligned buffers), runs
-    MXFP8GroupQuantizeKernel.
+    1. A non-grouped GMEM-to-RMEM kernel on a single-tensor view of the group
+       (MXFP8GroupQuantizeSingleTensorViewKernel; 2-lane rowwise, register bidimensional, then
+       1-lane rowwise), where the group's data and scales are laid out as one tensor's.
+    2. The grouped GMEM-to-RMEM kernel (MXFP8GroupQuantizeG2RKernel), which addresses each
+       member on its own: BF16 plain casts with no single-tensor view (GEMM-swizzled colwise
+       scales, colwise passes of VARYING_LAST_DIM / VARYING_BOTH_DIMS, ...) or whose
+       non-grouped kernels cannot take the call (colwise only).
+    3. Otherwise the generic grouped kernel (MXFP8GroupQuantizeKernel), which handles every
+       config: dbias, fused (d)activations, FP16/FP32 cases the views do not cover, a set
+       cast-noop flag, 2^31+ elements, and shapes or alignments the others reject.
     """
 
     def __init__(self, cfg: MXFP8GroupQuantizeConfig, sm_count: int) -> None:
+        # Kernels import shared definitions from this module. Resolve their implementations
+        # only when constructing the compile-time entry object.
         # pylint: disable=import-outside-toplevel
+        from .quantize_mxfp8_g2r_rowwise_2lane import MXFP8QuantizeRowwise2LaneG2RKernel
+        from .quantize_mxfp8_g2r_bidim import MXFP8QuantizeBidimensionalG2RKernel
+        from .quantize_mxfp8_g2r_rowwise_1lane import MXFP8QuantizeRowwise1LaneG2RKernel
+        from .group_quantize_mxfp8_single_tensor_view import (
+            MXFP8GroupQuantizeSingleTensorViewKernel,
+        )
+        from .group_quantize_mxfp8_g2r import MXFP8GroupQuantizeG2RKernel
         from .group_quantize_mxfp8_general import MXFP8GroupQuantizeKernel
 
+        # pylint: enable=import-outside-toplevel
+
         self.cfg = cfg
-        self.grouped_kernel = MXFP8GroupQuantizeKernel(cfg, sm_count)
-        plain_cast = not (cfg.WITH_DBIAS or cfg.WITH_ACT or cfg.WITH_DACT)
-        self.SINGLE_TENSOR_MODE = None
-        if plain_cast and cfg.IS_SINGLE_TENSOR:
-            if not (cfg.COLWISE and cfg.WITH_GEMM_SWIZZLED_SCALES):
-                self.SINGLE_TENSOR_MODE = "stacked"
-        elif plain_cast and cfg.ROWWISE and not cfg.COLWISE and not cfg.WITH_GEMM_SWIZZLED_SCALES:
-            self.SINGLE_TENSOR_MODE = "flat_rowwise"
-        self.single_tensor_entry = None
-        self.g2r_kernel = None
-        if self.SINGLE_TENSOR_MODE is None:
-            # pylint: disable=import-outside-toplevel
-            from .group_quantize_mxfp8_g2r import MXFP8GroupQuantizeG2RKernel
-
-            if MXFP8GroupQuantizeG2RKernel.supports(cfg):
-                self.g2r_kernel = MXFP8GroupQuantizeG2RKernel(cfg, sm_count)
-        if self.SINGLE_TENSOR_MODE is not None:
-            # pylint: disable=import-outside-toplevel
-            from .quantize_mxfp8_common import MXFP8QuantizeConfig, MXFP8QuantizeEntry
-
-            self.single_tensor_entry = MXFP8QuantizeEntry(
-                MXFP8QuantizeConfig(
-                    dtype=cfg.DTYPE_STR,
-                    fp8_dtype=cfg.FP8_DTYPE_STR,
-                    rowwise=cfg.ROWWISE,
-                    colwise=cfg.COLWISE,
-                    with_gemm_swizzled_scales=cfg.WITH_GEMM_SWIZZLED_SCALES,
-                    with_amax=False,
-                    activation="none",
-                )
+        # Candidate kernels in dispatch priority order; the first eligible one runs.
+        self.kernels = [
+            MXFP8GroupQuantizeSingleTensorViewKernel(cfg, kernel_cls)
+            for kernel_cls in (
+                MXFP8QuantizeRowwise2LaneG2RKernel,
+                MXFP8QuantizeBidimensionalG2RKernel,
+                MXFP8QuantizeRowwise1LaneG2RKernel,
             )
+            if MXFP8GroupQuantizeSingleTensorViewKernel.supports(cfg, kernel_cls)
+        ]
+        if MXFP8GroupQuantizeG2RKernel.supports(cfg):
+            self.kernels.append(MXFP8GroupQuantizeG2RKernel(cfg, sm_count))
+        # Handles every config and call; runs when no candidate above is eligible.
+        self.general_kernel = MXFP8GroupQuantizeKernel(cfg, sm_count)
 
     @cute.jit
     def __call__(
@@ -231,7 +268,7 @@ class MXFP8GroupQuantizeEntry:
         mWorkspace: Optional[cute.Tensor],
         stream: CUstream,
     ) -> None:
-        grouped_args = (
+        args = (
             mX,
             mO_row,
             mO_col,
@@ -247,40 +284,10 @@ class MXFP8GroupQuantizeEntry:
             mWorkspace,
             stream,
         )
-        # The single-tensor kernels index with Int32, so groups of 2^31 or more elements
-        # stay on the grouped kernel.
-        num_elems = Int64(mX.shape[0]) * Int64(mX.shape[1])
-        if cutlass.const_expr(self.SINGLE_TENSOR_MODE == "stacked"):
-            # The grouped kernels zero the scale padding and the single-tensor kernels leave it
-            # untouched, so stack only when there is none: rows are already 128-aligned, and
-            # N % 128 == 0 leaves no padded rowwise (N / 32 % 4) or colwise (N % 128) columns.
-            if mX.shape[1] % 128 == 0 and num_elems < Int64(2**31):
-                # Restate the divisibility the Int32 casts drop -- M by the compiled sym, N by
-                # the check above -- so the vectorized GMEM copies can prove their alignment.
-                M = cute.assume(Int32(mX.shape[0]), divby=128)
-                N = cute.assume(Int32(mX.shape[1]), divby=128)
-                self._run_single_tensor(mX, mO_row, mO_col, mS_row, mS_col, mNoop, stream, M, N)
-            else:
-                self.grouped_kernel(*grouped_args)
-        elif cutlass.const_expr(self.SINGLE_TENSOR_MODE == "flat_rowwise"):
-            if num_elems < Int64(2**31):
-                M = Int32(num_elems // 128)
-                self._run_single_tensor(mX, mO_row, mO_col, mS_row, mS_col, mNoop, stream, M, 128)
-            else:
-                self.grouped_kernel(*grouped_args)
-        elif cutlass.const_expr(self.g2r_kernel is not None):
-            eligible = (
-                num_elems < Int64(2**31)
-                and mNoop.toint() == 0
-                and mX.iterator.toint() % 32 == 0
-            )
-            if cutlass.const_expr(self.cfg.COLWISE):
-                eligible = eligible and mS_col.iterator.toint() % 16 == 0
-            if cutlass.const_expr(self.cfg.IS_SINGLE_TENSOR):
-                # VARYING_LAST_DIM / VARYING_BOTH_DIMS members have 128-aligned cols already.
-                eligible = eligible and mX.shape[1] % 128 == 0
-            if eligible:
-                self.g2r_kernel(
+        dispatched = False
+        for kernel in self.kernels:
+            if not dispatched:
+                if kernel.eligible_to_dispatch(
                     mX,
                     mO_row,
                     mO_col,
@@ -290,42 +297,12 @@ class MXFP8GroupQuantizeEntry:
                     mFirstDims,
                     mLastDims,
                     num_tensors,
-                    stream,
-                )
-            else:
-                self.grouped_kernel(*grouped_args)
-        else:
-            self.grouped_kernel(*grouped_args)
-
-    @cute.jit
-    def _run_single_tensor(
-        self,
-        mX: cute.Tensor,
-        mO_row: Optional[cute.Tensor],
-        mO_col: Optional[cute.Tensor],
-        mS_row: cute.Tensor,
-        mS_col: cute.Tensor,
-        mNoop: cute.Pointer,
-        stream: CUstream,
-        M: Int32,
-        N: Int32,
-    ) -> None:
-        """Quantize the group's flat payload as one (M, N) tensor with the single-tensor entry.
-
-        The single-tensor kernels are compiled for Int32 extents. The scales arrive as flat
-        buffers; view them at the 2D shapes TE allocates for a single (M, N) tensor, which
-        carry no padding here (M % 128 == N % 128 == 0).
-        """
-        data_layout = cute.make_layout((M, N), stride=(N, 1))
-        x = cute.make_tensor(mX.iterator, data_layout)
-        o_row = s_row = o_col = s_col = None
-        if cutlass.const_expr(self.cfg.ROWWISE):
-            o_row = cute.make_tensor(mO_row.iterator, data_layout)
-            s_row = cute.make_tensor(mS_row.iterator, cute.make_layout((M, N // 32), stride=(N // 32, 1)))
-        if cutlass.const_expr(self.cfg.COLWISE):
-            o_col = cute.make_tensor(mO_col.iterator, data_layout)
-            s_col = cute.make_tensor(mS_col.iterator, cute.make_layout((M // 32, N), stride=(N, 1)))
-        self.single_tensor_entry(x, o_row, s_row, o_col, s_col, None, mNoop, None, None, stream)
+                    mNoop,
+                ):
+                    dispatched = True
+                    kernel(*args)
+        if not dispatched:
+            self.general_kernel(*args)
 
 
 def compile_cutedsl_function_from_cfg(cfg: MXFP8GroupQuantizeConfig):
