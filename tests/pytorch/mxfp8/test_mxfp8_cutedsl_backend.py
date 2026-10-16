@@ -59,7 +59,8 @@ MATRIX_SIZES = [
     (96, 128),
 ]
 # (block_rows, block_cols): (1,32)=rowwise, (32,1)=colwise, (32,32)=both.
-BLOCK_SIZES = [(1, 32), (32, 1), (32, 32)]
+ROW, COL, BOTH = (1, 32), (32, 1), (32, 32)
+BLOCK_SIZES = [ROW, COL, BOTH]
 
 # Every activation the CuTeDSL backend implements; "desc" is the name it goes by in the
 # config key (Activation in common/util/cutedsl_utils.h). Gated variants are absent because
@@ -250,31 +251,39 @@ def extract_quantized_output(out, rowwise, columnwise, swizzled):
     compared. Swizzled layout: the meaningful scales are scattered by the swizzle, so the
     top-left slice is meaningless; both backends zero the padding (see zero_scales_kernel),
     so compare the whole buffer instead -- which also covers the padding-zeroing itself.
+    FP8 -0.0 (0x80) is folded into +0.0: both backends round to zero there and may differ only
+    in its sign, which training does not depend on.
     """
     parts = {}
     if rowwise:
         d = out._rowwise_data.view(torch.uint8)
         M, N = d.shape
-        parts["rowwise data"] = d.clone()
+        parts["rowwise data"] = d.masked_fill(d == 0x80, 0)
         s = out._rowwise_scale_inv
         parts["rowwise scales"] = (s if swizzled else s[:M, : (N + 31) // 32]).clone()
     if columnwise:
         d = out._columnwise_data.view(torch.uint8)
         M, N = d.shape
-        parts["colwise data"] = d.clone()
+        parts["colwise data"] = d.masked_fill(d == 0x80, 0)
         s = out._columnwise_scale_inv
         parts["colwise scales"] = (s if swizzled else s[: (M + 31) // 32, :N]).clone()
     return parts
 
 
-def run_test_case(method, act, shape, block_size, in_dtype, fp8_dtype, swizzled=False):
+def run_test_case(
+    method, act, shape, block_size, in_dtype, fp8_dtype, swizzled=False, input_offset=0
+):
     """Assert the CuTeDSL and CUDA backends produce bit-identical outputs for the
-    same input and config.
+    same input and config. input_offset (in elements) shifts x's data pointer past the
+    start of its allocation, to test misaligned inputs.
     """
     M, N = shape
     rowwise = block_size[1] != 1
     columnwise = block_size[0] != 1
     x, act_input = generate_inputs(M, N, in_dtype)
+    if input_offset:
+        buf = torch.empty(input_offset + M * N, dtype=in_dtype, device="cuda")
+        x = buf[input_offset:].view(M, N).copy_(x)
 
     set_cutedsl_backend(False)
     out_cuda, dbias_cuda = run_quantize(
@@ -370,3 +379,274 @@ def test_sizes(swizzled, method, act, block_size, shape):
 @pytest.mark.parametrize("swizzled", SWIZZLE_MODES, ids=get_swizzle_id)
 def test_dtypes(swizzled, method, act, fp8_dtype, in_dtype):
     run_test_case(method, act, (256, 384), (32, 32), in_dtype, fp8_dtype, swizzled)
+
+
+# Grouped quantization (nvte_group_quantize / nvte_group_quantize_dbias). Every member's first
+# dim is a multiple of 128, which both grouped kernels require. VARYING_LAST_DIM and
+# VARYING_BOTH_DIMS members also keep their last dims 128-aligned, as both kernels' per-member
+# scale layout assumes. The fused activations have no PyTorch binding; the CuTeDSL path for
+# them is covered by tests/cpp/operator/test_cast_mxfp8_grouped.cu run with
+# NVTE_ENABLE_CUTEDSL_BACKEND=1.
+# (name, shape representation in the config key, per-member shapes)
+GROUP_CASES = [
+    ("same_both", "sbd", [(256, 512)] * 3),
+    ("single_member", "sbd", [(384, 384)]),
+    # N is 32- but not 128-divisible, so the rowwise and colwise scales carry zeroed padding.
+    ("same_both_n96", "sbd", [(128, 96)] * 2),
+    ("varying_first", "vfd", [(128, 256), (384, 256), (256, 256)]),
+    ("varying_first_n160", "vfd", [(128, 160), (256, 160)]),
+    # Partial 32-element blocks (e.g. N=144) are covered by the C++ grouped tests;
+    # the PyTorch MXFP8 quantizer requires dimensions divisible by 32.
+    ("varying_last", "vld", [(256, 128), (256, 384), (256, 256)]),
+    ("varying_both", "vbd", [(128, 256), (256, 128), (384, 512)]),
+    # Multiple chunks in both dimensions, including a final half-width 128-column strip.
+    ("varying_both_multichunk", "vbd", [(128, 128), (256, 384), (384, 640)]),
+    ("varying_first_empty", "vfd", [(128, 256), (0, 256), (384, 256)]),
+    ("varying_both_empty", "vbd", [(128, 128), (0, 256), (256, 384)]),
+]
+SINGLE_TENSOR_GROUP_CASES = [c for c in GROUP_CASES if c[1] in ("sbd", "vfd")]
+get_group_case_id = lambda c: c[0]
+
+
+def group_dims(members):
+    """(logical shape, first_dims, last_dims) of the grouped tensor made of `members`."""
+    first_dims = [m for m, _ in members]
+    last_dims = [n for _, n in members]
+    same_first = len(set(first_dims)) == 1
+    same_last = len(set(last_dims)) == 1
+    if same_last:
+        logical_shape = (sum(first_dims), last_dims[0])
+    elif same_first:
+        logical_shape = (first_dims[0], sum(last_dims))
+    else:
+        logical_shape = (1, sum(m * n for m, n in members))
+    to_tensor = lambda dims: torch.tensor(dims, dtype=torch.int64, device="cuda")
+    return (
+        logical_shape,
+        None if same_first else to_tensor(first_dims),
+        None if same_last else to_tensor(last_dims),
+    )
+
+
+def run_group_quantize(members, in_dtype, fp8_dtype, rowwise, columnwise, swizzled, dbias):
+    """Quantize the concatenated members; returns (grouped output, dbias or None)."""
+    logical_shape, first_dims, last_dims = group_dims(members)
+    x, _ = generate_inputs(*logical_shape, in_dtype)
+    q = MXFP8Quantizer(fp8_dtype=fp8_dtype, rowwise=rowwise, columnwise=columnwise)
+    q.optimize_for_gemm = swizzled
+    if dbias:
+        return tex.bgrad_group_quantize(x, q, len(members), first_dims, last_dims)
+    return tex.group_quantize(x, q, len(members), first_dims, last_dims), None
+
+
+def extract_group_quantized_output(out, rowwise, columnwise):
+    """Extract the bytes to compare between backends.
+
+    Unlike the single-tensor kernels, both grouped backends zero the scale padding, so the
+    whole data and scale buffers are compared.
+    """
+    parts = {}
+    if rowwise:
+        parts["rowwise data"] = out.rowwise_data.view(torch.uint8).clone()
+        parts["rowwise scales"] = out.scale_inv.view(torch.uint8).clone()
+    if columnwise:
+        parts["colwise data"] = out.columnwise_data.view(torch.uint8).clone()
+        parts["colwise scales"] = out.columnwise_scale_inv.view(torch.uint8).clone()
+    return parts
+
+
+def get_group_cfg_key(shape_rep, in_dtype, fp8_dtype, rowwise, colwise, swizzled, dbias):
+    """Mirror of MXFP8GroupQuantConfig::to_key (group_quantize_mxfp8_cutedsl.cuh) for the
+    configs reachable from PyTorch (no fused activation)."""
+    major, minor = device_compute_capability()
+    flags = (swizzled, dbias, False, False)  # swizzled, with_dbias, with_dact, with_act
+    return (
+        f"cutedsl_group_mxfp8_sm{major * 10 + minor}_{DTYPE_TO_STR[in_dtype]}_"
+        f"{FP8_TO_KEY[fp8_dtype]}_{int(rowwise)}_{int(colwise)}_{shape_rep}_"
+        + "_".join("1" if f else "0" for f in flags)
+        + "_none"
+    )
+
+
+def assert_group_cutedsl_registered(*key_args):
+    """Guard against a silent CUDA fallback; see run_test_case."""
+    key = get_group_cfg_key(*key_args)
+    assert tvm_ffi.get_global_func(key, allow_missing=True) is not None, (
+        f"CuTeDSL kernel not registered for {key}; the CuTeDSL backend fell back "
+        "to CUDA and this case compared CUDA against itself"
+    )
+
+
+def run_group_test_case(
+    members, shape_rep, block_size, in_dtype, fp8_dtype, swizzled=False, dbias=False
+):
+    """Assert the CuTeDSL and CUDA grouped backends produce bit-identical outputs, including
+    dbias, which both accumulate in the same order."""
+    rowwise = block_size[1] != 1
+    columnwise = block_size[0] != 1
+    args = (members, in_dtype, fp8_dtype, rowwise, columnwise, swizzled, dbias)
+
+    set_cutedsl_backend(False)
+    out_cuda, dbias_cuda = run_group_quantize(*args)
+    cuda_output = extract_group_quantized_output(out_cuda, rowwise, columnwise)
+
+    set_cutedsl_backend(True)
+    try:
+        out_cutedsl, dbias_cutedsl = run_group_quantize(*args)
+        cutedsl_output = extract_group_quantized_output(out_cutedsl, rowwise, columnwise)
+    finally:
+        set_cutedsl_backend(False)
+
+    assert_group_cutedsl_registered(
+        shape_rep, in_dtype, fp8_dtype, rowwise, columnwise, swizzled, dbias
+    )
+    tag = f"group/{members}/{DTYPE_TO_STR[in_dtype]}/{FP8_TO_STR[fp8_dtype]}"
+    for name, cuda_bytes in cuda_output.items():
+        assert torch.equal(
+            cutedsl_output[name], cuda_bytes
+        ), f"{tag}: {name} differ between backends"
+    if dbias:
+        assert torch.equal(
+            dbias_cutedsl.view(torch.uint8), dbias_cuda.view(torch.uint8)
+        ), f"{tag}: dbias differs between backends"
+
+
+@pytest.mark.parametrize("case", GROUP_CASES, ids=get_group_case_id)
+@pytest.mark.parametrize("block_size", BLOCK_SIZES, ids=get_block_id)
+@pytest.mark.parametrize("in_dtype", IN_DTYPES, ids=get_dtype_id)
+@pytest.mark.parametrize("fp8_dtype", FP8_DTYPES, ids=get_fp8_id)
+def test_group_cast_only(fp8_dtype, in_dtype, block_size, case):
+    _, shape_rep, members = case
+    run_group_test_case(members, shape_rep, block_size, in_dtype, fp8_dtype)
+
+
+@pytest.mark.parametrize("case", GROUP_CASES, ids=get_group_case_id)
+@pytest.mark.parametrize("block_size", BLOCK_SIZES, ids=get_block_id)
+def test_group_swizzled(block_size, case):
+    _, shape_rep, members = case
+    run_group_test_case(
+        members, shape_rep, block_size, torch.bfloat16, tex.DType.kFloat8E4M3, swizzled=True
+    )
+
+
+@pytest.mark.parametrize("case", SINGLE_TENSOR_GROUP_CASES, ids=get_group_case_id)
+@pytest.mark.parametrize("block_size", BLOCK_SIZES, ids=get_block_id)
+@pytest.mark.parametrize("in_dtype", IN_DTYPES, ids=get_dtype_id)
+@pytest.mark.parametrize("swizzled", SWIZZLE_MODES, ids=get_swizzle_id)
+def test_group_dbias(swizzled, in_dtype, block_size, case):
+    _, shape_rep, members = case
+    run_group_test_case(
+        members,
+        shape_rep,
+        block_size,
+        in_dtype,
+        tex.DType.kFloat8E4M3,
+        swizzled=swizzled,
+        dbias=True,
+    )
+
+
+@pytest.mark.parametrize("cutedsl", [False, True], ids=["cuda", "cutedsl"])
+def test_group_noop(cutedsl):
+    """A set cast-noop flag leaves a reused grouped output untouched; a clear one does not."""
+    members = [(256, 512)] * 3
+    logical_shape, _, _ = group_dims(members)
+    x1, x2 = generate_inputs(*logical_shape, torch.bfloat16)
+    q = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=True)
+    set_cutedsl_backend(cutedsl)
+    try:
+        out = tex.group_quantize(x1, q, len(members), None)
+        first = extract_group_quantized_output(out, True, True)
+        noop = torch.ones(1, dtype=torch.float32, device="cuda")
+        tex.group_quantize(x2, q, len(members), None, noop_flag=noop, output=out)
+        skipped = extract_group_quantized_output(out, True, True)
+        noop.zero_()
+        tex.group_quantize(x2, q, len(members), None, noop_flag=noop, output=out)
+        quantized = extract_group_quantized_output(out, True, True)
+        expected = extract_group_quantized_output(
+            tex.group_quantize(x2, q, len(members), None), True, True
+        )
+    finally:
+        set_cutedsl_backend(False)
+    if cutedsl:
+        assert_group_cutedsl_registered(
+            "sbd", torch.bfloat16, tex.DType.kFloat8E4M3, True, True, False, False
+        )
+    for name, first_bytes in first.items():
+        assert torch.equal(skipped[name], first_bytes), f"{name} changed under a set noop flag"
+        assert torch.equal(quantized[name], expected[name]), f"{name} wrong under a clear flag"
+
+
+def test_group_2d_quantization_fallback():
+    """2D block scaling is left to the CUDA kernel, which must still be what runs."""
+    members = [(128, 256), (384, 256), (256, 256)]
+    logical_shape, first_dims, _ = group_dims(members)
+    x, _ = generate_inputs(*logical_shape, torch.bfloat16)
+    outputs = []
+    for cutedsl in (False, True):
+        q = MXFP8Quantizer(
+            fp8_dtype=tex.DType.kFloat8E4M3,
+            rowwise=True,
+            columnwise=True,
+            with_2d_quantization=True,
+        )
+        set_cutedsl_backend(cutedsl)
+        try:
+            out = tex.group_quantize(x, q, len(members), first_dims)
+            outputs.append(extract_group_quantized_output(out, True, True))
+        finally:
+            set_cutedsl_backend(False)
+    for name, cuda_bytes in outputs[0].items():
+        assert torch.equal(outputs[1][name], cuda_bytes), f"{name} differ between backends"
+
+
+# Cover the specialized kernels' shapes
+
+SPECIALIZED_PATH_CASES = [
+    # G2RRowwise2Lane: the four launch tiers (by output size) on the flat packed-scale view.
+    ("g2r_rowwise2lane_tier0", (1024, 4096), ROW, torch.bfloat16, False, 0),
+    ("g2r_rowwise2lane_tier1", (4064, 4480), ROW, torch.bfloat16, False, 0),
+    ("g2r_rowwise2lane_tier2", (8192, 8192), ROW, torch.bfloat16, False, 0),
+    ("g2r_rowwise2lane_tier3", (16384, 8192), ROW, torch.bfloat16, False, 0),
+    # Swizzled scales use the 2-D grid instead of the flat view.
+    ("g2r_rowwise2lane_swizzled", (4096, 4096), ROW, torch.bfloat16, True, 0),
+    # Partial row and column tiles, and scale padding.
+    ("g2r_rowwise2lane_swizzled_partial", (160, 384), ROW, torch.bfloat16, True, 0),
+    # Row tiles past grid.y's limit spill into grid.z.
+    ("g2r_rowwise2lane_swizzled_grid_z", (524352, 128), ROW, torch.bfloat16, True, 0),
+    # G2RRowwise1Lane: input only 16-byte aligned, or fp16.
+    ("g2r_rowwise1lane_misaligned_bf16", (1024, 4096), ROW, torch.bfloat16, False, 8),
+    ("g2r_rowwise1lane_fp16", (1024, 4096), ROW, torch.float16, False, 0),
+    # G2RBidim: static N == 2048 / 4096, the wide tile with and without the
+    # deep cluster, and the narrow tile (N % 512 != 0).
+    ("g2r_bidim_n2048", (256, 2048), BOTH, torch.bfloat16, False, 0),
+    ("g2r_bidim_n2048_swizzled", (256, 2048), BOTH, torch.bfloat16, True, 0),
+    ("g2r_bidim_n4096_swizzled", (256, 4096), BOTH, torch.bfloat16, True, 0),
+    ("g2r_bidim_wide", (256, 6144), BOTH, torch.bfloat16, False, 0),
+    ("g2r_bidim_wide_cluster", (4096, 16384), BOTH, torch.bfloat16, False, 0),
+    ("g2r_bidim_narrow", (160, 2304), BOTH, torch.bfloat16, False, 0),
+    ("g2r_bidim_narrow_swizzled", (160, 2304), BOTH, torch.bfloat16, True, 0),
+    # M % 128 != 0: swizzled scale padding.
+    ("g2r_bidim_wide_swizzled_pad", (4128, 6144), BOTH, torch.bfloat16, True, 0),
+    # G2SBidim: fp16, or bf16 with N % 256 != 0.
+    ("g2s_bidim_fp16", (256, 1024), BOTH, torch.float16, False, 0),
+    ("g2s_bidim_bf16_n384", (256, 384), BOTH, torch.bfloat16, False, 0),
+]
+
+
+@pytest.mark.parametrize(
+    "shape,block_size,in_dtype,swizzled,input_offset",
+    [case[1:] for case in SPECIALIZED_PATH_CASES],
+    ids=[case[0] for case in SPECIALIZED_PATH_CASES],
+)
+def test_specialized_kernels(shape, block_size, in_dtype, swizzled, input_offset):
+    run_test_case(
+        "CAST_ONLY",
+        IDENTITY,
+        shape,
+        block_size,
+        in_dtype,
+        tex.DType.kFloat8E4M3,
+        swizzled,
+        input_offset,
+    )
