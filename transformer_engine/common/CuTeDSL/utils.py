@@ -103,6 +103,17 @@ def exp2_bf16x2_rcp(scale_e8m0) -> Uint32:
 
 
 @cute.jit
+def bf16_pair_magnitude(pair: Int32) -> Uint32:
+    """Fold both BF16 halves and clear the sign set by max.xorsign.abs."""
+    swapped = cute.arch.inline_ptx(
+        "prmt.b32 {$w0}, {$r0}, {$r0}, 0x1032;",
+        write_only_types=[Int32],
+        read_only_args=[pair],
+    )
+    return Uint32(abs_max_x2_bf16(pair, swapped)) & Uint32(0x7FFF)
+
+
+@cute.jit
 def bf16_mx_scale_reciprocal(magnitude: Uint32, MAX_EXPONENT: cutlass.Constexpr[int]) -> Uint32:
     """Exact BF16 reciprocal scale bits, including E8M0 zero, Inf and NaN cases."""
     rounded = (magnitude + Uint32(31)) & Uint32(0x7F80)
@@ -273,6 +284,16 @@ def x2_hi_to_f32_bf16(bits: Int32) -> Float32:
     # Clear the low 16 bits while preserving the high BF16 value. Use shifts because
     # the equivalent 0xFFFF0000 mask does not fit in a positive signed Int32 literal.
     return ((bits >> Int32(16)) << Int32(16)).bitcast(Float32)
+
+
+@cute.jit
+def cvt_f32x2_to_bf16x2(lo: Float32, hi: Float32) -> Int32:
+    """Round two FP32 values to BF16 (round-to-nearest-even) and pack them, lo in the low half."""
+    return cute.arch.inline_ptx(
+        "cvt.rn.bf16x2.f32 {$w0}, {$r0}, {$r1};",
+        write_only_types=[Int32],
+        read_only_args=[hi, lo],
+    )
 
 
 @cute.jit

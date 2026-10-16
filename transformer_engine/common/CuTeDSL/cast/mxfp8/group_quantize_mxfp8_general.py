@@ -27,10 +27,10 @@ from .quantize_mxfp8_common import (
     derive_swizzled_scale_layout,
     noop_flag_is_set,
 )
-from .quantize_mxfp8_general import (
+from .quantize_mxfp8_g2s_general import (
     reduce_rowwise_dbias,
-    quantize_rowwise_mxfp8,
-    quantize_colwise_mxfp8,
+    _quantize_rowwise_mxfp8,
+    _quantize_colwise_mxfp8,
 )
 from .group_quantize_mxfp8_common import (
     CUTEDSL_DEBUG_LOGGING,
@@ -1068,7 +1068,7 @@ class MXFP8GroupQuantizeKernel:
                 row_tile = job_tile_Y + tile_Y
 
                 if cutlass.const_expr(cfg.COLWISE):
-                    _, partial_dbias = quantize_colwise_mxfp8(
+                    _, partial_dbias = _quantize_colwise_mxfp8(
                         sX_tile,
                         sAct_tile,
                         sO_col[(None, cons_state.index)],
@@ -1096,7 +1096,7 @@ class MXFP8GroupQuantizeKernel:
                     cute.arch.sync_threads()
 
                 if cutlass.const_expr(cfg.ROWWISE):
-                    quantize_rowwise_mxfp8(
+                    _quantize_rowwise_mxfp8(
                         sX_tile,
                         None if self.CACHE_ACTIVATION else sAct_tile,
                         sO_row[(None, cons_state.index)],

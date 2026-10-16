@@ -9,7 +9,7 @@ offset directly -- no search, and, since the tiles are loaded with plain global 
 than TMA, no per-member descriptors and no descriptor-update prologue kernel. A member is
 viewed as its own (rows, cols) tensor whose scales start at offset / 32, packed or
 GEMM-swizzled, and its 32 x 128 tiles are quantized by the register-resident tile function of
-the single-tensor bidimensional kernel (quantize_bidimensional_mxfp8_g2r), which runs the
+the single-tensor bidimensional kernel (quantize_mxfp8_gmem_tile_bidimensional), which runs the
 rowwise and/or colwise pass the config asks for.
 
 Requires every member's rows and cols to be multiples of 128 (both grouped kernels require
@@ -29,7 +29,7 @@ from .quantize_mxfp8_common import (
     MXFP8_BLOCK_SCALING_SIZE,
     derive_swizzled_scale_layout,
 )
-from .quantize_mxfp8_g2r_bidimensional import quantize_bidimensional_mxfp8_g2r
+from .quantize_mxfp8_g2r_bidim import quantize_mxfp8_gmem_tile_bidimensional
 from .group_quantize_mxfp8_common import (
     MXFP8GroupQuantizeConfig,
     SAME_BOTH_DIMS,
@@ -197,14 +197,18 @@ class MXFP8GroupQuantizeG2RKernel:
         if cutlass.const_expr(cfg.COLWISE):
             gO_col_tile = cute.local_tile(gO_col, TILER, coord)
             gS_col_tile = cute.local_tile(gS_col, COL_SCALE_TILER, coord)
-        quantize_bidimensional_mxfp8_g2r(
+        quantize_mxfp8_gmem_tile_bidimensional(
             cute.local_tile(gX, TILER, coord),
+            None,
             gO_row_tile,
             gS_row_tile,
             gO_col_tile,
             gS_col_tile,
             ROWWISE=cfg.ROWWISE,
             COLWISE=cfg.COLWISE,
+            ACTIVATION=None,
+            WITH_ACT=False,
+            WITH_DACT=False,
             DTYPE=cfg.DTYPE,
             FP8_DTYPE=cfg.FP8_DTYPE,
             WITH_GEMM_SWIZZLED_SCALES=cfg.WITH_GEMM_SWIZZLED_SCALES,
