@@ -502,11 +502,8 @@ def run_gated_test_case(act, is_bwd, shape, block_size, in_dtype, fp8_dtype, swi
     shape is (M, N): the gated input is [M, 2N].
     """
     M, N = shape
-    if is_bwd and swizzled and N % 128 != 0:
-        pytest.skip(
-            "CuTeDSL hands backward gated activations with GEMM-swizzled scales and "
-            "N % 128 != 0 back to CUDA"
-        )
+    if is_bwd and swizzled:
+        pytest.skip("CuTeDSL hands backward gated activations with GEMM-swizzled scales to CUDA")
     rowwise = block_size[1] != 1
     columnwise = block_size[0] != 1
     x, _ = generate_inputs(M, 2 * N, in_dtype)

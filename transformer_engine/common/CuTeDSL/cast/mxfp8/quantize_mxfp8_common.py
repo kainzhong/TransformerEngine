@@ -30,6 +30,8 @@ from transformer_engine.common.CuTeDSL.activations import (
     dact_dsilu,
     dact_dqgelu,
     dact_dgelu,
+    act_sigmoid,
+    dact_dsigmoid,
 )
 
 CUTEDSL_DEBUG_LOGGING = os.environ.get("CUTEDSL_DEBUG_LOGGING", "0") == "1"
@@ -65,6 +67,21 @@ SUPPORTED_DACTIVATIONS = {
     "dsilu": dact_dsilu,
     "dqgelu": dact_dqgelu,
     "dsrelu": dact_dsrelu,
+}
+
+
+# Gated activations of gated_mxfp8.cuh, as (ActOP, DActOP) ports of the math.h functions the
+# CUDA dispatcher instantiates them with. swiglu and clamped_swiglu backward, and situglu in
+# both directions, do not go through this table: like the CUDA kernel they take a special path.
+GATED_ACTIVATIONS = {
+    "geglu": (act_gelu, dact_dgelu),
+    "qgeglu": (act_qgelu, dact_dqgelu),
+    "reglu": (act_relu, dact_drelu),
+    "sreglu": (act_srelu, dact_dsrelu),
+    "glu": (act_sigmoid, dact_dsigmoid),
+    "swiglu": (act_silu, None),
+    "clamped_swiglu": (None, None),
+    "situglu": (None, None),
 }
 
 
@@ -339,6 +356,105 @@ class MXFP8QuantizeConfig:
             options="--enable-tvm-ffi",
         )
         return compiled
+
+
+def _fake_gmem_tensor(dtype, shape, align):
+    """Row-major fake gmem tensor for cute.compile."""
+    return cute.runtime.make_fake_compact_tensor(
+        dtype,
+        shape,
+        stride_order=tuple(reversed(range(len(shape)))),
+        memspace=cute.AddressSpace.gmem,
+        assumed_align=align,
+    )
+
+
+class MXFP8GatedQuantizeConfig(MXFP8QuantizeConfig):
+    """Compile-time config of gated_mxfp8.cuh's port: a plain MXFP8 cast config plus the gated op."""
+
+    def __init__(
+        self,
+        dtype: str,
+        fp8_dtype: str,
+        rowwise: bool,
+        colwise: bool,
+        with_gemm_swizzled_scales: bool,
+        is_bwd: bool,
+        activation: str,
+    ):
+        super().__init__(
+            dtype=dtype,
+            fp8_dtype=fp8_dtype,
+            rowwise=rowwise,
+            colwise=colwise,
+            with_gemm_swizzled_scales=with_gemm_swizzled_scales,
+            with_amax=False,
+            activation="none",
+        )
+        if activation not in GATED_ACTIVATIONS:
+            raise ValueError(
+                f"unknown gated activation {activation!r}; expected one of"
+                f" {sorted(GATED_ACTIVATIONS)}"
+            )
+        if is_bwd and with_gemm_swizzled_scales:
+            # TODO(kainingz): technically this is supported but I need to come up with a less disgusting way
+            # to implement it in CuTe
+            raise ValueError("backward gated activations with GEMM-swizzled scales")
+        self.IS_BWD = is_bwd
+        self.GATED_ACTIVATION = activation
+
+    def __str__(self):
+        return (
+            f"MXFP8GatedQuantizeConfig(dtype={self.DTYPE_STR}, fp8_dtype={self.FP8_DTYPE_STR}, "
+            f"rowwise={self.ROWWISE}, colwise={self.COLWISE}, "
+            f"swizzled={self.WITH_GEMM_SWIZZLED_SCALES}, is_bwd={self.IS_BWD}, "
+            f"activation={self.GATED_ACTIVATION})"
+        )
+
+    __repr__ = __str__
+
+    def compile(self):
+        """Return the compiled CuTeDSL function object for this config."""
+        # The kernel module imports this one
+        # pylint: disable-next=import-outside-toplevel
+        from .quantize_mxfp8_gated_g2s import MXFP8GatedQuantizeG2SKernel
+
+        sym_M = cute.sym_int32()
+        # The C++ dispatcher requires N % 32 == 0, like the CUDA kernel.
+        sym_N = cute.sym_int32(divisibility=32)
+        sym_2N = cute.sym_int32(divisibility=64)
+        out_cols = sym_2N if self.IS_BWD else sym_N
+        # Padded scale shapes, see MXFP8QuantizeConfig.compile
+        scale_rowwise_shape = (cute.sym_int32(divisibility=128), cute.sym_int32(divisibility=4))
+        scale_colwise_shape = (cute.sym_int32(divisibility=4), cute.sym_int32(divisibility=128))
+        # Only the activation's own params are runtime arguments; the others are compiled as None
+        # and the C++ launcher passes None for them.
+        clamped = self.GATED_ACTIVATION == "clamped_swiglu"
+        situ = self.GATED_ACTIVATION == "situglu"
+        params = [Float32(0.0) if clamped else None] * 3  # limit, alpha, glu_linear_offset
+        params += [Float32(0.0) if situ else None] * 2  # beta1, beta2
+        return cute.compile(
+            MXFP8GatedQuantizeG2SKernel(self),
+            _fake_gmem_tensor(self.DTYPE, (sym_M, sym_2N), 16),  # mGatedInput
+            _fake_gmem_tensor(self.DTYPE, (sym_M, sym_N), 16) if self.IS_BWD else None,  # mGrad
+            # mO_row, mS_row
+            _fake_gmem_tensor(self.FP8_DTYPE, (sym_M, out_cols), 16) if self.ROWWISE else None,
+            (
+                _fake_gmem_tensor(cutlass.Float8E8M0FNU, scale_rowwise_shape, 4)
+                if self.ROWWISE
+                else None
+            ),
+            # mO_col, mS_col
+            _fake_gmem_tensor(self.FP8_DTYPE, (sym_M, out_cols), 16) if self.COLWISE else None,
+            (
+                _fake_gmem_tensor(cutlass.Float8E8M0FNU, scale_colwise_shape, 4)
+                if self.COLWISE
+                else None
+            ),
+            *params,
+            cute.runtime.make_fake_stream(),
+            options="--enable-tvm-ffi",
+        )
 
 
 class MXFP8QuantizeKernelBase(abc.ABC):
@@ -631,9 +747,6 @@ def get_mxfp8_gated_quantization_function(
     activation: str,
 ) -> bool:
     """Compile and register the gated MXFP8 quantize kernel for this config under `fn_name`."""
-    # pylint: disable=import-outside-toplevel
-    from .quantize_mxfp8_gated_g2s import MXFP8GatedQuantizeConfig
-
     try:
         cfg = MXFP8GatedQuantizeConfig(
             dtype=dtype,
