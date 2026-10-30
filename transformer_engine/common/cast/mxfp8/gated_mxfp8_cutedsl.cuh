@@ -168,8 +168,10 @@ bool mxfp8_quantize_gated_cutedsl(const Tensor &gated_input, const Tensor &grad,
       }
     }
 
-    // Activation parameters travel as runtime arguments so that one compiled kernel serves them all.
-    float limit = 0.0f, alpha = 0.0f, glu_linear_offset = 0.0f, beta1 = 0.0f, beta2 = 0.0f;
+    // The activation's own parameters are runtime arguments; the kernel is compiled with None in
+    // the slots of the others, so they are passed as None (nullptr).
+    tvm::ffi::Any limit = nullptr, alpha = nullptr, glu_linear_offset = nullptr, beta1 = nullptr,
+                  beta2 = nullptr;
     if constexpr (std::is_same_v<ParamOP, ClampedSwiGLUParam>) {
       limit = p.limit;
       alpha = p.alpha;

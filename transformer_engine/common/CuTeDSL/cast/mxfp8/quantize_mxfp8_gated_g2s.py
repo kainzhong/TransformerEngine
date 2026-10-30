@@ -22,7 +22,7 @@ from typing import Optional
 import cutlass
 from cutlass import cute
 from cutlass import pipeline
-from cutlass import Boolean, Float32, Int32, Int64
+from cutlass import Boolean, Float32, Int32
 from cuda.bindings.driver import CUstream  # pylint: disable=no-name-in-module
 
 from transformer_engine.common.CuTeDSL.utils import (
@@ -89,11 +89,11 @@ def _gated_element(
     act_elt: Float32,
     gate_elt: Float32,
     grad_elt: Optional[Float32],
-    limit: Float32,
-    alpha: Float32,
-    glu_linear_offset: Float32,
-    beta1: Float32,
-    beta2: Float32,
+    limit: Optional[Float32],
+    alpha: Optional[Float32],
+    glu_linear_offset: Optional[Float32],
+    beta1: Optional[Float32],
+    beta2: Optional[Float32],
     ACTIVATION: cutlass.Constexpr[str],
     IS_BWD: cutlass.Constexpr[bool],
 ):
@@ -154,11 +154,11 @@ def gated_elementwise_smem_tile(
     sAct_tile: cute.Tensor,  # (TILE_Y, TILE_X) act half of the input; receives the act output
     sGate_tile: cute.Tensor,  # (TILE_Y, TILE_X) gate half; receives the gate output (bwd only)
     sGrad_tile: Optional[cute.Tensor],  # (TILE_Y, TILE_X) incoming gradient (bwd only)
-    limit: Float32,
-    alpha: Float32,
-    glu_linear_offset: Float32,
-    beta1: Float32,
-    beta2: Float32,
+    limit: Optional[Float32],
+    alpha: Optional[Float32],
+    glu_linear_offset: Optional[Float32],
+    beta1: Optional[Float32],
+    beta2: Optional[Float32],
     ACTIVATION: cutlass.Constexpr[str],
     IS_BWD: cutlass.Constexpr[bool],
     DTYPE: cutlass.Constexpr[type],
@@ -226,11 +226,11 @@ def quantize_gated_mxfp8_smem_tile(
     tile_col_start: Int32,
     M: Int32,
     N: Int32,
-    limit: Float32,
-    alpha: Float32,
-    glu_linear_offset: Float32,
-    beta1: Float32,
-    beta2: Float32,
+    limit: Optional[Float32],
+    alpha: Optional[Float32],
+    glu_linear_offset: Optional[Float32],
+    beta1: Optional[Float32],
+    beta2: Optional[Float32],
     ACTIVATION: cutlass.Constexpr[str],
     IS_BWD: cutlass.Constexpr[bool],
     ROWWISE: cutlass.Constexpr[bool],
@@ -304,21 +304,54 @@ def quantize_gated_mxfp8_smem_tile(
 
 
 @cute.jit
-def _column_slice(mT: cute.Tensor, col_offset: Int32, num_cols: Int32) -> cute.Tensor:
-    """(rows, num_cols) view of the row-major mT starting at column col_offset.
+def _split_gated_scales(
+    mS_row: Optional[cute.Tensor],
+    mS_col: Optional[cute.Tensor],
+    M: Int32,
+    N: Int32,
+    ROWWISE: cutlass.Constexpr[bool],
+    COLWISE: cutlass.Constexpr[bool],
+    SWIZZLED: cutlass.Constexpr[bool],
+):
+    """Act and gate views of the backward output's scales; returns
+    (act_row, gate_row, act_col, gate_col).
 
-    The pointer is rebuilt rather than offset so that TMA sees it 16-byte aligned, which the C++
-    dispatcher guarantees for both the tensor and the column offset of every slice.
+    The [M, 2N] output is [d act | d gate] and its scales are laid out for the whole output. Each
+    view has the shape of an [M, N] tensor's scales and the strides of the whole output's, and
+    starts where the whole output's layout places that half's first scale. For swizzled scales
+    this needs the halves to be whole 128x4 tiles (N % 128 == 0, required by the C++ dispatcher).
     """
-    ptr = cute.make_ptr(
-        mT.element_type,
-        mT.iterator.toint() + Int64(col_offset) * Int64(mT.element_type.width // 8),
-        cute.AddressSpace.gmem,
-        assumed_align=16,
-    )
-    return cute.make_tensor(
-        ptr, cute.make_layout((mT.shape[0], num_cols), stride=(mT.stride[0], 1))
-    )
+    act_row = gate_row = act_col = gate_col = None
+    if cutlass.const_expr(SWIZZLED):
+        mS_row, mS_col = derive_swizzled_scale_layout(
+            M, 2 * N, ROWWISE, COLWISE, mS_row, mS_col
+        )
+        half_tiles = N // 128
+        if cutlass.const_expr(ROWWISE):
+            row_tiler = (
+                cute.make_layout((32, 4, cute.ceil_div(M, 128))),  # all rows
+                cute.make_layout((4, half_tiles)),  # one half's scale columns
+            )
+            act_row = cute.local_tile(mS_row, row_tiler, (0, 0))
+            gate_row = cute.local_tile(mS_row, row_tiler, (0, 1))
+        if cutlass.const_expr(COLWISE):
+            col_tiler = (
+                cute.make_layout((4, cute.ceil_div(cute.ceil_div(M, 32), 4))),  # all scale rows
+                cute.make_layout((32, 4, half_tiles)),  # one half's columns
+            )
+            act_col = cute.local_tile(mS_col, col_tiler, (0, 0))
+            gate_col = cute.local_tile(mS_col, col_tiler, (0, 1))
+    else:
+        # Compact scales are row-major, so each half is a block of scale columns
+        if cutlass.const_expr(ROWWISE):
+            row_tiler = (mS_row.shape[0], N // MXFP8_BLOCK_SCALING_SIZE)
+            act_row = cute.local_tile(mS_row, row_tiler, (0, 0))
+            gate_row = cute.local_tile(mS_row, row_tiler, (0, 1))
+        if cutlass.const_expr(COLWISE):
+            col_tiler = (mS_col.shape[0], N)
+            act_col = cute.local_tile(mS_col, col_tiler, (0, 0))
+            gate_col = cute.local_tile(mS_col, col_tiler, (0, 1))
+    return act_row, gate_row, act_col, gate_col
 
 
 def _fake_gmem_tensor(dtype, shape, align):
@@ -382,7 +415,12 @@ class MXFP8GatedQuantizeConfig(MXFP8QuantizeConfig):
         # Padded scale shapes, see MXFP8QuantizeConfig.compile
         scale_rowwise_shape = (cute.sym_int32(divisibility=128), cute.sym_int32(divisibility=4))
         scale_colwise_shape = (cute.sym_int32(divisibility=4), cute.sym_int32(divisibility=128))
-        params = [Float32(0.0)] * 5  # limit, alpha, glu_linear_offset, beta1, beta2
+        # Only the activation's own params are runtime arguments; the others are compiled as None
+        # and the C++ launcher passes None for them.
+        clamped = self.GATED_ACTIVATION == "clamped_swiglu"
+        situ = self.GATED_ACTIVATION == "situglu"
+        params = [Float32(0.0) if clamped else None] * 3  # limit, alpha, glu_linear_offset
+        params += [Float32(0.0) if situ else None] * 2  # beta1, beta2
         return cute.compile(
             MXFP8GatedQuantizeG2SKernel(self),
             _fake_gmem_tensor(self.DTYPE, (sym_M, sym_2N), 16),  # mGatedInput
@@ -425,51 +463,67 @@ class MXFP8GatedQuantizeG2SKernel(MXFP8QuantizeGeneralG2SKernel):
         self,
         mGatedInput: cute.Tensor,  # [M, 2N] = [act | gate]
         mGrad: Optional[cute.Tensor],  # [M, N], bwd only
-        mO_row: Optional[cute.Tensor],  # [M, N] (fwd) or [M, 2N] (bwd)
-        mS_row: Optional[cute.Tensor],
-        mO_col: Optional[cute.Tensor],
-        mS_col: Optional[cute.Tensor],
-        limit: Float32,  # ClampedSwiGLUParam
-        alpha: Float32,
-        glu_linear_offset: Float32,
-        beta1: Float32,  # SiTUGLUParam
-        beta2: Float32,
+        # Outputs, with C = N (FWD) or 2N (BWD)
+        mO_row: Optional[cute.Tensor],  # [M, C]
+        mS_row: Optional[cute.Tensor],  # [roundup(M, 128), roundup(C / 32, 4)]
+        mO_col: Optional[cute.Tensor],  # [M, C], not transposed
+        mS_col: Optional[cute.Tensor],  # [roundup(ceil(M / 32), 4), roundup(C, 128)]
+        # Special activation params, None if not used by the activation
+        limit: Optional[Float32], # Clamped SwiGLU only
+        alpha: Optional[Float32], # Clamped SwiGLU only
+        glu_linear_offset: Optional[Float32], # Clamped SwiGLU only
+        beta1: Optional[Float32], # SiTUGLU only
+        beta2: Optional[Float32], # SiTUGLU only
         stream: CUstream,
     ):
-        cfg = self.cfg
+        """
+        mGatedInput: [a | g] with shape M x 2N, where a is the activation half and g is the gate half.
+        mGrad: None for FWD, [dy] with shape [M, N] for BWD
+        FWD mode:
+        out = quantize(act(a) * gate(g)) with shape [M, N]
+        BWD mode:
+        out = quantize([ dy * gate(g) * dact(a)  |  dy * act(a) * dgate(g) ]) with shape [M, 2N]
+        """
         if cutlass.const_expr(CUTEDSL_DEBUG_LOGGING):
-            cute.printf(f"[CuTeDSL] MXFP8GatedQuantizeG2SKernel.__call__() with config: {cfg}\n")
+            cute.printf(f"[CuTeDSL] MXFP8GatedQuantizeG2SKernel.__call__() with config: {self.cfg}\n")
 
-        mO = mO_row if cfg.ROWWISE else mO_col
         M = mGatedInput.shape[0]
-        N = mGrad.shape[1] if cfg.IS_BWD else mO.shape[1]
+        # Pick any mO that is used just to get N
+        mO = mO_row if mO_row is not None else mO_col
+        # FWD: mO is [M, N]; BWD: mGrad is [M, N]
+        N = mGrad.shape[1] if self.cfg.IS_BWD else mO.shape[1]
 
-        # Scales cover the whole output: [M, 2N] backward, with the gate half's scales starting
-        # at scale column N / 32 (rowwise) or N (colwise).
-        if cutlass.const_expr(cfg.WITH_GEMM_SWIZZLED_SCALES):
+        if cutlass.const_expr(self.cfg.WITH_GEMM_SWIZZLED_SCALES and not self.cfg.IS_BWD):
             mS_row, mS_col = derive_swizzled_scale_layout(
-                M, mO.shape[1], cfg.ROWWISE, cfg.COLWISE, mS_row, mS_col
+                M, N, self.cfg.ROWWISE, self.cfg.COLWISE, mS_row, mS_col
             )
+
         mS_row_gate = None
         mS_col_gate = None
         mO_row_gate = None
         mO_col_gate = None
-        if cutlass.const_expr(cfg.IS_BWD):
-            # Swizzled scales are only translation invariant across whole 128-column tiles,
-            # which the C++ dispatcher guarantees by requiring N % 128 == 0 for them.
-            if cutlass.const_expr(cfg.ROWWISE):
-                mS_row_gate = cute.domain_offset((0, N // MXFP8_BLOCK_SCALING_SIZE), mS_row)
-                mO_row_gate = _column_slice(mO_row, N, N)
-                mO_row = _column_slice(mO_row, 0, N)
-            if cutlass.const_expr(cfg.COLWISE):
-                mS_col_gate = cute.domain_offset((0, N), mS_col)
-                mO_col_gate = _column_slice(mO_col, N, N)
-                mO_col = _column_slice(mO_col, 0, N)
+        if cutlass.const_expr(self.cfg.IS_BWD):
+            # Split the [M, 2N] output and its scales into the act and gate halves
+            mS_row, mS_row_gate, mS_col, mS_col_gate = _split_gated_scales(
+                mS_row,
+                mS_col,
+                M,
+                N,
+                self.cfg.ROWWISE,
+                self.cfg.COLWISE,
+                self.cfg.WITH_GEMM_SWIZZLED_SCALES,
+            )
+            if cutlass.const_expr(self.cfg.ROWWISE):
+                mO_row_gate = cute.local_tile(mO_row, (M, N), (0, 1))
+                mO_row = cute.local_tile(mO_row, (M, N), (0, 0))
+            if cutlass.const_expr(self.cfg.COLWISE):
+                mO_col_gate = cute.local_tile(mO_col, (M, N), (0, 1))
+                mO_col = cute.local_tile(mO_col, (M, N), (0, 0))
 
         atoms = self._make_tma_atoms(
             mGrad,
-            _column_slice(mGatedInput, 0, N),
-            _column_slice(mGatedInput, N, N),
+            cute.local_tile(mGatedInput, (M, N), (0, 0)),  # act half
+            cute.local_tile(mGatedInput, (M, N), (0, 1)),  # gate half
             mO_row,
             mO_row_gate,
             mO_col,
@@ -588,11 +642,11 @@ class MXFP8GatedQuantizeG2SKernel(MXFP8QuantizeGeneralG2SKernel):
         mS_row_gate: Optional[cute.Tensor],
         mS_col_act: Optional[cute.Tensor],
         mS_col_gate: Optional[cute.Tensor],
-        limit: Float32,
-        alpha: Float32,
-        glu_linear_offset: Float32,
-        beta1: Float32,
-        beta2: Float32,
+        limit: Optional[Float32],
+        alpha: Optional[Float32],
+        glu_linear_offset: Optional[Float32],
+        beta1: Optional[Float32],
+        beta2: Optional[Float32],
         tma_atom_grad: Optional[cute.CopyAtom],
         tma_src_grad: Optional[cute.Tensor],
         tma_atom_act: cute.CopyAtom,
