@@ -602,12 +602,10 @@ class MXFP8GatedQuantizeG2SKernel(MXFP8QuantizeGeneralG2SKernel):
         # The block processed by a CTA, consisting of NUM_TILES vertically stacked tiles
         cta_block = (NUM_TILES * TILE_ROWS, TILE_COLS)
 
-        # The scales block processed by a CTA, consisting of NUM_TILES vertically stacked scale tiles
-        cta_block_row_scales = (NUM_TILES * TILE_ROWS, TILE_COLS // MXFP8_BLOCK_SCALING_SIZE)
-        cta_block_col_scales = (NUM_TILES * TILE_ROWS // MXFP8_BLOCK_SCALING_SIZE, TILE_COLS)
-
         # Prepare parameters to pass to the SMEM tile quantize function by dact / dgate / output, where
         # for each group, input, quantized output are SMEM tiles, and scales are GMEM tiles
+        cta_block_row_scales = (NUM_TILES * TILE_ROWS, TILE_COLS // MXFP8_BLOCK_SCALING_SIZE)
+        cta_block_col_scales = (NUM_TILES * TILE_ROWS // MXFP8_BLOCK_SCALING_SIZE, TILE_COLS)
         if cutlass.const_expr(cfg.IS_BWD):
             if cutlass.const_expr(cfg.ROWWISE):
                 mS_row_dact = cute.local_tile(mS_row_dact, cta_block_row_scales, cta_coord)
