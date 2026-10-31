@@ -127,9 +127,9 @@ def _gated_element(
 
 @cute.jit
 def gated_elementwise_smem_tile(
-    sAct_tile: cute.Tensor,  # (TILE_Y, TILE_X) act half of the input; receives the act output
-    sGate_tile: cute.Tensor,  # (TILE_Y, TILE_X) gate half; receives the gate output (bwd only)
-    sGrad_tile: Optional[cute.Tensor],  # (TILE_Y, TILE_X) incoming gradient (bwd only)
+    sAct_tile: cute.Tensor,
+    sGate_tile: cute.Tensor,
+    sGrad_tile: Optional[cute.Tensor],
     limit: Optional[Float32],
     alpha: Optional[Float32],
     glu_linear_offset: Optional[Float32],
@@ -186,29 +186,16 @@ def gated_elementwise_smem_tile(
 
 
 @cute.jit
-def quantize_gated_mxfp8_smem_tile(
-    sAct_tile: cute.Tensor,
-    sGate_tile: cute.Tensor,
-    sGrad_tile: Optional[cute.Tensor],
-    sO_row_act_tile: Optional[cute.Tensor],
-    mS_row_act_stage: Optional[cute.Tensor],
-    sO_row_gate_tile: Optional[cute.Tensor],  # bwd only
-    mS_row_gate_stage: Optional[cute.Tensor],  # bwd only
-    sO_col_act_tile: Optional[cute.Tensor],
-    mS_col_act_stage: Optional[cute.Tensor],
-    sO_col_gate_tile: Optional[cute.Tensor],  # bwd only
-    mS_col_gate_stage: Optional[cute.Tensor],  # bwd only
+def quantize_mxfp8_smem_tile_general_partial(
+    sX_tile: cute.Tensor,
+    sO_row_tile: Optional[cute.Tensor],
+    mS_row_stage: Optional[cute.Tensor],
+    sO_col_tile: Optional[cute.Tensor],
+    mS_col_stage: Optional[cute.Tensor],
     tile_row_start: Int32,
     tile_col_start: Int32,
     M: Int32,
     N: Int32,
-    limit: Optional[Float32],
-    alpha: Optional[Float32],
-    glu_linear_offset: Optional[Float32],
-    beta1: Optional[Float32],
-    beta2: Optional[Float32],
-    ACTIVATION: cutlass.Constexpr[str],
-    IS_BWD: cutlass.Constexpr[bool],
     ROWWISE: cutlass.Constexpr[bool],
     COLWISE: cutlass.Constexpr[bool],
     MAX_NORM_RCP: cutlass.Constexpr[float],
@@ -218,65 +205,39 @@ def quantize_gated_mxfp8_smem_tile(
     TILE_X: cutlass.Constexpr[int],
     TILE_Y: cutlass.Constexpr[int],
 ):
-    """Apply the gated op to one staged tile, then MXFP8-quantize the result(s) as a plain cast."""
-    gated_elementwise_smem_tile(
-        sAct_tile,
-        sGate_tile,
-        sGrad_tile,
-        limit,
-        alpha,
-        glu_linear_offset,
-        beta1,
-        beta2,
-        ACTIVATION=ACTIVATION,
-        IS_BWD=IS_BWD,
+    """A partial quantize_mxfp8_smem_tile_general function with some args fixed."""
+    quantize_mxfp8_smem_tile_general(
+        sX_tile,
+        None,
+        sO_row_tile,
+        mS_row_stage,
+        sO_col_tile,
+        mS_col_stage,
+        None,
+        tile_row_start,
+        tile_col_start,
+        M,
+        N,
+        ROWWISE=ROWWISE,
+        COLWISE=COLWISE,
+        WITH_AMAX=False,
+        WITH_ACT=False,
+        WITH_DACT=False,
+        ACTIVATION=None,
+        MAX_NORM_RCP=MAX_NORM_RCP,
         DTYPE=DTYPE,
+        FP8_DTYPE=FP8_DTYPE,
+        WITH_GEMM_SWIZZLED_SCALES=WITH_GEMM_SWIZZLED_SCALES,
         TILE_X=TILE_X,
+        TILE_Y=TILE_Y,
+        # The gated op maps the zeros TMA fills out-of-bounds elements with to zero.
+        SKIP_INPUT_MASKING=True,
+        SKIP_SCALE_BOUNDS=False,
+        CACHE_ACTIVATION=False,
+        DBIAS_REDUCTION_IN_COLWISE=False,
+        COLWISE_DBIAS_REDUCTION_ONLY=False,
+        DBIAS_REDUCTION_IN_ROWWISE=False,
     )
-    # The rowwise pass reads elements other threads wrote.
-    if cutlass.const_expr(ROWWISE):
-        cute.arch.sync_threads()
-
-    # The act output and, backward, the gate output. Both share this tile's coordinates; only
-    # their output buffers and scale views differ.
-    halves = [(sAct_tile, sO_row_act_tile, mS_row_act_stage, sO_col_act_tile, mS_col_act_stage)]
-    if cutlass.const_expr(IS_BWD):
-        halves.append(
-            (sGate_tile, sO_row_gate_tile, mS_row_gate_stage, sO_col_gate_tile, mS_col_gate_stage)
-        )
-    for sX_tile, sO_row_tile, mS_row_stage, sO_col_tile, mS_col_stage in halves:
-        quantize_mxfp8_smem_tile_general(
-            sX_tile,
-            None,
-            sO_row_tile,
-            mS_row_stage,
-            sO_col_tile,
-            mS_col_stage,
-            None,
-            tile_row_start,
-            tile_col_start,
-            M,
-            N,
-            ROWWISE=ROWWISE,
-            COLWISE=COLWISE,
-            WITH_AMAX=False,
-            WITH_ACT=False,
-            WITH_DACT=False,
-            ACTIVATION=None,
-            MAX_NORM_RCP=MAX_NORM_RCP,
-            DTYPE=DTYPE,
-            FP8_DTYPE=FP8_DTYPE,
-            WITH_GEMM_SWIZZLED_SCALES=WITH_GEMM_SWIZZLED_SCALES,
-            TILE_X=TILE_X,
-            TILE_Y=TILE_Y,
-            # The gated op maps the zeros TMA fills out-of-bounds elements with to zero.
-            SKIP_INPUT_MASKING=True,
-            SKIP_SCALE_BOUNDS=False,
-            CACHE_ACTIVATION=False,
-            DBIAS_REDUCTION_IN_COLWISE=False,
-            COLWISE_DBIAS_REDUCTION_ONLY=False,
-            DBIAS_REDUCTION_IN_ROWWISE=False,
-        )
 
 
 @cute.jit
@@ -342,6 +303,11 @@ class MXFP8GatedQuantizeG2SKernel(MXFP8QuantizeGeneralG2SKernel):
         super().__init__(cfg)
         # Same occupancy hint as the general kernel with a fused activation
         self._MIN_BLOCKS_PER_MP = 1
+        # Every pipeline stage has its own SMEM buffers, so a CTA with fewer tiles than stages
+        # would allocate buffers it never fills
+        assert (
+            self._NUM_STAGES <= self._NUM_TILES
+        ), f"{self._NUM_STAGES} pipeline stages for {self._NUM_TILES} tiles per CTA"
 
     @cute.jit
     def __call__(
@@ -376,20 +342,18 @@ class MXFP8GatedQuantizeG2SKernel(MXFP8QuantizeGeneralG2SKernel):
         # Pick any mO that is used just to get N
         mO = mO_row if mO_row is not None else mO_col
         # FWD: mO is [M, N]; BWD: mGrad is [M, N]
-        N = mGrad.shape[1] if self.cfg.IS_BWD else mO.shape[1]
+        N = mO.shape[1] if not self.cfg.IS_BWD else mGrad.shape[1]
 
-        if cutlass.const_expr(self.cfg.WITH_GEMM_SWIZZLED_SCALES and not self.cfg.IS_BWD):
-            mS_row, mS_col = derive_swizzled_scale_layout(
-                M, N, self.cfg.ROWWISE, self.cfg.COLWISE, mS_row, mS_col
-            )
+        # The act and gate halves of the [M, 2N] input
+        mAct = cute.local_tile(mGatedInput, (M, N), (0, 0))
+        mGate = cute.local_tile(mGatedInput, (M, N), (0, 1))
 
-        mS_row_gate = None
-        mS_col_gate = None
-        mO_row_gate = None
-        mO_col_gate = None
+        mO_row_dact = mO_row_dgate = mO_col_dact = mO_col_dgate = None  # BWD only
+        mS_row_dact = mS_row_dgate = mS_col_dact = mS_col_dgate = None  # BWD only
         if cutlass.const_expr(self.cfg.IS_BWD):
-            # Split the [M, 2N] output and its scales into the act and gate halves
-            mS_row, mS_row_gate, mS_col, mS_col_gate = _split_gated_scales(
+            # The [M, 2N] output is [d act | d gate]; the kernel takes its two halves
+            # TODO(kainingz): how to implement this in a more elegant way
+            mS_row_dact, mS_row_dgate, mS_col_dact, mS_col_dgate = _split_gated_scales(
                 mS_row,
                 mS_col,
                 M,
@@ -399,29 +363,39 @@ class MXFP8GatedQuantizeG2SKernel(MXFP8QuantizeGeneralG2SKernel):
                 self.cfg.WITH_GEMM_SWIZZLED_SCALES,
             )
             if cutlass.const_expr(self.cfg.ROWWISE):
-                mO_row_gate = cute.local_tile(mO_row, (M, N), (0, 1))
-                mO_row = cute.local_tile(mO_row, (M, N), (0, 0))
+                mO_row_dact = cute.local_tile(mO_row, (M, N), (0, 0))
+                mO_row_dgate = cute.local_tile(mO_row, (M, N), (0, 1))
             if cutlass.const_expr(self.cfg.COLWISE):
-                mO_col_gate = cute.local_tile(mO_col, (M, N), (0, 1))
-                mO_col = cute.local_tile(mO_col, (M, N), (0, 0))
+                mO_col_dact = cute.local_tile(mO_col, (M, N), (0, 0))
+                mO_col_dgate = cute.local_tile(mO_col, (M, N), (0, 1))
+            # In BWD mode we won't use these, and we should set them to None so we don't build TMA atoms for them
+            mO_row = mO_col = mS_row = mS_col = None
+        elif cutlass.const_expr(self.cfg.WITH_GEMM_SWIZZLED_SCALES):
+            mS_row, mS_col = derive_swizzled_scale_layout(
+                M, N, self.cfg.ROWWISE, self.cfg.COLWISE, mS_row, mS_col
+            )
 
         atoms = self._make_tma_atoms(
             mGrad,
-            cute.local_tile(mGatedInput, (M, N), (0, 0)),  # act half
-            cute.local_tile(mGatedInput, (M, N), (0, 1)),  # gate half
+            mAct,
+            mGate,
             mO_row,
-            mO_row_gate,
             mO_col,
-            mO_col_gate,
+            mO_row_dact,
+            mO_row_dgate,
+            mO_col_dact,
+            mO_col_dgate,
         )
         # The TMA atoms are spread from a list, which pylint cannot count
         self.kernel(  # pylint: disable=no-value-for-parameter
             M,
             N,
             mS_row,
-            mS_row_gate,
             mS_col,
-            mS_col_gate,
+            mS_row_dact,
+            mS_row_dgate,
+            mS_col_dact,
+            mS_col_dgate,
             limit,
             alpha,
             glu_linear_offset,
@@ -429,17 +403,14 @@ class MXFP8GatedQuantizeG2SKernel(MXFP8QuantizeGeneralG2SKernel):
             beta2,
             *atoms,
         ).launch(
-            grid=self._grid(M, N),
+            grid=[
+                cute.ceil_div(N, self._TILE_COLS),
+                cute.ceil_div(M, self._TILE_ROWS * self._NUM_TILES),
+            ],
             block=[self._THREADS_PER_CTA],
             min_blocks_per_mp=self._MIN_BLOCKS_PER_MP,
             stream=stream,
         )
-
-    def _grid(self, M: Int32, N: Int32):
-        return [
-            cute.ceil_div(N, self._TILE_COLS),
-            cute.ceil_div(M, self._TILE_ROWS * self._NUM_TILES),
-        ]
 
     @cute.jit
     def _make_tma_atoms(
@@ -447,12 +418,14 @@ class MXFP8GatedQuantizeG2SKernel(MXFP8QuantizeGeneralG2SKernel):
         mGrad: Optional[cute.Tensor],
         mAct: cute.Tensor,
         mGate: cute.Tensor,
-        mO_row_act: Optional[cute.Tensor],
-        mO_row_gate: Optional[cute.Tensor],
-        mO_col_act: Optional[cute.Tensor],
-        mO_col_gate: Optional[cute.Tensor],
+        mO_row: Optional[cute.Tensor],  # FWD only
+        mO_col: Optional[cute.Tensor],  # FWD only
+        mO_row_dact: Optional[cute.Tensor],  # BWD only
+        mO_row_dgate: Optional[cute.Tensor],  # BWD only
+        mO_col_dact: Optional[cute.Tensor],  # BWD only
+        mO_col_dgate: Optional[cute.Tensor],  # BWD only
     ):
-        """TMA atoms and their gmem views for every (TILE_ROWS, TILE_COLS) operand; None if absent."""
+        """Build TMA atoms for input / quantized output; scales will not be loaded / stored by TMA."""
         smem_tile_layout = cute.make_ordered_layout(
             (self._TILE_ROWS, self._TILE_COLS), order=(1, 0)
         )
@@ -465,10 +438,12 @@ class MXFP8GatedQuantizeG2SKernel(MXFP8QuantizeGeneralG2SKernel):
             (op_load, mGrad),
             (op_load, mAct),
             (op_load, mGate),
-            (op_store, mO_row_act),
-            (op_store, mO_row_gate),
-            (op_store, mO_col_act),
-            (op_store, mO_col_gate),
+            (op_store, mO_row),
+            (op_store, mO_col),
+            (op_store, mO_row_dact),
+            (op_store, mO_row_dgate),
+            (op_store, mO_col_dact),
+            (op_store, mO_col_dgate),
         ):
             if cutlass.const_expr(mT is None):
                 atoms.extend([None, None])
@@ -480,73 +455,74 @@ class MXFP8GatedQuantizeG2SKernel(MXFP8QuantizeGeneralG2SKernel):
                 )
         return atoms
 
-    @cute.jit
-    def _copy_inputs_to_stage(
-        self,
-        tile_y: Int32,
-        tile_x: Int32,
-        stage: Int32,
-        tma_bar_ptr: cute.Pointer,
-        tma_atom_grad: Optional[cute.CopyAtom],
-        tXgGrad: Optional[cute.Tensor],
-        tXsGrad: Optional[cute.Tensor],
-        tma_atom_act: cute.CopyAtom,
-        tXgAct: cute.Tensor,
-        tXsAct: cute.Tensor,
-        tma_atom_gate: cute.CopyAtom,
-        tXgGate: cute.Tensor,
-        tXsGate: cute.Tensor,
-    ):
-        """Issue this tile's input TMA loads into the pipeline stage, all on one barrier."""
-        if cutlass.const_expr(self.cfg.IS_BWD):
-            cute.copy(
-                tma_atom_grad,
-                tXgGrad[(None, (tile_y, tile_x))],
-                tXsGrad[(None, stage)],
-                tma_bar_ptr=tma_bar_ptr,
-            )
-        cute.copy(
-            tma_atom_act,
-            tXgAct[(None, (tile_y, tile_x))],
-            tXsAct[(None, stage)],
-            tma_bar_ptr=tma_bar_ptr,
-        )
-        cute.copy(
-            tma_atom_gate,
-            tXgGate[(None, (tile_y, tile_x))],
-            tXsGate[(None, stage)],
-            tma_bar_ptr=tma_bar_ptr,
-        )
-
     @cute.kernel
     def kernel(
         self,
         M: Int32,
         N: Int32,
-        mS_row_act: Optional[cute.Tensor],
-        mS_row_gate: Optional[cute.Tensor],
-        mS_col_act: Optional[cute.Tensor],
-        mS_col_gate: Optional[cute.Tensor],
+        mS_row: Optional[cute.Tensor],  # FWD only
+        mS_col: Optional[cute.Tensor],  # FWD only
+        mS_row_dact: Optional[cute.Tensor],  # BWD only
+        mS_row_dgate: Optional[cute.Tensor],  # BWD only
+        mS_col_dact: Optional[cute.Tensor],  # BWD only
+        mS_col_dgate: Optional[cute.Tensor],  # BWD only
         limit: Optional[Float32],
         alpha: Optional[Float32],
         glu_linear_offset: Optional[Float32],
         beta1: Optional[Float32],
         beta2: Optional[Float32],
+        # TMA for mGrad, only used in BWD
         tma_atom_grad: Optional[cute.CopyAtom],
         tma_src_grad: Optional[cute.Tensor],
+        # TMA for mAct and mGate, used in both FWD and BWD
         tma_atom_act: cute.CopyAtom,
         tma_src_act: cute.Tensor,
         tma_atom_gate: cute.CopyAtom,
         tma_src_gate: cute.Tensor,
-        tma_atom_row_act: Optional[cute.CopyAtom],
-        tma_dst_row_act: Optional[cute.Tensor],
-        tma_atom_row_gate: Optional[cute.CopyAtom],
-        tma_dst_row_gate: Optional[cute.Tensor],
-        tma_atom_col_act: Optional[cute.CopyAtom],
-        tma_dst_col_act: Optional[cute.Tensor],
-        tma_atom_col_gate: Optional[cute.CopyAtom],
-        tma_dst_col_gate: Optional[cute.Tensor],
+        # TMA for mO_row/col, only used in FWD
+        tma_atom_row: Optional[cute.CopyAtom],
+        tma_dst_row: Optional[cute.Tensor],
+        tma_atom_col: Optional[cute.CopyAtom],
+        tma_dst_col: Optional[cute.Tensor],
+        # TMA for mO_row/col_dact/dgate, only used in BWD
+        tma_atom_row_dact: Optional[cute.CopyAtom],
+        tma_dst_row_dact: Optional[cute.Tensor],
+        tma_atom_row_dgate: Optional[cute.CopyAtom],
+        tma_dst_row_dgate: Optional[cute.Tensor],
+        tma_atom_col_dact: Optional[cute.CopyAtom],
+        tma_dst_col_dact: Optional[cute.Tensor],
+        tma_atom_col_dgate: Optional[cute.CopyAtom],
+        tma_dst_col_dgate: Optional[cute.Tensor],
     ):
+        """
+        FWD mode:
+        mAct: activation half input
+        mGate: gate half input
+        mO_row/col: quantized output for row / column directions
+        mS_row/col: output scales for row / column directions
+
+        BWD mode:
+        mGrad: incoming gradient
+        mAct: activation half input from FWD pass
+        mGate: gate half input from FWD pass
+        mO_row/col_dact: quantized activation gradient for row / column directions
+        mO_row/col_dgate: quantized gate gradient for row / column directions
+        mS_row/col_dact: output scales for activation gradient row / column directions
+        mS_row/col_dgate: output scales for gate gradient row / column directions
+        mO_row/col: quantized gradient (both activation and gate) for row / column directions
+        mS_row/col: output scales for gradient (both activation and gate) row / column directions
+
+        mAct: both FWD and BWD
+        mGate: both FWD and BWD
+        mGrad: BWD only
+        mO_row/col: both FWD (N) and BWD (2N)
+        mS_row/col: both FWD (N) and BWD (2N)
+        mO_row/col_dact: BWD only
+        mO_row/col_dgate: BWD only
+        mS_row/col_dact: BWD only
+        mS_row/col_dgate: BWD only
+        """
+
         cfg = self.cfg
         DTYPE = cfg.DTYPE
         TILE_ROWS = self._TILE_ROWS
@@ -554,17 +530,9 @@ class MXFP8GatedQuantizeG2SKernel(MXFP8QuantizeGeneralG2SKernel):
         NUM_STAGES = self._NUM_STAGES
         NUM_TILES = self._NUM_TILES
 
-        # Scale views tiled like the general kernel's
+        # The scales of one (TILE_ROWS, TILE_COLS) tile
         row_scale_tile = (TILE_ROWS, TILE_COLS // MXFP8_BLOCK_SCALING_SIZE)
         col_scale_tile = (TILE_ROWS // MXFP8_BLOCK_SCALING_SIZE, TILE_COLS)
-        if cutlass.const_expr(cfg.ROWWISE):
-            mS_row_act = cute.zipped_divide(mS_row_act, row_scale_tile)
-            if cutlass.const_expr(cfg.IS_BWD):
-                mS_row_gate = cute.zipped_divide(mS_row_gate, row_scale_tile)
-        if cutlass.const_expr(cfg.COLWISE):
-            mS_col_act = cute.zipped_divide(mS_col_act, col_scale_tile)
-            if cutlass.const_expr(cfg.IS_BWD):
-                mS_col_gate = cute.zipped_divide(mS_col_gate, col_scale_tile)
 
         # Shared memory: one ((TILE_ROWS, TILE_COLS), NUM_STAGES) ring buffer per operand
         smem = cutlass.memory.SmemAllocator()
@@ -574,40 +542,47 @@ class MXFP8GatedQuantizeG2SKernel(MXFP8QuantizeGeneralG2SKernel):
             mbar_storage: cute.struct.MemRange[cute.Int64, 2 * NUM_STAGES]
 
         storage = smem.allocate(BarrierStorage)
-        stage_layout = cute.make_layout(
+        stages_layout = cute.make_layout(
             ((TILE_ROWS, TILE_COLS), NUM_STAGES),
             stride=((TILE_COLS, 1), TILE_ROWS * TILE_COLS),
         )
-        sAct = smem.allocate_tensor(DTYPE, stage_layout, byte_alignment=128)
-        sGate = smem.allocate_tensor(DTYPE, stage_layout, byte_alignment=128)
+
+        # Allocate SMEM buffers for inputs
+        sAct = smem.allocate_tensor(DTYPE, stages_layout, byte_alignment=128)
+        sGate = smem.allocate_tensor(DTYPE, stages_layout, byte_alignment=128)
         sGrad = None
         if cutlass.const_expr(cfg.IS_BWD):
-            sGrad = smem.allocate_tensor(DTYPE, stage_layout, byte_alignment=128)
-        sO_row_act = None
-        sO_row_gate = None
-        sO_col_act = None
-        sO_col_gate = None
+            sGrad = smem.allocate_tensor(DTYPE, stages_layout, byte_alignment=128)
+
+        # Allocate SMEM buffers for outputs
+        sO_row = sO_col = None
+        sO_row_dact = sO_row_dgate = sO_col_dact = sO_col_dgate = None
         if cutlass.const_expr(cfg.ROWWISE):
-            sO_row_act = smem.allocate_tensor(cfg.FP8_DTYPE, stage_layout, byte_alignment=128)
             if cutlass.const_expr(cfg.IS_BWD):
-                sO_row_gate = smem.allocate_tensor(cfg.FP8_DTYPE, stage_layout, byte_alignment=128)
+                sO_row_dact = smem.allocate_tensor(cfg.FP8_DTYPE, stages_layout, byte_alignment=128)
+                sO_row_dgate = smem.allocate_tensor(cfg.FP8_DTYPE, stages_layout, byte_alignment=128)
+            else:
+                sO_row = smem.allocate_tensor(cfg.FP8_DTYPE, stages_layout, byte_alignment=128)
         if cutlass.const_expr(cfg.COLWISE):
-            sO_col_act = smem.allocate_tensor(cfg.FP8_DTYPE, stage_layout, byte_alignment=128)
             if cutlass.const_expr(cfg.IS_BWD):
-                sO_col_gate = smem.allocate_tensor(cfg.FP8_DTYPE, stage_layout, byte_alignment=128)
+                sO_col_dact = smem.allocate_tensor(cfg.FP8_DTYPE, stages_layout, byte_alignment=128)
+                sO_col_dgate = smem.allocate_tensor(cfg.FP8_DTYPE, stages_layout, byte_alignment=128)
+            else:
+                sO_col = smem.allocate_tensor(cfg.FP8_DTYPE, stages_layout, byte_alignment=128)
 
         warp_idx = cute.arch.make_warp_uniform(cute.arch.warp_idx())
         bidx, bidy, _ = cute.arch.block_idx()
 
+        # Issue TMA descriptor prefetch using the TMA warp (warp 0)
         if warp_idx == 0:
-            if cutlass.const_expr(cfg.IS_BWD):
-                cute.nvgpu.cpasync.prefetch_descriptor(tma_atom_grad)
-            cute.nvgpu.cpasync.prefetch_descriptor(tma_atom_act)
-            cute.nvgpu.cpasync.prefetch_descriptor(tma_atom_gate)
+            for load_atom in (tma_atom_act, tma_atom_gate, tma_atom_grad):
+                if cutlass.const_expr(load_atom is not None):
+                    cute.nvgpu.cpasync.prefetch_descriptor(load_atom)
 
-        # Warp 0's elected thread produces (issues TMA), every warp consumes
+        # TMA warp (warp 0)'s elected thread produces (issues TMA), every warp consumes
         producer_group = pipeline.CooperativeGroup(pipeline.Agent.Thread, 1)
         consumer_group = pipeline.CooperativeGroup(pipeline.Agent.Thread, self._NUM_WARPS)
+        # Input has 2 tiles (act + gate) in FWD, 3 tiles (grad + act + gate) in BWD
         num_inputs = 3 if cfg.IS_BWD else 2
         mainloop_pipeline = pipeline.PipelineTmaAsync.create(
             barrier_storage=storage.mbar_storage.data_ptr(),
@@ -621,35 +596,64 @@ class MXFP8GatedQuantizeG2SKernel(MXFP8QuantizeGeneralG2SKernel):
         prod_state = pipeline.make_pipeline_state(pipeline.PipelineUserType.Producer, NUM_STAGES)
         cons_state = pipeline.make_pipeline_state(pipeline.PipelineUserType.Consumer, NUM_STAGES)
 
-        # Partition every operand for TMA (single CTA, no multicast)
-        cta_tiler = (TILE_ROWS, TILE_COLS)
-        tXsGrad = None
-        tXgGrad = None
+        cta_coord = (bidy, bidx)
+        # Shape of each individual tile. A CTA processes one tile at a time
+        tile_shape = (TILE_ROWS, TILE_COLS)
+        # The block processed by a CTA, consisting of NUM_TILES vertically stacked tiles
+        cta_block = (NUM_TILES * TILE_ROWS, TILE_COLS)
+
+        # The scales block processed by a CTA, consisting of NUM_TILES vertically stacked scale tiles
+        cta_block_row_scales = (NUM_TILES * TILE_ROWS, TILE_COLS // MXFP8_BLOCK_SCALING_SIZE)
+        cta_block_col_scales = (NUM_TILES * TILE_ROWS // MXFP8_BLOCK_SCALING_SIZE, TILE_COLS)
+
+        # Prepare parameters to pass to the SMEM tile quantize function by dact / dgate / output, where
+        # for each group, input, quantized output are SMEM tiles, and scales are GMEM tiles
         if cutlass.const_expr(cfg.IS_BWD):
-            tXsGrad, tXgGrad = cute.nvgpu.cpasync.tma_partition(
-                tma_atom_grad,
-                0,
-                cute.make_layout(1),
-                sGrad,
-                cute.zipped_divide(tma_src_grad, cta_tiler),
-            )
-        tXsAct, tXgAct = cute.nvgpu.cpasync.tma_partition(
-            tma_atom_act, 0, cute.make_layout(1), sAct, cute.zipped_divide(tma_src_act, cta_tiler)
-        )
-        tXsGate, tXgGate = cute.nvgpu.cpasync.tma_partition(
-            tma_atom_gate,
-            0,
-            cute.make_layout(1),
-            sGate,
-            cute.zipped_divide(tma_src_gate, cta_tiler),
-        )
-        # Output (atom, smem partition, gmem partition) triples, act half first
-        outputs = []
+            if cutlass.const_expr(cfg.ROWWISE):
+                mS_row_dact = cute.local_tile(mS_row_dact, cta_block_row_scales, cta_coord)
+                mS_row_dgate = cute.local_tile(mS_row_dgate, cta_block_row_scales, cta_coord)
+            if cutlass.const_expr(cfg.COLWISE):
+                mS_col_dact = cute.local_tile(mS_col_dact, cta_block_col_scales, cta_coord)
+                mS_col_dgate = cute.local_tile(mS_col_dgate, cta_block_col_scales, cta_coord)
+            # In BWD mode we output gradient for both the act and gate halves, which are stored in sAct and sGate respectively
+            tile_quantizer_params = [
+                (sAct, sO_row_dact, mS_row_dact, sO_col_dact, mS_col_dact), # We will write unquantized dact to sAct in-place
+                (sGate, sO_row_dgate, mS_row_dgate, sO_col_dgate, mS_col_dgate), # We will write unquantized dgate to sGate in-place
+            ]
+        else:
+            if cutlass.const_expr(cfg.ROWWISE):
+                mS_row = cute.local_tile(mS_row, cta_block_row_scales, cta_coord)
+            if cutlass.const_expr(cfg.COLWISE):
+                mS_col = cute.local_tile(mS_col, cta_block_col_scales, cta_coord)
+            # In FWD mode we only output the result after the gated op, which is stored in sAct
+            tile_quantizer_params = [(sAct, sO_row, mS_row, sO_col, mS_col)] # We will write unquantized output to sAct in-place
+
+        # Prepare input TMA (atom, smem partition, gmem partition) triples: act and gate, and BWD's grad
+        inputs = []
+        for atom_in, src_in, sX_in in (
+            (tma_atom_act, tma_src_act, sAct),
+            (tma_atom_gate, tma_src_gate, sGate),
+            (tma_atom_grad, tma_src_grad, sGrad),
+        ):
+            if cutlass.const_expr(atom_in is not None):
+                tXsX_in, tXgX_in = cute.nvgpu.cpasync.tma_partition(
+                    atom_in,
+                    0,
+                    cute.make_layout(1),
+                    sX_in,
+                    cute.zipped_divide(cute.local_tile(src_in, cta_block, cta_coord), tile_shape),
+                )
+                inputs.append((atom_in, tXsX_in, tXgX_in))
+
+        # Prepare output TMA (atom, smem partition, gmem partition) triples of the outputs this config has
+        TMA_atom_and_partitions = []
         for atom_out, dst_out, sO_out in (
-            (tma_atom_row_act, tma_dst_row_act, sO_row_act),
-            (tma_atom_row_gate, tma_dst_row_gate, sO_row_gate),
-            (tma_atom_col_act, tma_dst_col_act, sO_col_act),
-            (tma_atom_col_gate, tma_dst_col_gate, sO_col_gate),
+            (tma_atom_row, tma_dst_row, sO_row), # FWD only
+            (tma_atom_col, tma_dst_col, sO_col), # FWD only
+            (tma_atom_row_dact, tma_dst_row_dact, sO_row_dact), # BWD only
+            (tma_atom_row_dgate, tma_dst_row_dgate, sO_row_dgate), # BWD only
+            (tma_atom_col_dact, tma_dst_col_dact, sO_col_dact), # BWD only
+            (tma_atom_col_dgate, tma_dst_col_dgate, sO_col_dgate), # BWD only
         ):
             if cutlass.const_expr(atom_out is not None):
                 tXsO_out, tXgO_out = cute.nvgpu.cpasync.tma_partition(
@@ -657,87 +661,58 @@ class MXFP8GatedQuantizeG2SKernel(MXFP8QuantizeGeneralG2SKernel):
                     0,
                     cute.make_layout(1),
                     sO_out,
-                    cute.zipped_divide(dst_out, cta_tiler),
+                    cute.zipped_divide(cute.local_tile(dst_out, cta_block, cta_coord), tile_shape),
                 )
-                outputs.append((atom_out, tXsO_out, tXgO_out))
+                TMA_atom_and_partitions.append((atom_out, tXsO_out, tXgO_out))
 
         # Barrier init must be visible to every thread
         cute.arch.sync_threads()
 
         # Prologue: fill the pipeline
         if warp_idx == 0:
-            for s in cutlass.range_constexpr(min(NUM_STAGES, NUM_TILES)):
+            for s in cutlass.range_constexpr(NUM_STAGES):
                 mainloop_pipeline.producer_acquire(prod_state)
-                self._copy_inputs_to_stage(
-                    bidy * NUM_TILES + s,
-                    bidx,
-                    prod_state.index,
-                    mainloop_pipeline.producer_get_barrier(prod_state),
-                    tma_atom_grad,
-                    tXgGrad,
-                    tXsGrad,
-                    tma_atom_act,
-                    tXgAct,
-                    tXsAct,
-                    tma_atom_gate,
-                    tXgGate,
-                    tXsGate,
-                )
+                for load_atom, load_sX, load_gX in inputs:
+                    cute.copy(
+                        load_atom,
+                        load_gX[(None, (s, 0))],
+                        load_sX[(None, prod_state.index)],
+                        tma_bar_ptr=mainloop_pipeline.producer_get_barrier(prod_state),
+                    )
                 mainloop_pipeline.producer_commit(prod_state)
                 prod_state.advance()
 
         for tile_idx in cutlass.range(NUM_TILES, unroll=1):
             mainloop_pipeline.consumer_wait(cons_state)
-            # This tile reuses the output buffers of the tile NUM_STAGES ago; wait until TMA has
-            # read them.
+            # We only reuse previously used SMEM buffers when we have more tiles to process than pipeline stages, and only
+            # after we've already finished one round and wrap around to the start of the ring buffer
             if cutlass.const_expr(NUM_TILES > NUM_STAGES):
-                if warp_idx == 0:
-                    cute.arch.cp_async_bulk_wait_group(NUM_STAGES - 1, read=True)
-                cute.arch.sync_threads()
-            stage_idx = cons_state.index
-            tile_idx_y = bidy * NUM_TILES + tile_idx
-            scale_coord = (None, (tile_idx_y, bidx))
+                if tile_idx >= NUM_STAGES:
+                    # Only allow at most NUM_STAGES - 1 store groups reading SMEM on the fly, so the tile NUM_STAGES
+                    # ago must finish before we reuse its SMEM buffer
+                    if warp_idx == 0:
+                        cute.arch.cp_async_bulk_wait_group(NUM_STAGES - 1, read=True)
+                    cute.arch.sync_threads()
+            # The tile should be ready to use now
 
+            stage_idx = cons_state.index
+            tile_coord = (tile_idx, 0)  # within this CTA's block
+
+            # Select current stage's SMEM tile
+            sAct_tile = sAct[(None, stage_idx)]
+            sGate_tile = sGate[(None, stage_idx)]
             sGrad_tile = None
             if cutlass.const_expr(cfg.IS_BWD):
                 sGrad_tile = sGrad[(None, stage_idx)]
-            sO_row_act_tile = None
-            mS_row_act_stage = None
-            sO_row_gate_tile = None
-            mS_row_gate_stage = None
-            if cutlass.const_expr(cfg.ROWWISE):
-                sO_row_act_tile = sO_row_act[(None, stage_idx)]
-                mS_row_act_stage = cute.flatten(mS_row_act[scale_coord])
-                if cutlass.const_expr(cfg.IS_BWD):
-                    sO_row_gate_tile = sO_row_gate[(None, stage_idx)]
-                    mS_row_gate_stage = cute.flatten(mS_row_gate[scale_coord])
-            sO_col_act_tile = None
-            mS_col_act_stage = None
-            sO_col_gate_tile = None
-            mS_col_gate_stage = None
-            if cutlass.const_expr(cfg.COLWISE):
-                sO_col_act_tile = sO_col_act[(None, stage_idx)]
-                mS_col_act_stage = cute.flatten(mS_col_act[scale_coord])
-                if cutlass.const_expr(cfg.IS_BWD):
-                    sO_col_gate_tile = sO_col_gate[(None, stage_idx)]
-                    mS_col_gate_stage = cute.flatten(mS_col_gate[scale_coord])
 
-            quantize_gated_mxfp8_smem_tile(
-                sAct[(None, stage_idx)],
-                sGate[(None, stage_idx)],
+            # Compute the gated op on this tile in fp32, cast back to the original dtype,
+            # and store the result in-place in the SMEM tile without quantization.
+            # FWD: write the output into sAct_tile
+            # BWD: write the act half's gradient to sAct_tile, and write the gate half's gradient to sGate_tile
+            gated_elementwise_smem_tile(
+                sAct_tile, # we also store the FWD output / BWD act half's gradient here
+                sGate_tile, # we also store the BWD gate half's gradient here
                 sGrad_tile,
-                sO_row_act_tile,
-                mS_row_act_stage,
-                sO_row_gate_tile,
-                mS_row_gate_stage,
-                sO_col_act_tile,
-                mS_col_act_stage,
-                sO_col_gate_tile,
-                mS_col_gate_stage,
-                tile_idx_y * TILE_ROWS,
-                bidx * TILE_COLS,
-                M,
-                N,
                 limit,
                 alpha,
                 glu_linear_offset,
@@ -745,15 +720,52 @@ class MXFP8GatedQuantizeG2SKernel(MXFP8QuantizeGeneralG2SKernel):
                 beta2,
                 ACTIVATION=cfg.GATED_ACTIVATION,
                 IS_BWD=cfg.IS_BWD,
-                ROWWISE=cfg.ROWWISE,
-                COLWISE=cfg.COLWISE,
-                MAX_NORM_RCP=cfg.MAX_NORM_RCP,
                 DTYPE=DTYPE,
-                FP8_DTYPE=cfg.FP8_DTYPE,
-                WITH_GEMM_SWIZZLED_SCALES=cfg.WITH_GEMM_SWIZZLED_SCALES,
                 TILE_X=TILE_COLS,
-                TILE_Y=TILE_ROWS,
             )
+
+            # The rowwise quantization pass reads elements other threads wrote so we need to sync here
+            if cutlass.const_expr(cfg.ROWWISE):
+                cute.arch.sync_threads()
+
+            # Quantize every output of this tile into its SMEM buffers and scales
+            for sX_out, sO_row_out, mS_row_cta, sO_col_out, mS_col_cta in tile_quantizer_params:
+                # Slice the SMEM / GMEM tile for the current iteration
+                sO_row_tile = None
+                mS_row_stage = None
+                if cutlass.const_expr(cfg.ROWWISE):
+                    sO_row_tile = sO_row_out[(None, stage_idx)]
+                    mS_row_stage = cute.flatten(
+                        cute.local_tile(mS_row_cta, row_scale_tile, tile_coord)
+                    )
+                sO_col_tile = None
+                mS_col_stage = None
+                if cutlass.const_expr(cfg.COLWISE):
+                    sO_col_tile = sO_col_out[(None, stage_idx)]
+                    mS_col_stage = cute.flatten(
+                        cute.local_tile(mS_col_cta, col_scale_tile, tile_coord)
+                    )
+                # Use the general MXFP8 SMEM tile quantize function to quantize it
+                quantize_mxfp8_smem_tile_general_partial(
+                    sX_out[(None, stage_idx)], # The SMEM tile to quantize
+                    sO_row_tile, # SMEM tile for rowwise quantized output
+                    mS_row_stage, # GMEM tile for rowwise quantized scales
+                    sO_col_tile, # SMEM tile for columnwise quantized output
+                    mS_col_stage, # GMEM tile for columnwise quantized scales
+                    # The tile's first row and column in the whole tensor, for bounds checks
+                    (bidy * NUM_TILES + tile_idx) * TILE_ROWS,
+                    bidx * TILE_COLS,
+                    M,
+                    N,
+                    ROWWISE=cfg.ROWWISE,
+                    COLWISE=cfg.COLWISE,
+                    MAX_NORM_RCP=cfg.MAX_NORM_RCP,
+                    DTYPE=DTYPE,
+                    FP8_DTYPE=cfg.FP8_DTYPE,
+                    WITH_GEMM_SWIZZLED_SCALES=cfg.WITH_GEMM_SWIZZLED_SCALES,
+                    TILE_X=TILE_COLS,
+                    TILE_Y=TILE_ROWS,
+                )
 
             # Make the SMEM writes visible to the TMA's async proxy before it reads them
             cute.arch.fence_proxy("async.shared", space="cta")
@@ -761,13 +773,13 @@ class MXFP8GatedQuantizeG2SKernel(MXFP8QuantizeGeneralG2SKernel):
             mainloop_pipeline.consumer_release(cons_state)
 
             if warp_idx == 0:
-                # Output tensors are only read here, inside this dynamic branch, so these loop
-                # targets are fresh names rather than rebindings of values defined outside it.
-                for store_atom, store_sO, store_gO in outputs:
+                # The tile quantize function has already written the quantized outputs to SMEM,
+                # so we can issue TMA stores from SMEM to GMEM
+                for store_atom, store_sO, store_gO in TMA_atom_and_partitions:
                     cute.copy(
                         store_atom,
                         store_sO[(None, stage_idx)],
-                        store_gO[(None, (tile_idx_y, bidx))],
+                        store_gO[(None, (tile_idx, 0))],
                     )
                 cute.arch.cp_async_bulk_commit_group()
 
@@ -778,21 +790,13 @@ class MXFP8GatedQuantizeG2SKernel(MXFP8QuantizeGeneralG2SKernel):
                 next_tile_idx = tile_idx + NUM_STAGES
                 if next_tile_idx < NUM_TILES:
                     mainloop_pipeline.producer_acquire(prod_state)
-                    self._copy_inputs_to_stage(
-                        bidy * NUM_TILES + next_tile_idx,
-                        bidx,
-                        prod_state.index,
-                        mainloop_pipeline.producer_get_barrier(prod_state),
-                        tma_atom_grad,
-                        tXgGrad,
-                        tXsGrad,
-                        tma_atom_act,
-                        tXgAct,
-                        tXsAct,
-                        tma_atom_gate,
-                        tXgGate,
-                        tXsGate,
-                    )
+                    for load_atom, load_sX, load_gX in inputs:
+                        cute.copy(
+                            load_atom,
+                            load_gX[(None, (next_tile_idx, 0))],
+                            load_sX[(None, prod_state.index)],
+                            tma_bar_ptr=mainloop_pipeline.producer_get_barrier(prod_state),
+                        )
                     mainloop_pipeline.producer_commit(prod_state)
                     prod_state.advance()
 
