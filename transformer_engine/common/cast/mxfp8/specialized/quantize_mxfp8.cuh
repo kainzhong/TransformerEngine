@@ -67,6 +67,10 @@ struct _Quantized_Limits<bf16, fp8e4m3> {
 };
 #endif  // #if defined(_ENABLE_MXFMA)
 
+// Seed for MXFP8-block amaxes: the NaN-ignoring abs-max keeps it only for an all-NaN block,
+// which then gets the NaN scale 0xFF.
+__device__ __forceinline__ float block_amax_seed() { return __int_as_float(0x7FC00000); }
+
 template <typename OType, typename IType>
 __device__ __forceinline__ e8m0_t to_e8m0(IType amax) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000) && (defined _ENABLE_MXFMA)
@@ -277,7 +281,7 @@ __global__ void quantize_mxfp8_kernel_cast_only(typename CastTraits::IType *__re
     }
 
     if constexpr (std::is_same_v<IType, float>) {
-      float thread_amax = 0.f;
+      float thread_amax = block_amax_seed();
       IType2 *rInput2 = reinterpret_cast<IType2 *>(&rInput[process_iter % CastTraits::numStages]);
 #pragma unroll
       for (int32_t j = 0; j < numItersIType2 * CastTraits::numUnitsPerChunk; j++) {
@@ -328,7 +332,8 @@ __global__ void quantize_mxfp8_kernel_cast_only(typename CastTraits::IType *__re
         output_units[j] = rOutput[j];
       }
     } else {
-      IType2 thread_amax2{0.f, 0.f};
+      IType2 thread_amax2{static_cast<IType>(block_amax_seed()),
+                          static_cast<IType>(block_amax_seed())};
       IType2 *rInput2 = reinterpret_cast<IType2 *>(&rInput[process_iter % CastTraits::numStages]);
 #pragma unroll
       for (int32_t j = 0; j < numItersIType2 * CastTraits::numUnitsPerChunk; j++) {
@@ -398,7 +403,7 @@ __global__ void quantize_mxfp8_kernel_cast_only(typename CastTraits::IType *__re
     }
 
     if constexpr (std::is_same_v<IType, float>) {
-      float thread_amax = 0.f;
+      float thread_amax = block_amax_seed();
       IType2 *rInput2 = reinterpret_cast<IType2 *>(&rInput[process_iter % CastTraits::numStages]);
 #pragma unroll
       for (int32_t j = 0; j < numItersIType2 * CastTraits::numUnitsPerChunk; j++) {
@@ -449,7 +454,8 @@ __global__ void quantize_mxfp8_kernel_cast_only(typename CastTraits::IType *__re
         output_units[j] = rOutput[j];
       }
     } else {
-      IType2 thread_amax2{0.f, 0.f};
+      IType2 thread_amax2{static_cast<IType>(block_amax_seed()),
+                          static_cast<IType>(block_amax_seed())};
       IType2 *rInput2 = reinterpret_cast<IType2 *>(&rInput[process_iter % CastTraits::numStages]);
 #pragma unroll
       for (int32_t j = 0; j < numItersIType2 * CastTraits::numUnitsPerChunk; j++) {
@@ -1109,7 +1115,8 @@ __global__ void quantize_mxfp8_kernel_cast_only(
             IType2 *rInput2 = reinterpret_cast<IType2 *>(&rInput);
             float2 *sColwiseReduce_2x = reinterpret_cast<float2 *>(sColwiseReduce);
 
-            IType2 row_amax2{0.0f, 0.0f};
+            IType2 row_amax2{static_cast<IType>(block_amax_seed()),
+                             static_cast<IType>(block_amax_seed())};
 #pragma unroll
             for (int32_t i = 0; i < CastTraits::rowChunkElems / 2; i++) {
               ptx::abs_max_2x(row_amax2, row_amax2, rInput2[i]);
@@ -1586,7 +1593,8 @@ __global__ void quantize_mxfp8_kernel_cast_only(
           IType2 *rInput2 = reinterpret_cast<IType2 *>(&rInput);
           float2 *sColwiseReduce_2x = reinterpret_cast<float2 *>(sColwiseReduce);
 
-          IType2 row_amax2{0.0f, 0.0f};
+          IType2 row_amax2{static_cast<IType>(block_amax_seed()),
+                           static_cast<IType>(block_amax_seed())};
 #pragma unroll
           for (int32_t i = 0; i < CastTraits::rowChunkElems / 2; i++) {
             ptx::abs_max_2x(row_amax2, row_amax2, rInput2[i]);

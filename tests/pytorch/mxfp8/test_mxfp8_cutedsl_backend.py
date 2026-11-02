@@ -138,8 +138,7 @@ def set_cutedsl_backend(enabled):
 
 def test_enable_cutedsl_backend_after_import():
     """Test if we can manually enable the CuTeDSL backend without enabling CuTeDSL backend in the beginning."""
-    script = textwrap.dedent(
-        """
+    script = textwrap.dedent("""
         import ctypes
 
         import transformer_engine.pytorch  # pylint: disable=unused-import
@@ -157,8 +156,7 @@ def test_enable_cutedsl_backend_after_import():
         setter(1)
 
         assert tvm_ffi.get_global_func(entrypoint, allow_missing=True) is not None
-        """
-    )
+        """)
     env = os.environ.copy()
     env["NVTE_ENABLE_CUTEDSL_BACKEND"] = "0"
     result = subprocess.run(
@@ -179,10 +177,12 @@ def _restore_backend_choice_from_env():
     set_cutedsl_backend(flag is not None and not flag.startswith("0"))
 
 
-def generate_inputs(M, N, in_dtype, seed=0):
+def generate_inputs(M, N, in_dtype, seed=0, all_nan=False):
     g = torch.Generator(device="cuda").manual_seed(seed)
 
     def fill():
+        if all_nan:
+            return torch.full((M, N), float("nan"), dtype=in_dtype, device="cuda")
         # Mirrors InputsFillCase::uniform in fillCase_special (tests/cpp/test_common.cu) where the uniform range is [-2, 1]
         # and we apply a random sign flip
         v = torch.empty(M, N, dtype=torch.float32, device="cuda").uniform_(-2.0, 1.0, generator=g)
@@ -267,14 +267,16 @@ def extract_quantized_output(out, rowwise, columnwise, swizzled):
     return parts
 
 
-def run_test_case(method, act, shape, block_size, in_dtype, fp8_dtype, swizzled=False):
+def run_test_case(
+    method, act, shape, block_size, in_dtype, fp8_dtype, swizzled=False, all_nan=False
+):
     """Assert the CuTeDSL and CUDA backends produce bit-identical outputs for the
     same input and config.
     """
     M, N = shape
     rowwise = block_size[1] != 1
     columnwise = block_size[0] != 1
-    x, act_input = generate_inputs(M, N, in_dtype)
+    x, act_input = generate_inputs(M, N, in_dtype, all_nan=all_nan)
 
     set_cutedsl_backend(False)
     out_cuda, dbias_cuda = run_quantize(
@@ -312,7 +314,7 @@ def run_test_case(method, act, shape, block_size, in_dtype, fp8_dtype, swizzled=
     if dbias_cuda is not None:
         # CuTeDSL kernel does dbias reduction in a slightly different order than the CUDA kernel,
         # due to the non-associativity of floating-point addition, this will not be bit-identical.
-        torch.testing.assert_close(dbias_cutedsl, dbias_cuda)
+        torch.testing.assert_close(dbias_cutedsl, dbias_cuda, equal_nan=all_nan)
 
 
 # Test cases with only cast kernels (mirrors C++ test's OperatorTest_FusedCastMXFP8_CastOnly).
@@ -370,3 +372,29 @@ def test_sizes(swizzled, method, act, block_size, shape):
 @pytest.mark.parametrize("swizzled", SWIZZLE_MODES, ids=get_swizzle_id)
 def test_dtypes(swizzled, method, act, fp8_dtype, in_dtype):
     run_test_case(method, act, (256, 384), (32, 32), in_dtype, fp8_dtype, swizzled)
+
+
+# All-NaN inputs (mirrors C++ OperatorTest_FusedCastMXFP8_ExceptionalInputs): every block is
+# all-NaN, and both backends must encode its scale as 0xFF.
+# 256x512 reaches the register-resident kernels; 96x128 has partial tiles and scale padding.
+@pytest.mark.parametrize("shape", [(256, 512), (96, 128)], ids=get_shape_id)
+@pytest.mark.parametrize("block_size", BLOCK_SIZES, ids=get_block_id)
+@pytest.mark.parametrize("in_dtype", IN_DTYPES, ids=get_dtype_id)
+@pytest.mark.parametrize("method,act", METHOD_FUSION_CASES, ids=METHOD_FUSION_IDS)
+@pytest.mark.parametrize("swizzled", SWIZZLE_MODES, ids=get_swizzle_id)
+def test_all_nan_inputs(swizzled, method, act, in_dtype, block_size, shape):
+    if method == "CAST_ACT" and act["name"] == "ReLU":
+        pytest.skip(
+            "Forward relu(NaN) differs between backends: CUDA's fmaxf gives 0, CuTeDSL's fused "
+            "cvt.relu keeps NaN"
+        )
+    run_test_case(
+        method,
+        act,
+        shape,
+        block_size,
+        in_dtype,
+        tex.DType.kFloat8E4M3,
+        swizzled,
+        all_nan=True,
+    )
